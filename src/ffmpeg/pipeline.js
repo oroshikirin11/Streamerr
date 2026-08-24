@@ -563,8 +563,28 @@ export class PipelinePlayout extends EventEmitter {
     if (this._extracting.has(key)) return this._extracting.get(key);
 
     const t0 = Date.now();
+    // Extraction progress doubles as the "Preparing" progress bar: out_time
+    // is the position in the movie's timeline the demux has reached, so the
+    // familiar seek strip fills while the one-time read runs. Only wired to
+    // the UI when THIS item is what the broadcast is waiting on — background
+    // extraction of the next episode stays silent.
+    let lastBeat = 0;
+    let lastLog = 0;
+    const onProgress = (sec) => {
+      if (this.status !== 'preparing' || this.current?.item !== item) return;
+      this.position = sec;
+      const now = Date.now();
+      if (now - lastBeat < 3000) return;
+      lastBeat = now;
+      this.emit('nowplaying', this.snapshot());
+      const dur = this.current?.duration;
+      if (dur > 0 && now - lastLog > 30_000) {
+        lastLog = now;
+        this.emit('log', `[subs] extracting… ${Math.min(100, (sec / dur) * 100).toFixed(0)}%\n`);
+      }
+    };
     const p = Promise.all([
-      extractSubtitle(item.srcPath, sub, this.cacheDir),
+      extractSubtitle(item.srcPath, sub, this.cacheDir, onProgress),
       extractFonts(item.srcPath, this.cacheDir),
     ]).then(([path, fontsDir]) => {
       if (!path) return null;

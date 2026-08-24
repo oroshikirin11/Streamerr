@@ -48,7 +48,7 @@ function keyFor(srcPath, typeIndex) {
  *
  * @returns {Promise<string|null>} path to the extracted subtitle file
  */
-export async function extractSubtitle(srcPath, sub, cacheDir) {
+export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null) {
   if (!isExtractable(sub)) return null;
   if (!existsSync(srcPath)) return null;
 
@@ -82,8 +82,11 @@ export async function extractSubtitle(srcPath, sub, cacheDir) {
     // The format must be explicit: the temp name ends in .partial, so ffmpeg
     // cannot infer it from the extension and refuses to write anything.
     '-f', MUXER_FOR[ext],
+    // out_time here is how far into the movie's TIMELINE the demux has
+    // reached — exactly the number a progress bar wants.
+    '-progress', 'pipe:3', '-stats_period', '2',
     tmp,
-  ], undefined, timeout);
+  ], undefined, timeout, onProgress);
 
   if (!ok || !existsSync(tmp)) {
     safeUnlink(tmp);
@@ -119,10 +122,16 @@ export async function extractFonts(srcPath, cacheDir) {
 
   mkdirSync(dir, { recursive: true });
   // dump_attachment writes every attached font into the working directory.
+  // It happens while the INPUT is opened — attachments live in the header —
+  // so the transcode that follows is pure waste. Without `-t 0.1` this
+  // command decodes the entire movie into the null muxer: on a UHD remux
+  // that is an hour of CPU time (cut short only by the kill-timer) burning
+  // disk bandwidth the real subtitle extraction is waiting for.
   await run([
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-dump_attachment:t', '',
     '-i', srcPath,
+    '-t', '0.1',
     '-f', 'null', '-',
   ], dir);
 
@@ -139,12 +148,24 @@ function safeUnlink(p) {
   try { unlinkSync(p); } catch { /* already gone */ }
 }
 
-function run(args, cwd, timeoutMs = 120_000) {
+function run(args, cwd, timeoutMs = 120_000, onProgress = null) {
   return new Promise((resolve) => {
     const child = spawn('ffmpeg', args, {
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: onProgress
+        ? ['ignore', 'ignore', 'pipe', 'pipe']
+        : ['ignore', 'ignore', 'pipe'],
       cwd,
     });
+    if (onProgress) {
+      let buf = '';
+      child.stdio[3]?.on('data', (d) => {
+        buf = (buf + d.toString()).slice(-4000);
+        const m = [...buf.matchAll(/out_time_us=(\d+)/g)].pop();
+        if (m) {
+          try { onProgress(Number(m[1]) / 1e6); } catch { /* observer only */ }
+        }
+      });
+    }
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.on('error', () => { clearTimeout(timer); resolve(false); });
     child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
