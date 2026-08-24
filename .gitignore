@@ -1,0 +1,13 @@
+# Secrets — Owncast stream key, Jellyfin API key, server addresses.
+# The repo must stay publishable; nothing here should ever be committed.
+config.json
+.env
+
+node_modules/
+
+# Runtime state
+data/
+cache/
+chain/
+run/
+*.log

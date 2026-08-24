@@ -1,0 +1,63 @@
+{
+  "_comment": "Copy to config.json and fill in. config.json is gitignored — never commit real values.",
+
+  "server": {
+    "port": 8099,
+    "host": "0.0.0.0"
+  },
+
+  "owncast": {
+    "_comment": "RTMP ingest. Use a tailnet/LAN address — RTMP is plaintext and carries the key in the handshake.",
+    "rtmpUrl": "rtmp://CHANGE-ME:1935/live",
+    "streamKey": "",
+
+    "_comment2": "Optional: HTTP API for stream title / status. Leave blank to disable.",
+    "apiUrl": "",
+    "accessToken": ""
+  },
+
+  "library": {
+    "provider": "jellyfin",
+
+    "jellyfin": {
+      "url": "http://CHANGE-ME:8096",
+      "apiKey": ""
+    },
+
+    "filesystem": {
+      "roots": []
+    },
+
+    "_comment": "Jellyfin reports paths as ITS process sees them. Map them to what this machine sees. Longest prefix wins.",
+    "pathMap": [
+      { "from": "/media/", "to": "/extHdd/" }
+    ]
+  },
+
+  "encoder": {
+    "_comment": "backend: auto | vaapi | qsv | nvenc | amf | videotoolbox | x264",
+    "backend": "auto",
+    "device": "/dev/dri/renderD128",
+
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "videoBitrate": "4500k",
+    "audioBitrate": "160k",
+
+    "_comment2": "gopSeconds must divide Owncast's HLS segment length. 2 is the documented value.",
+    "gopSeconds": 2
+  },
+
+  "_comment3": "Chain scripts are written into `cache` alongside the clips they reference.",
+  "paths": {
+    "cache": "./cache",
+    "run": "./run"
+  },
+
+  "normalizer": {
+    "_comment": "How many clips ahead of the playhead to keep normalized.",
+    "lookahead": 2,
+    "cacheLimitGB": 50
+  }
+}
