@@ -67,7 +67,7 @@ export class PlayoutEngine extends EventEmitter {
   constructor({
     workDir, target, profile, selection = null,
     statsPeriodMs = 500, endBehavior = 'end', initialBurst = 10,
-    caps = null,
+    caps = null, startOffset = 0,
   }) {
     super();
     this.workDir = workDir;
@@ -78,6 +78,8 @@ export class PlayoutEngine extends EventEmitter {
     this.endBehavior = endBehavior;
     this.initialBurst = initialBurst;
     this.caps = caps ?? { recursionDepth: true, segmentTimeMetadata: true };
+    /** Seconds into the first clip to begin at, for resuming a broadcast. */
+    this.startOffset = startOffset;
 
     this.status = 'stopped'; // stopped | starting | running | stopping
     this.proc = null;
@@ -162,6 +164,7 @@ export class PlayoutEngine extends EventEmitter {
       statsPeriodMs: this.statsPeriodMs,
       initialBurst: this.initialBurst,
       caps: this.caps,
+      startOffset: this.startOffset,
     });
 
     const startedAt = Date.now();
@@ -383,6 +386,26 @@ export class PlayoutEngine extends EventEmitter {
     renameSync(tmpPath, finalPath);
   }
 
+  /**
+   * What a replacement engine needs to carry on from here: the clips still to
+   * play, and how far into the first one we are.
+   *
+   * Track selection is fixed for the life of an ffmpeg process — -map and the
+   * subtitles filter are set once — so changing subtitles mid-broadcast means
+   * a new process. Resuming at the right offset is what keeps that from
+   * restarting the episode from the beginning.
+   */
+  resumeState() {
+    const idx = Math.max(0, this.currentIndex);
+    let before = 0;
+    for (let i = 0; i < idx; i++) before += this.committed[i]?.duration ?? 0;
+    return {
+      items: [...this.committed.slice(idx), ...this.queue]
+        .map(({ id, title, srcPath }) => ({ id, title, srcPath })),
+      offset: Math.max(0, this.outTimeSec - before),
+    };
+  }
+
   /** Remove symlinks and chain scripts left behind by a finished run. */
   cleanup() {
     for (const c of this.committed) {
@@ -403,7 +426,7 @@ export class PlayoutEngine extends EventEmitter {
  */
 export function buildPlayoutArgs({
   head, target, profile, selection = null,
-  statsPeriodMs = 500, initialBurst = 10,
+  statsPeriodMs = 500, initialBurst = 10, startOffset = 0,
   caps = { recursionDepth: true, segmentTimeMetadata: true },
 }) {
   const be = BACKENDS[profile.backend];
@@ -444,6 +467,9 @@ export function buildPlayoutArgs({
     // feature-detected rather than assumed.
     ...(caps.recursionDepth ? ['-recursion_depth', '2147483647'] : []),
     ...(caps.segmentTimeMetadata ? ['-segment_time_metadata', '1'] : []),
+    // Input-side seek, so resuming a broadcast after a settings change
+    // picks up where it left off instead of restarting the episode.
+    ...(startOffset > 0 ? ['-ss', startOffset.toFixed(3)] : []),
     '-i', head,
     ...filterArgs,
     // The `?` makes the audio map optional, so a clip without an audio track

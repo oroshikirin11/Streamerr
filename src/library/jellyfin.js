@@ -82,8 +82,14 @@ export class JellyfinLibrary {
       }));
   }
 
-  /** Series (or movies) in a library. Paged. */
-  async items(libraryId, { type = 'Series', startIndex = 0, limit = 100, search } = {}) {
+  /**
+   * Top-level entries in a library. Paged.
+   *
+   * Both types are requested by default because the caller does not
+   * necessarily know the library's kind — asking only for Series makes a
+   * Movies library look empty, which is exactly as confusing as it sounds.
+   */
+  async items(libraryId, { type = 'Series,Movie', startIndex = 0, limit = 100, search } = {}) {
     // Deliberately light on fields: MediaSources invokes GetStaticMediaSources
     // per item and dominates the cost of a grid listing.
     const data = await this._get('/Items', {
@@ -147,11 +153,29 @@ export class JellyfinLibrary {
       .map((e) => this._episode(e));
   }
 
+  /**
+   * One item, by id.
+   *
+   * Deliberately NOT `GET /Items/{id}`: that route lives on Jellyfin's
+   * user-library controller and expects a real user, but an API key resolves
+   * to an empty user id, so it answers 400. The query form works with a bare
+   * API key and lets us ask for exactly the fields we need instead of the
+   * implicit all-fields that route returns.
+   */
   async item(id) {
-    // Note: /Items/{id} is implicitly all-fields, so it is heavy. Fine for a
-    // single item at play time, never in a loop.
-    const e = await this._get(`/Items/${id}`);
-    return e.Type === 'Episode' ? this._episode(e) : this._summary(e);
+    const data = await this._get('/Items', {
+      Ids: id,
+      Fields: 'Path,MediaSources,Overview',
+      EnableUserData: false,
+    });
+    const e = (data.Items ?? [])[0];
+    if (!e) throw new Error(`Jellyfin has no item ${id}`);
+
+    // A movie is a playable file just like an episode, so it needs the same
+    // path resolution — only a series or season is a container.
+    return e.Type === 'Episode' || e.Type === 'Movie'
+      ? this._episode(e)
+      : this._summary(e);
   }
 
   /**

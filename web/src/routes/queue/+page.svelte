@@ -4,11 +4,35 @@
 
   let status = $state({ status: 'stopped', playing: null, queue: [] });
   let error = $state('');
+  let tracks = $state(null);
+  let switching = $state(false);
+  let note = $state('');
 
   onMount(async () => {
     try { status = await api.streamStatus(); }
     catch (err) { error = err.message; }
   });
+
+  async function loadTracks() {
+    error = '';
+    try { tracks = await api.liveTracks(); }
+    catch (err) { error = err.message; }
+  }
+
+  /**
+   * Track choice is fixed for the life of an ffmpeg process, so this restarts
+   * the encoder and resumes where it left off. Viewers see a short break.
+   */
+  async function applyTracks(audioIndex, subtitleKey, subtitleMode) {
+    switching = true; error = ''; note = '';
+    try {
+      const r = await api.setTracks({ audioIndex, subtitleKey, subtitleMode });
+      note = `Now: ${r.tracks}`;
+      status = await api.streamStatus();
+      await loadTracks();
+    } catch (err) { error = err.message; }
+    finally { switching = false; }
+  }
 
   async function stop() {
     try { await api.stop(); status = await api.streamStatus(); }
@@ -30,7 +54,45 @@
     <p class="muted small">
       {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
     </p>
-    <button class="danger" onclick={stop}>Stop broadcast</button>
+    <div class="row">
+      <button class="danger" onclick={stop}>Stop broadcast</button>
+      <button onclick={loadTracks} disabled={switching}>Change audio or subtitles</button>
+    </div>
+
+    {#if tracks}
+      <div class="tracks">
+        <p class="muted small">
+          Switching restarts the encoder and resumes at the same point, so
+          viewers see a few seconds of interruption.
+        </p>
+
+        <p class="muted small">Audio</p>
+        {#each tracks.audio as a}
+          <button class="line" class:on={a.typeIndex === tracks.chosen.audioIndex}
+                  disabled={switching}
+                  onclick={() => applyTracks(a.typeIndex, tracks.chosen.subtitleKey, undefined)}>
+            {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch{a.title ? ` — ${a.title}` : ''}
+          </button>
+        {/each}
+
+        <p class="muted small">Subtitles</p>
+        <button class="line" class:on={tracks.chosen.subtitleKey === null}
+                disabled={switching}
+                onclick={() => applyTracks(tracks.chosen.audioIndex, null, 'off')}>
+          None
+        </button>
+        {#each tracks.subtitles as s}
+          <button class="line" class:on={String(s.key) === String(tracks.chosen.subtitleKey)}
+                  disabled={switching}
+                  onclick={() => applyTracks(tracks.chosen.audioIndex, s.key, 'always')}>
+            {s.language ?? '?'} · {s.codec}{s.forced ? ' · forced' : ''}{s.external ? ' · sidecar' : ''}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    {#if switching}<p class="muted small">Restarting the encoder…</p>{/if}
+    {#if note}<p class="small">{note}</p>{/if}
   </div>
 
   <h2 style="margin-top:22px">Up next</h2>
@@ -44,6 +106,13 @@
 {/if}
 
 <style>
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .tracks { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .line {
+    display: block; width: 100%; text-align: left; margin: 3px 0;
+    background: transparent; border-color: var(--border); font-size: 13px;
+  }
+  .line.on { border-color: var(--accent); color: var(--accent); }
   .q { padding-left: 20px; }
   .q li { padding: 5px 0; border-bottom: 1px solid var(--border); }
 </style>

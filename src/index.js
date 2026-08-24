@@ -56,11 +56,52 @@ function streamStatus() {
   const s = engine.snapshot();
   return {
     status: s.status,
-    playing: s.playing ? { title: s.playing.title, duration: s.playing.duration } : null,
+    playing: s.playing
+      ? { title: s.playing.title, duration: s.playing.duration }
+      : null,
     queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
     position: s.outTimeSec,
     total: s.committedDuration,
   };
+}
+
+/**
+ * Construct a playout engine with its event wiring attached.
+ *
+ * Shared by starting a broadcast and by restarting one to change tracks, so
+ * the two cannot drift apart in which events they forward.
+ */
+function buildEngine({ profile, selection, caps, startOffset = 0 }) {
+  const e = new PlayoutEngine({
+    workDir: config.paths.cache,
+    target: rtmpTarget(),
+    profile,
+    selection,
+    endBehavior: 'end',
+    caps,
+    startOffset,
+  });
+
+  e.on('status', () => broadcast('stream', streamStatus()));
+  e.on('committed', () => broadcast('stream', streamStatus()));
+  e.on('nowplaying', () => broadcast('stream', streamStatus()));
+  e.on('progress', (b) => broadcast('progress', {
+    position: b.outTimeUs / 1e6, speed: b.speed, drops: b.dropFrames,
+  }));
+  e.on('warn', (m) => broadcast('warn', { message: redact(String(m)) }));
+  e.on('fatal', (err) => {
+    broadcast('error', { message: redact(err.message) });
+    if (engine === e) { e.cleanup(); engine = null; }
+    broadcast('stream', streamStatus());
+  });
+  e.on('ended', () => {
+    // Only clear if this is still the live engine — a track change swaps in a
+    // replacement and the old one's 'ended' must not wipe it out.
+    if (engine === e) { e.cleanup(); engine = null; }
+    broadcast('stream', streamStatus());
+  });
+
+  return e;
 }
 
 // ── auth ───────────────────────────────────────────────────────────────
@@ -356,38 +397,89 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     });
   }
 
-  engine = new PlayoutEngine({
-    workDir: config.paths.cache,
-    target: rtmpTarget(),
+  engine = buildEngine({
     profile,
     selection,
-    endBehavior: 'end',
     caps: await probeConcatCapabilities(),
   });
 
   for (const it of items) engine.enqueue(it);
-
-  engine.on('status', () => broadcast('stream', streamStatus()));
-  engine.on('committed', () => broadcast('stream', streamStatus()));
-  engine.on('nowplaying', () => broadcast('stream', streamStatus()));
-  engine.on('progress', (b) => broadcast('progress', {
-    position: b.outTimeUs / 1e6, speed: b.speed, drops: b.dropFrames,
-  }));
-  engine.on('warn', (m) => broadcast('warn', { message: redact(String(m)) }));
-  engine.on('fatal', (e) => {
-    broadcast('error', { message: redact(e.message) });
-    engine?.cleanup();
-    engine = null;
-    broadcast('stream', streamStatus());
-  });
-  engine.on('ended', () => {
-    engine?.cleanup();
-    engine = null;
-    broadcast('stream', streamStatus());
-  });
-
   await engine.start();
   res.json({ ok: true, tracks: selection.reason, ...streamStatus() });
+}));
+
+/** Tracks available on the clip currently on air, and which are in use. */
+app.get('/api/stream/tracks', wrap(async (req, res) => {
+  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+
+  const playing = engine.snapshot().playing;
+  if (!playing?.srcPath) return res.status(409).json({ error: 'Nothing playing yet' });
+
+  const tracks = await probeTracks(playing.srcPath);
+  const subtitles = await listSubtitles(playing.srcPath, tracks);
+  const chosen = engine.selection;
+
+  res.json({
+    title: playing.title,
+    audio: tracks.audio,
+    subtitles: subtitles.map((s) => ({
+      ...s,
+      path: undefined,
+      key: s.external ? s.path : s.typeIndex,
+    })),
+    chosen: {
+      audioIndex: chosen?.audio?.typeIndex ?? null,
+      subtitleKey: chosen?.subtitle
+        ? (chosen.subtitle.external ? chosen.subtitle.path : chosen.subtitle.typeIndex)
+        : null,
+      reason: chosen?.reason ?? null,
+    },
+  });
+}));
+
+/**
+ * Change audio or subtitle track without losing your place.
+ *
+ * Track choice is fixed for the life of an ffmpeg process — `-map` and the
+ * subtitles filter are set once — so this restarts the encoder and resumes at
+ * the current offset. Viewers see a brief interruption; that is the honest
+ * cost, and it beats being stuck with a broken subtitle track for an hour.
+ */
+app.post('/api/stream/tracks', wrap(async (req, res) => {
+  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+
+  const { items, offset } = engine.resumeState();
+  if (!items.length) return res.status(409).json({ error: 'Nothing left to play' });
+
+  const tracks = await probeTracks(items[0].srcPath);
+  const subs = await listSubtitles(items[0].srcPath, tracks);
+  const selection = selectTracks(tracks, subs, {
+    ...(config.tracks ?? {}),
+    audioIndex: req.body?.audioIndex ?? null,
+    subtitleId: req.body?.subtitleKey ?? null,
+    subtitleMode: req.body?.subtitleMode ?? config.tracks?.subtitleMode ?? 'auto',
+  });
+
+  const old = engine;
+  engine = null;              // stop the 'ended' handler clearing the new one
+  await new Promise((resolve) => {
+    old.once('ended', resolve);
+    old.stop();
+    setTimeout(resolve, 8000).unref?.();
+  });
+  old.cleanup();
+
+  engine = buildEngine({
+    profile: { ...config.encoder, backend: old.profile.backend },
+    selection,
+    caps: old.caps,
+    startOffset: offset,
+  });
+  for (const it of items) engine.enqueue(it);
+  await engine.start();
+
+  broadcast('stream', streamStatus());
+  res.json({ ok: true, tracks: selection.reason, resumedAt: offset });
 }));
 
 app.post('/api/stream/stop', (req, res) => {

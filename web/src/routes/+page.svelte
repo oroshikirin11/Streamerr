@@ -51,6 +51,16 @@
     seasonId = null;
     seasons = [];
     episodes = [];
+    error = '';
+
+    // A movie is a single playable file — it has no seasons to list, and
+    // asking Jellyfin for its episodes returns nothing.
+    if (item.type === 'Movie') {
+      episodes = [{ ...item, season: null, episode: null }];
+      selected = new Set([item.id]);
+      return;
+    }
+
     try {
       seasons = await api.seasons(item.id);
       episodes = await api.episodes(item.id);

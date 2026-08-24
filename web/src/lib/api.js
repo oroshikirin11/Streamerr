@@ -70,6 +70,8 @@ export const api = {
     request('POST', '/api/stream/start', { itemIds, trackOverride }),
   stop: () => request('POST', '/api/stream/stop'),
   setQueue: (itemIds) => request('POST', '/api/stream/queue', { itemIds }),
+  liveTracks: () => request('GET', '/api/stream/tracks'),
+  setTracks: (body) => request('POST', '/api/stream/tracks', body),
 };
 
 /** Live status feed. Reconnects on drop — the panel is left open for hours. */
