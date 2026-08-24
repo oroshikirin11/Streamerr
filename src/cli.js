@@ -16,7 +16,7 @@ import { config, ensureDirs, rtmpTarget, rtmpTargetRedacted } from './config.js'
 import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
-import { PlayoutEngine, probeDuration } from './ffmpeg/playout.js';
+import { PlayoutEngine, probeDuration, testRtmpConnection } from './ffmpeg/playout.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
@@ -102,6 +102,35 @@ async function cmdTracks() {
 
   const chosen = selectTracks(tracks, subs, config.tracks ?? {});
   console.log(`\n→ would use: ${chosen.reason}\n`);
+}
+
+// ── testconnect ────────────────────────────────────────────────────────
+
+async function cmdTestConnect() {
+  let target;
+  try {
+    target = rtmpTarget();
+  } catch (err) {
+    die(`${err.message}\n  Copy config.example.json and fill it in.`);
+  }
+
+  console.log(`\ntarget: ${rtmpTargetRedacted()}`);
+  console.log('pushing 2s of colour bars …\n');
+
+  const res = await testRtmpConnection(target);
+  if (res.ok) {
+    console.log('✓ accepted — the server took the stream.\n');
+    console.log('  It should have flickered live for ~2s. If it did not, the');
+    console.log('  connection is fine but the server is not publishing it.\n');
+    return;
+  }
+
+  console.error(`✗ rejected\n\n${res.error}\n`);
+  console.error('Common causes:');
+  console.error('  • wrong stream key            → check owncast.streamKey');
+  console.error('  • another publisher connected → Owncast allows only one at a time');
+  console.error('  • wrong path                  → Owncast requires rtmp://host:1935/live\n');
+  process.exitCode = 1;
 }
 
 // ── selftest ───────────────────────────────────────────────────────────
@@ -255,6 +284,21 @@ async function cmdStream() {
     + `${profile.videoBitrate}  GOP ${profile.gopSeconds}s`);
   console.log(`tracks  : ${selection.reason}\n`);
 
+  // Verify the server accepts us BEFORE going live. The fifo muxer retries a
+  // rejected connection forever without failing, so without this check a bad
+  // stream key produces a perfectly healthy-looking encode that never
+  // arrives anywhere.
+  process.stdout.write('checking the server accepts us … ');
+  const conn = await testRtmpConnection(target);
+  if (!conn.ok) {
+    console.log('rejected\n');
+    die(`Owncast would not accept the stream.\n\n${conn.error}\n\n`
+      + '  • wrong stream key            → check owncast.streamKey\n'
+      + '  • another publisher connected → Owncast allows only one at a time\n'
+      + '  • wrong path                  → Owncast requires rtmp://host:1935/live');
+  }
+  console.log('ok\n');
+
   const engine = new PlayoutEngine({
     workDir: config.paths.cache,
     target,
@@ -272,6 +316,14 @@ async function cmdStream() {
   engine.on('committed', ({ item, duration }) =>
     console.log(`▶ ${item.title}  (${fmtTime(duration)})`));
   engine.on('warn', (m) => console.warn(`! ${m}`));
+  // Surface connection trouble. fifo's recovery keeps the encoder alive
+  // through a dropped push, which is what we want — but it must not be
+  // silent, or a stream that never reaches the server looks perfectly fine.
+  engine.on('log', (line) => {
+    if (/rtmp|recover|Connection|refused|reset|broken pipe|Error/i.test(line)) {
+      process.stderr.write(`! ${line.trim()}\n`);
+    }
+  });
   engine.on('fatal', (e) => { console.error(`\n✗ ${e.message}\n`); engine.cleanup(); process.exit(1); });
   engine.on('ended', () => {
     console.log('\nstream ended');
@@ -313,6 +365,7 @@ function run(bin, argv) {
 const commands = {
   probe: cmdProbe,
   tracks: cmdTracks,
+  testconnect: cmdTestConnect,
   selftest: cmdSelftest,
   stream: cmdStream,
 };
@@ -323,6 +376,7 @@ jellystreamerr
 
   probe                 test which encoders actually work on this machine
   tracks <file>         list audio/subtitle tracks and what would be picked
+  testconnect           check Owncast accepts our stream key
   selftest              prove gapless chaining locally (no Owncast needed)
   stream <file...>      stream files to the configured Owncast
 `);

@@ -470,6 +470,50 @@ export function buildPlayoutArgs({
   ];
 }
 
+/**
+ * Push a couple of seconds of colour bars and report whether the server
+ * accepted them.
+ *
+ * This exists because the fifo muxer's recovery options make a rejected
+ * connection invisible: with -attempt_recovery it retries forever while the
+ * encoder keeps running happily, so a wrong stream key looks identical to a
+ * working stream that just never appears. Here the push is direct, with no
+ * fifo wrapper, so the server's actual refusal surfaces.
+ *
+ * Uses libx264 deliberately — always present, and this is testing the network
+ * path, not the encoder.
+ */
+export function testRtmpConnection(target, { seconds = 2, timeoutMs = 20_000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30',
+      '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+      '-t', String(seconds),
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-g', '60', '-keyint_min', '60', '-sc_threshold', '0', '-bf', '0',
+      '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+      '-f', 'flv', target,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    let stderr = '';
+    let timer = setTimeout(() => { timer = null; child.kill('SIGKILL'); }, timeoutMs);
+
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      resolve({ ok: false, error: err.message });
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      else return resolve({ ok: false, error: 'timed out connecting' });
+      resolve(code === 0
+        ? { ok: true }
+        : { ok: false, error: lastLines(stderr, 3) || `ffmpeg exited ${code}` });
+    });
+  });
+}
+
 /** Duration in seconds, via ffprobe. */
 export function probeDuration(path) {
   return new Promise((resolve, reject) => {
