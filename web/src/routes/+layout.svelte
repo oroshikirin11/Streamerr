@@ -1,0 +1,279 @@
+<script>
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
+  import { api, connectStatus, fmtTime } from '$lib/api.js';
+
+  let { children } = $props();
+
+  let ready = $state(false);
+  let authed = $state(false);
+  let passwordConfigured = $state(false);
+  let password = $state('');
+  let loginError = $state('');
+  let busy = $state(false);
+
+  let stream = $state({ status: 'stopped', playing: null, queue: [] });
+  let position = $state(0);
+  let speed = $state(null);
+  let toast = $state(null);
+
+  const live = $derived(stream.status === 'running' || stream.status === 'starting');
+
+  onMount(async () => {
+    await refreshAuth();
+    ready = true;
+    if (authed) startFeed();
+  });
+
+  async function refreshAuth() {
+    try {
+      const s = await api.authStatus();
+      passwordConfigured = s.configured;
+      authed = s.authenticated;
+      if (authed && !s.onboarded && page.url.pathname !== '/setup') {
+        goto('/setup');
+      }
+    } catch {
+      authed = false;
+    }
+  }
+
+  function startFeed() {
+    connectStatus((msg) => {
+      if (msg.type === 'stream') {
+        stream = msg.payload;
+        if (msg.payload.position != null) position = msg.payload.position;
+      } else if (msg.type === 'progress') {
+        position = msg.payload.position;
+        speed = msg.payload.speed;
+      } else if (msg.type === 'error' || msg.type === 'warn') {
+        toast = { kind: msg.type, message: msg.payload.message };
+        setTimeout(() => { toast = null; }, 8000);
+      }
+    });
+  }
+
+  async function login(e) {
+    e.preventDefault();
+    busy = true;
+    loginError = '';
+    try {
+      if (passwordConfigured) await api.login(password);
+      else await api.setupPassword(password);
+      password = '';
+      await refreshAuth();
+      startFeed();
+    } catch (err) {
+      loginError = err.message;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function stopStream() {
+    try { await api.stop(); } catch (err) { toast = { kind: 'error', message: err.message }; }
+  }
+
+  const nav = [
+    { href: '/', label: 'Library', icon: 'M4 5h16v11H4zM2 19h20' },
+    { href: '/queue', label: 'Queue', icon: 'M4 6h16M4 12h16M4 18h10' },
+    { href: '/settings', label: 'Settings', icon: 'M12 15a3 3 0 100-6 3 3 0 000 6zM19 12l2-1-2-4-2 1-3-2V3h-4v3L7 8 5 7 3 11l2 1v0l-2 1 2 4 2-1 3 2v3h4v-3l3-2 2 1 2-4-2-1z' },
+  ];
+</script>
+
+{#if !ready}
+  <div class="center"><p class="muted">Loading…</p></div>
+
+{:else if !authed}
+  <div class="center">
+    <form class="card login" onsubmit={login}>
+      <h1>Jellystreamerr</h1>
+      <p class="muted">
+        {passwordConfigured
+          ? 'Enter your password to continue.'
+          : 'Choose a password. The panel can start broadcasts and stores your stream key, so it should not be left open.'}
+      </p>
+      <input
+        type="password"
+        bind:value={password}
+        placeholder={passwordConfigured ? 'Password' : 'At least 8 characters'}
+        autocomplete={passwordConfigured ? 'current-password' : 'new-password'}
+      />
+      {#if loginError}<p class="err">{loginError}</p>{/if}
+      <button class="primary" type="submit" disabled={busy || password.length < 1}>
+        {passwordConfigured ? 'Sign in' : 'Create password'}
+      </button>
+    </form>
+  </div>
+
+{:else}
+  <div class="app">
+    <aside>
+      <div class="brand">
+        <span class="dot" class:live></span>
+        <strong>Jellystreamerr</strong>
+      </div>
+      <nav>
+        {#each nav as n}
+          <a href={n.href} class:active={page.url.pathname === n.href}>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                 stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d={n.icon} />
+            </svg>
+            {n.label}
+            {#if n.href === '/queue' && stream.queue?.length}
+              <span class="badge">{stream.queue.length}</span>
+            {/if}
+          </a>
+        {/each}
+      </nav>
+      <div class="spacer"></div>
+      <div class="status">
+        {live ? 'on air' : 'offline'}
+        {#if speed}<br />speed {speed}×{/if}
+      </div>
+    </aside>
+
+    <main>
+      {@render children()}
+    </main>
+
+    {#if stream.playing}
+      <footer>
+        <div class="np">
+          <p class="title">{stream.playing.title}</p>
+          <p class="muted small">
+            {fmtTime(position)}
+            {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
+            {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
+          </p>
+        </div>
+        <div class="bar">
+          <div class="fill" style:width="{stream.playing.duration
+            ? Math.min(100, (position / stream.playing.duration) * 100)
+            : 0}%"></div>
+        </div>
+        <button class="danger" onclick={stopStream}>Stop</button>
+      </footer>
+    {/if}
+  </div>
+{/if}
+
+{#if toast}
+  <div class="toast" class:error={toast.kind === 'error'}>{toast.message}</div>
+{/if}
+
+<style>
+  :global(:root) {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --surface-2: #f0efec;
+    --text: #1d1d1b;
+    --muted: #6b6b66;
+    --border: #dededa;
+    --accent: #2f6fd0;
+    --danger: #c0392b;
+    --success: #2b8a5f;
+    --radius: 8px;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(:root) {
+      --bg: #17171a;
+      --surface: #202024;
+      --surface-2: #2a2a2f;
+      --text: #ececeb;
+      --muted: #9a9a95;
+      --border: #34343a;
+      --accent: #6ba3f0;
+      --danger: #e8705f;
+      --success: #5fc493;
+    }
+  }
+  :global(*) { box-sizing: border-box; }
+  :global(body) {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 400 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  :global(h1, h2, h3) { font-weight: 500; margin: 0 0 .5rem; }
+  :global(h1) { font-size: 22px; }
+  :global(h2) { font-size: 18px; }
+  :global(h3) { font-size: 16px; }
+  :global(input, select, button) {
+    font: inherit;
+    color: inherit;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 8px 11px;
+  }
+  :global(input:focus, select:focus) {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  :global(button) { cursor: pointer; background: var(--surface-2); }
+  :global(button:hover:not(:disabled)) { border-color: var(--muted); }
+  :global(button:disabled) { opacity: .5; cursor: not-allowed; }
+  :global(button.primary) { background: var(--accent); border-color: var(--accent); color: #fff; }
+  :global(button.danger) { background: transparent; border-color: var(--danger); color: var(--danger); }
+  :global(.muted) { color: var(--muted); }
+  :global(.small) { font-size: 13px; }
+  :global(.err) { color: var(--danger); font-size: 13px; }
+  :global(.card) {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+  }
+
+  .center { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+  .login { width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px; }
+
+  .app { display: grid; grid-template-columns: 190px 1fr; grid-template-rows: 1fr auto; min-height: 100vh; }
+  aside {
+    grid-row: 1 / 3;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    padding: 14px 10px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px 14px; font-size: 14px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.live { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 25%, transparent); }
+  nav { display: flex; flex-direction: column; gap: 2px; }
+  nav a {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 10px; border-radius: var(--radius);
+    color: var(--muted); text-decoration: none; font-size: 14px;
+  }
+  nav a:hover { background: var(--surface-2); }
+  nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  .badge { margin-left: auto; font-size: 11px; background: var(--surface-2); padding: 1px 7px; border-radius: 99px; }
+  .spacer { flex: 1; }
+  .status { padding: 10px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+
+  main { padding: 22px 26px; min-width: 0; }
+
+  footer {
+    grid-column: 2; border-top: 1px solid var(--border);
+    background: var(--surface); padding: 10px 20px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .np { min-width: 0; flex: 1; }
+  .np .title { margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .np p { margin: 2px 0 0; }
+  .bar { flex: 1.2; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+  .fill { height: 100%; background: var(--accent); transition: width .4s linear; }
+
+  .toast {
+    position: fixed; bottom: 18px; right: 18px; max-width: 420px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: var(--radius); padding: 11px 14px; font-size: 13px;
+  }
+  .toast.error { border-left-color: var(--danger); }
+</style>

@@ -11,3 +11,8 @@ cache/
 chain/
 run/
 *.log
+
+# Built UI and its toolchain
+web/node_modules/
+web/build/
+web/.svelte-kit/

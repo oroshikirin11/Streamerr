@@ -29,6 +29,14 @@ RUN pacman -Syu --noconfirm \
 
 WORKDIR /app
 
+# The UI is built here rather than committed, so a checkout never carries
+# stale bundles. Its toolchain is dev-only and does not ship in the runtime.
+COPY web/package*.json ./web/
+RUN cd web && npm install --no-audit --no-fund
+
+COPY web ./web
+RUN cd web && npm run build && rm -rf node_modules .svelte-kit
+
 COPY package*.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
