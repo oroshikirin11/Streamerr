@@ -19,6 +19,8 @@
   let toast = $state(null);
   let tracks = $state(null);
   let busyCtl = $state(false);
+  /** Fraction of the seek strip under the cursor, for the time bubble. */
+  let hoverFrac = $state(null);
 
   const live = $derived(
     stream.status === 'running' || stream.status === 'starting'
@@ -28,7 +30,26 @@
   onMount(async () => {
     await refreshAuth();
     ready = true;
-    if (authed) startFeed();
+    const mock = import.meta.env.DEV && page.url.searchParams.has('mock');
+    if (authed && !mock) startFeed();
+    // Dev-only playbar preview (`npm run dev` + ?mock): the transport bar only
+    // renders while something streams, which makes styling it require a live
+    // broadcast. The real feed is skipped so it cannot overwrite the fake
+    // state. Stripped from production builds.
+    if (mock) {
+      stream = {
+        status: 'running',
+        playing: {
+          title: "Frieren: Beyond Journey's End — S1E1",
+          duration: 1563,
+          image: 'data:image/svg+xml,' + encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="92" height="128"><rect width="92" height="128" fill="#405a7a"/><circle cx="46" cy="50" r="24" fill="#dfe8f4"/></svg>'),
+        },
+        queue: [{ title: "Frieren — S1E2" }],
+      };
+      position = 201;
+      speed = '1.37';
+    }
   });
 
   async function refreshAuth() {
@@ -105,6 +126,47 @@
     finally { busyCtl = false; }
   }
 
+  // The browser tab doubles as a status light: the favicon is the brand mark
+  // in accent colours normally and turns red while broadcasting, and the tab
+  // title gains a red dot — visible even when the panel is a background tab.
+  const favicon = (c1, c2) => 'data:image/svg+xml,' + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">`
+    + `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">`
+    + `<stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/>`
+    + `</linearGradient></defs>`
+    + `<rect width="32" height="32" rx="8" fill="url(#g)"/>`
+    + `<path d="M12 9.5v13l11-6.5z" fill="#fff"/></svg>`);
+  const favIdle = favicon('#6ba3f0', '#8b5cf6');
+  const favLive = favicon('#f0836b', '#d0402f');
+
+  $effect(() => {
+    let link = document.querySelector('link[rel="icon"]');
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    link.type = 'image/svg+xml';
+    link.href = live ? favLive : favIdle;
+  });
+
+  $effect(() => {
+    const wantLive = live;
+    const apply = () => {
+      const bare = document.title.replace(/^🔴 /, '');
+      const want = wantLive ? `🔴 ${bare}` : bare;
+      if (document.title !== want) document.title = want;
+    };
+    apply();
+    // Each page sets its own <title> on navigation, which would drop the
+    // prefix — watch for that and re-apply. The equality guard above stops
+    // the observer from feeding itself.
+    const el = document.querySelector('title');
+    const obs = new MutationObserver(apply);
+    if (el) obs.observe(el, { childList: true, characterData: true, subtree: true });
+    return () => obs.disconnect();
+  });
+
   let devMode = $state(false);
   $effect(() => {
     if (authed) api.config().then((c) => { devMode = Boolean(c.devMode); }).catch(() => {});
@@ -129,7 +191,12 @@
 {:else if !authed}
   <div class="center">
     <form class="card login" onsubmit={login}>
-      <h1>Jellystreamerr</h1>
+      <div class="brand" style="padding: 0 0 2px;">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </span>
+        <h1 style="margin: 0; font-size: 19px;">Jellystreamerr</h1>
+      </div>
       <p class="muted">
         {passwordConfigured
           ? 'Enter your password to continue.'
@@ -152,8 +219,19 @@
   <div class="app">
     <aside>
       <div class="brand">
-        <span class="dot" class:live></span>
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </span>
         <strong>Jellystreamerr</strong>
+      </div>
+      <div class="status">
+        <span class="onair" class:live>
+          <span class="dot" class:live></span>
+          {live ? 'On air' : 'Offline'}
+        </span>
+        {#if speed && live}
+          <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
+        {/if}
       </div>
       <nav>
         {#each nav as n}
@@ -170,10 +248,6 @@
         {/each}
       </nav>
       <div class="spacer"></div>
-      <div class="status">
-        {live ? 'on air' : 'offline'}
-        {#if speed}<br />speed {speed}×{/if}
-      </div>
     </aside>
 
     <main>
@@ -182,20 +256,9 @@
 
     {#if stream.playing}
       <footer>
-        {#if stream.playing.image}
-          <img class="cover" src={stream.playing.image} alt="" />
-        {/if}
-        <div class="np">
-          <p class="title">{stream.playing.title}{paused ? ' — paused' : ''}</p>
-          <p class="muted small">
-            {fmtTime(position)}
-            {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
-            {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
-          </p>
-        </div>
-
-        <div class="bar" class:seekable={stream.playing.duration}
+        <div class="seek" class:seekable={stream.playing.duration}
              role="slider" tabindex="0" aria-label="Seek"
+             aria-valuemin="0" aria-valuemax={Math.round(stream.playing.duration ?? 0)}
              aria-valuenow={Math.round(position)}
              onclick={(e) => {
                if (!stream.playing.duration || busyCtl) return;
@@ -203,6 +266,12 @@
                const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
                ctl(() => api.seek({ position: frac * stream.playing.duration }));
              }}
+             onmousemove={(e) => {
+               if (!stream.playing.duration) return;
+               const r = e.currentTarget.getBoundingClientRect();
+               hoverFrac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+             }}
+             onmouseleave={() => (hoverFrac = null)}
              onkeydown={(e) => {
                if (e.key === 'ArrowRight') skip(30);
                if (e.key === 'ArrowLeft') skip(-30);
@@ -210,26 +279,51 @@
           <div class="fill" style:width="{stream.playing.duration
             ? Math.min(100, (position / stream.playing.duration) * 100)
             : 0}%"></div>
+          {#if hoverFrac != null && stream.playing.duration}
+            <div class="bubble" style:left="{hoverFrac * 100}%">
+              {fmtTime(hoverFrac * stream.playing.duration)}
+            </div>
+          {/if}
         </div>
 
-        <div class="ctl">
-          <button class="ic" onclick={() => skip(-30)} disabled={busyCtl} title="Back 30 seconds" aria-label="Back 30 seconds">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg><span class="tiny">30</span>
-          </button>
-          <button class="ic" onclick={togglePause} disabled={busyCtl} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
-            {#if paused}
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-            {:else}
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+        <div class="frow">
+          <div class="fleft">
+            {#if stream.playing.image}
+              <img class="cover" src={stream.playing.image} alt="" />
             {/if}
-          </button>
-          <button class="ic" onclick={() => skip(30)} disabled={busyCtl} title="Forward 30 seconds" aria-label="Forward 30 seconds">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
-          </button>
-        </div>
-        <div class="ctl actions">
-          <button onclick={openTracks} disabled={busyCtl}>Audio &amp; subs</button>
-          <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
+            <div class="np">
+              <p class="title">
+                {stream.playing.title}
+                {#if paused}<span class="pill">Paused</span>{/if}
+              </p>
+              <p class="muted small">
+                {fmtTime(position)}
+                {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
+                {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
+              </p>
+            </div>
+          </div>
+
+          <div class="ctl">
+            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl} title="Back 30 seconds" aria-label="Back 30 seconds">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg><span class="tiny">30</span>
+            </button>
+            <button class="ic play" onclick={togglePause} disabled={busyCtl} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
+              {#if paused}
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+              {:else}
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+              {/if}
+            </button>
+            <button class="ic" onclick={() => skip(30)} disabled={busyCtl} title="Forward 30 seconds" aria-label="Forward 30 seconds">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
+            </button>
+          </div>
+
+          <div class="fright">
+            <button onclick={openTracks} disabled={busyCtl}>Audio &amp; subs</button>
+            <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
+          </div>
         </div>
       </footer>
 
@@ -332,9 +426,18 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
   }
-  :global(button) { cursor: pointer; background: var(--surface-2); }
+  :global(button) {
+    cursor: pointer; background: var(--surface-2);
+    transition: background .15s, border-color .15s, color .15s,
+                box-shadow .15s, transform .06s;
+  }
   :global(button:hover:not(:disabled)) { border-color: var(--muted); }
+  :global(button:active:not(:disabled)) { transform: scale(.97); }
   :global(button:disabled) { opacity: .5; cursor: not-allowed; }
+  :global(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
   :global(button.primary) { background: var(--accent); border-color: var(--accent); color: #fff; }
   :global(button.danger) { background: transparent; border-color: var(--danger); color: var(--danger); }
   :global(.muted) { color: var(--muted); }
@@ -358,9 +461,14 @@
     padding: 14px 10px;
     display: flex; flex-direction: column; gap: 4px;
   }
-  .brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px 14px; font-size: 14px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-  .dot.live { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 25%, transparent); }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 16px; font-size: 14px; letter-spacing: .01em; }
+  .mark {
+    width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+    display: grid; place-items: center; color: #fff;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #8b5cf6));
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .mark svg { margin-left: 1px; }
   nav { display: flex; flex-direction: column; gap: 2px; }
   nav a {
     display: flex; align-items: center; gap: 9px;
@@ -371,32 +479,114 @@
   nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
   .badge { margin-left: auto; font-size: 11px; background: var(--surface-2); padding: 1px 7px; border-radius: 99px; }
   .spacer { flex: 1; }
-  .status { padding: 10px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+  .status {
+    padding: 0 8px 14px;
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+  }
+  .onair {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px 3px 8px; border-radius: 999px;
+    background: var(--surface-2); color: var(--muted);
+    font-weight: 500; letter-spacing: .02em;
+  }
+  .onair.live {
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.live { background: var(--danger); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 40%, transparent); }
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 0%, transparent); }
+  }
+  .speed { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .speed.slow { color: var(--danger); }
 
   main { padding: 22px 26px; min-width: 0; }
 
   footer {
-    grid-column: 2; border-top: 1px solid var(--border);
-    background: var(--surface); padding: 10px 24px;
-    display: flex; align-items: center; gap: 14px;
+    grid-column: 2; position: relative;
+    border-top: 1px solid var(--border);
+    background: var(--surface); padding: 12px 20px 10px;
   }
-  .cover {
-    width: 38px; height: 54px; object-fit: cover; border-radius: 4px;
-    border: 1px solid var(--border); flex-shrink: 0;
-  }
-  .np { min-width: 0; flex: 0 1 280px; }
-  .np .title { margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .np p { margin: 2px 0 0; }
-  .bar { flex: 1; max-width: 760px; margin: 0 4px; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
-  .fill { height: 100%; background: var(--accent); transition: width .4s linear; }
 
-  .ctl { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
-  .ctl.actions { margin-left: auto; }
-  .ctl button { padding: 6px 10px; font-size: 13px; }
-  .ctl .ic { display: inline-flex; align-items: center; gap: 3px; padding: 6px 9px; }
-  .tiny { font-size: 10px; }
-  .bar.seekable { cursor: pointer; }
-  .bar.seekable:hover { height: 7px; }
+  /* The seek strip spans the entire top edge of the bar — the whole width is
+     the timeline, like every video player, instead of a floating segment. */
+  .seek {
+    position: absolute; top: 0; left: 0; right: 0; height: 4px;
+    transform: translateY(-50%);
+    background: var(--surface-2);
+    transition: height .12s ease;
+  }
+  .seek .fill {
+    height: 100%; background: var(--accent);
+    border-radius: 0 2px 2px 0;
+    transition: width .4s linear;
+    position: relative;
+  }
+  .seek .fill::after {
+    content: ''; position: absolute; right: -5px; top: 50%;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent); transform: translateY(-50%) scale(0);
+    transition: transform .12s ease;
+    box-shadow: 0 1px 4px rgba(0,0,0,.35);
+  }
+  .seek.seekable { cursor: pointer; }
+  .seek.seekable:hover, .seek.seekable:focus-visible { height: 8px; }
+  .seek.seekable:hover .fill::after { transform: translateY(-50%) scale(1); }
+  .bubble {
+    position: absolute; bottom: 14px; transform: translateX(-50%);
+    background: var(--text); color: var(--bg);
+    font-size: 11px; font-variant-numeric: tabular-nums;
+    padding: 3px 8px; border-radius: 6px; pointer-events: none;
+    white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.3);
+  }
+
+  /* Three zones: now-playing | transport | actions. The transport is grid-
+     centered so it cannot drift when the title or actions change width. */
+  .frow {
+    display: grid; grid-template-columns: 1fr auto 1fr;
+    align-items: center; gap: 16px;
+  }
+  .fleft { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .cover {
+    width: 44px; height: 62px; object-fit: cover; border-radius: 6px;
+    border: 1px solid var(--border); flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  }
+  .np { min-width: 0; }
+  .np .title {
+    margin: 0; font-size: 14px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .np p { margin: 2px 0 0; }
+  .pill {
+    display: inline-block; margin-left: 6px; padding: 1px 8px;
+    font-size: 11px; font-weight: 500; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent); vertical-align: 1px;
+  }
+
+  .ctl { display: flex; gap: 8px; align-items: center; }
+  .ctl .ic {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 3px; width: 40px; height: 40px; padding: 0;
+    border-radius: 50%; border-color: transparent; background: transparent;
+    color: var(--muted);
+  }
+  .ctl .ic:hover:not(:disabled) { background: var(--surface-2); color: var(--text); border-color: transparent; }
+  .ctl .play {
+    width: 44px; height: 44px;
+    background: var(--accent); color: #fff;
+  }
+  .ctl .play:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 85%, #fff);
+    color: #fff;
+  }
+  .tiny { font-size: 9px; font-weight: 600; }
+
+  .fright { display: flex; gap: 8px; justify-content: flex-end; }
+  .fright button { padding: 6px 12px; font-size: 13px; }
   .panel {
     grid-column: 2; border-top: 1px solid var(--border);
     background: var(--surface); padding: 12px 20px 16px;
@@ -413,6 +603,15 @@
     background: var(--surface); border: 1px solid var(--border);
     border-left: 3px solid var(--muted);
     border-radius: var(--radius); padding: 11px 14px; font-size: 13px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.25);
+    animation: slidein .2s ease;
   }
   .toast.error { border-left-color: var(--danger); }
+  @keyframes slidein {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(*) { animation: none !important; transition: none !important; }
+  }
 </style>

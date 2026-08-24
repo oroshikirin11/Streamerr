@@ -49,11 +49,18 @@
   <p class="muted">Nothing is streaming. Pick something from the library.</p>
 {:else}
   <div class="card">
-    <p class="muted small">On air</p>
-    <p><strong>{status.playing?.title ?? '—'}</strong></p>
-    <p class="muted small">
-      {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
-    </p>
+    <div class="onair-row">
+      {#if status.playing?.image}
+        <img class="cover" src={status.playing.image} alt="" />
+      {/if}
+      <div>
+        <p class="muted small" style="margin: 0 0 2px;">On air</p>
+        <p style="margin: 0;"><strong>{status.playing?.title ?? '—'}</strong></p>
+        <p class="muted small" style="margin: 2px 0 0;">
+          {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
+        </p>
+      </div>
+    </div>
     <div class="row">
       <button class="danger" onclick={stop}>Stop broadcast</button>
       <button onclick={loadTracks} disabled={switching}>Change audio or subtitles</button>
@@ -107,6 +114,12 @@
 
 <style>
   .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .onair-row { display: flex; gap: 14px; align-items: center; }
+  .cover {
+    width: 52px; height: 74px; object-fit: cover; border-radius: 6px;
+    border: 1px solid var(--border); flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  }
   .tracks { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
   .line {
     display: block; width: 100%; text-align: left; margin: 3px 0;

@@ -304,23 +304,23 @@
       </div>
     </div>
     <p class="muted small">
-      Burning subtitles runs on one core, because libass is single-threaded —
-      so a machine can be fast enough overall and still fail on subtitled
-      1080p. Encoding several chunks at once uses the rest of the CPU;
-      measured 3.5&times; with four workers. Costs one chunk-length of delay
-      before playback starts. 1 disables it. Run
-      <code>cli.js benchmark &lt;file&gt;</code> to see what it buys you.
+      Encodes several sections of the CPU path at once. Whether it helps
+      varies wildly by machine &mdash; measured 3.5&times; on one box and
+      <em>slower</em> than a single worker on another &mdash; and it costs one
+      chunk-length of delay before playback starts. Leave at 1 unless
+      <code>cli.js benchmark &lt;file&gt;</code> shows a clear win.
     </p>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
       <input type="checkbox" bind:checked={cfg.encoder.extractSubtitles} style="width:auto" />
-      Extract subtitles before burning
+      Extract subtitles in the background
     </label>
     <p class="muted small">
-      Reads the whole file once to pull the subtitle track and fonts out. On a
-      network mount this can take minutes before playback starts, and measured
-      here it gained only 6% &mdash; so it is off unless the benchmark shows
-      it pays on your storage.
+      Pulls the subtitle track and fonts out to small local files while the
+      previous episode plays, so burning them doesn't read the whole file a
+      second time over the network &mdash; measured 24% faster on Bluray
+      remuxes. Never delays playback; the first episode of a session still
+      reads them from the file directly.
     </p>
 
     <div class="actions">
@@ -335,9 +335,11 @@
   <!-- Library -->
   <section class="card">
     <h3>Library</h3>
-    <div class="actions">
-      <label class="pick"><input type="radio" bind:group={cfg.library.provider} value="jellyfin" /> Jellyfin</label>
-      <label class="pick"><input type="radio" bind:group={cfg.library.provider} value="filesystem" /> A folder</label>
+    <div class="segc" role="radiogroup" aria-label="Library provider">
+      <button class:on={cfg.library.provider === 'jellyfin'}
+              onclick={() => (cfg.library.provider = 'jellyfin')}>Jellyfin</button>
+      <button class:on={cfg.library.provider === 'filesystem'}
+              onclick={() => (cfg.library.provider = 'filesystem')}>A folder</button>
     </div>
 
     {#if cfg.library.provider === 'jellyfin'}
@@ -489,7 +491,14 @@
 {/if}
 
 <style>
+  /* Full-width inputs on a wide monitor stretch absurdly; settings read as a
+     form, and forms want a column. */
+  section, :global(main) > p { max-width: 680px; }
   section { margin-bottom: 16px; }
+  section h3 {
+    margin: 0 0 4px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
   label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
   input, select, textarea {
     width: 100%; font: inherit; color: inherit;
@@ -498,9 +507,25 @@
   }
   .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  .actions input { flex: 1; min-width: 120px; }
+  /* Direct children only: this rule sizes the path-mapping text fields, and
+     unscoped it also stretched radio buttons nested inside labels. */
+  .actions > input { flex: 1; min-width: 120px; }
   .actions button { flex-shrink: 0; }
-  .ok { color: var(--success); }
+  .ok { color: var(--success); animation: okin .2s ease; }
+  @keyframes okin { from { opacity: 0; transform: translateX(-4px); } }
+  .segc {
+    display: inline-flex; gap: 2px; margin-top: 10px; padding: 3px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+  .segc button {
+    border: none; background: transparent; border-radius: 999px;
+    padding: 6px 16px; font-size: 13px; color: var(--muted);
+  }
+  .segc button.on {
+    background: var(--surface); color: var(--text);
+    box-shadow: 0 1px 3px rgba(0,0,0,.2);
+  }
   .result {
     margin-top: 10px; padding: 9px 12px; border-radius: var(--radius); font-size: 13px;
     background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success);
@@ -514,8 +539,6 @@
   .enc input { width: auto; }
   .enc label { margin: 0; color: inherit; font-size: 14px; }
   .enc label.dim { color: var(--muted); }
-  .pick { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; color: inherit; }
-  .pick input { width: auto; }
   a { color: var(--accent); }
   code { font-family: ui-monospace, monospace; font-size: 12px; }
 </style>

@@ -153,8 +153,12 @@
         {#each libraries as l}<option value={l.id}>{l.name}</option>{/each}
       </select>
     {/if}
-    <input placeholder="Search" bind:value={search}
-           oninput={() => { clearTimeout(globalThis._t); globalThis._t = setTimeout(loadItems, 250); }} />
+    <div class="search">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+           stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input placeholder="Search" bind:value={search}
+             oninput={() => { clearTimeout(globalThis._t); globalThis._t = setTimeout(loadItems, 250); }} />
+    </div>
   </header>
 
   {#if !items.length}
@@ -169,6 +173,9 @@
             {:else}
               <span class="initial">{item.title.slice(0, 1)}</span>
             {/if}
+            <span class="playbadge" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </span>
           </div>
           <p class="name">{item.title}</p>
           {#if item.childCount}<p class="muted small">{item.childCount} episodes</p>{/if}
@@ -205,7 +212,8 @@
 
   <ul class="eps">
     {#each episodes as ep}
-      <li class:sel={selected.has(ep.id)}>
+      <li class:sel={selected.has(ep.id)}
+          onclick={(e) => { if (!e.target.closest('button, input')) toggle(ep.id); }}>
         <input type="checkbox" checked={selected.has(ep.id)} onchange={() => toggle(ep.id)} />
         <span class="num">
           {ep.season != null && ep.episode != null ? `S${String(ep.season).padStart(2,'0')}E${String(ep.episode).padStart(2,'0')}` : '—'}
@@ -265,22 +273,49 @@
 {/if}
 
 <style>
-  .row { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .row { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
   .spacer { flex: 1; }
 
+  .search { position: relative; }
+  .search svg {
+    position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    color: var(--muted); pointer-events: none;
+  }
+  .search input { padding-left: 32px; width: 220px; transition: width .15s ease; }
+  .search input:focus { width: 280px; }
+
   .grid {
-    display: grid; gap: 14px;
+    display: grid; gap: 18px 14px;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
   .poster { background: none; border: none; padding: 0; text-align: left; }
   .art {
     aspect-ratio: 2/3; border-radius: 8px; overflow: hidden;
     background: var(--surface-2); border: 1px solid var(--border);
-    display: grid; place-items: center;
+    display: grid; place-items: center; position: relative;
+    transition: transform .18s ease, box-shadow .18s ease;
+  }
+  .poster:hover .art, .poster:focus-visible .art {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 28px rgba(0,0,0,.3);
   }
   .art img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .initial { font-size: 32px; color: var(--muted); }
-  .name { margin: 6px 0 0; font-size: 13px; line-height: 1.35; }
+  .playbadge {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: rgba(0,0,0,.35); color: #fff;
+    opacity: 0; transition: opacity .15s ease;
+  }
+  .playbadge svg {
+    width: 40px; height: 40px; padding: 10px; box-sizing: content-box;
+    background: color-mix(in srgb, var(--accent) 90%, #000);
+    border-radius: 50%; transform: scale(.85);
+    transition: transform .15s ease;
+  }
+  .poster:hover .playbadge, .poster:focus-visible .playbadge { opacity: 1; }
+  .poster:hover .playbadge svg { transform: scale(1); }
+  .name { margin: 7px 0 0; font-size: 13px; line-height: 1.35; }
+  .poster:hover .name { color: var(--accent); }
   .poster p { margin: 1px 0 0; }
 
   .seasons { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -290,7 +325,10 @@
   .eps li {
     display: flex; align-items: center; gap: 12px;
     padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 14px;
+    border-radius: var(--radius); cursor: pointer;
+    transition: background .12s ease;
   }
+  .eps li:hover { background: var(--surface-2); }
   .eps li.sel { background: color-mix(in srgb, var(--accent) 9%, transparent); }
   .num { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 62px; }
   .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
