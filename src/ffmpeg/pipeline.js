@@ -35,6 +35,28 @@ import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
+
+/**
+ * Where the video content lands inside the output frame after aspect-
+ * preserving scaling — the rectangle subtitles must be rendered into.
+ * A 4:3 source in a 16:9 output occupies a centered 1440x1080 of 1920x1080;
+ * rendering subs on the full frame instead smears their positions toward
+ * the pillarbox bars.
+ */
+export function contentRect(video, profile) {
+  const W = profile.width;
+  const H = profile.height;
+  const vw = video?.width;
+  const vh = video?.height;
+  if (!vw || !vh) return { w: W, h: H, x: 0, y: 0, bars: false };
+  const r = Math.min(W / vw, H / vh);
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const w = even(vw * r);
+  const h = even(vh * r);
+  const x = Math.round((W - w) / 2);
+  const y = Math.round((H - h) / 2);
+  return { w, h, x, y, bars: x > 1 || y > 1 };
+}
 import { extractSubtitle, extractFonts } from './subcache.js';
 import { ChunkScheduler } from './chunker.js';
 
@@ -578,27 +600,32 @@ export function buildSourceArgs({
     const canvasCap = duration != null && duration > 0
       ? ['-t', (Math.max(1, duration - offset) + 5).toFixed(3)]
       : [];
-    // The canvas starts at pts 0 but the video is seeked to `offset`, so the
-    // canvas pts are shifted forward for libass to render the right events,
-    // then re-zeroed to align with the seeked video for the overlay.
+    // Subtitles are rendered at the video's content rectangle, then the
+    // composite is placed onto a black frame — positioned ASS for 4:3
+    // content lands where the author put it instead of smearing toward the
+    // pillarbox bars of the 16:9 output.
+    const rect = contentRect(selection?.video, profile);
     const shift = Number(offset).toFixed(3);
+    const subChain = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+      + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
+      + `[0:v]scale_vaapi=w=${rect.w}:h=${rect.h}[b];[b][ov]overlay_vaapi`;
+    const graph = rect.bars
+      ? `${subChain}[vs];[2:v]hwupload[bg];[bg][vs]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`
+      : `${subChain}[v]`;
+    const bgInput = rect.bars
+      ? ['-f', 'lavfi', ...canvasCap,
+        '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps},format=nv12`]
+      : [];
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
       '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
       ...(offset > 0 ? ['-ss', shift] : []),
       '-i', srcPath,
-      '-f', 'lavfi',
-      '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${profile.fps},format=rgba`,
-      '-filter_complex',
-      // :alpha=1 is load-bearing. Without it libass writes glyph COLOURS
-      // but leaves the canvas alpha plane untouched — all zero — so the
-      // overlay composites full transparency: CPU cost paid, nothing
-      // visible. This is why every GPU-path stream had invisible subtitles
-      // while CPU burn-in (no alpha involved) rendered fine.
-      `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
-      + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}[b];`
-      + `[b][ov]overlay_vaapi[v]`,
+      '-f', 'lavfi', ...canvasCap,
+      '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${profile.fps},format=rgba`,
+      ...bgInput,
+      '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs(profile),
       ...audioArgs(profile),
@@ -610,6 +637,19 @@ export function buildSourceArgs({
     ];
   }
 
+  // Subtitles must be burned between scale and pad — on the padded frame,
+  // positioned subs for narrow content drift toward the bars.
+  const rect = contentRect(selection?.video, profile);
+  const cpuChain = sub.filter
+    ? [
+      `scale=${rect.w}:${rect.h},setsar=1`,
+      `${sub.filter}:alpha=0`,
+      `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
+      `fps=${profile.fps}`,
+      upload,
+    ]
+    : [base, upload];
+
   const filterArgs = sub.needsComplex
     ? [
       '-filter_complex',
@@ -617,7 +657,7 @@ export function buildSourceArgs({
       '-map', '[v]',
     ]
     : [
-      '-vf', [base, sub.filter, upload].filter(Boolean).join(','),
+      '-vf', cpuChain.filter(Boolean).join(','),
       '-map', '0:v:0',
     ];
 
@@ -669,6 +709,19 @@ export function buildChunkArgs({
   const base = scaleFilter(profile);
   const upload = be.uploadFilter(profile);
 
+  // Subtitles must be burned between scale and pad — on the padded frame,
+  // positioned subs for narrow content drift toward the bars.
+  const rect = contentRect(selection?.video, profile);
+  const cpuChain = sub.filter
+    ? [
+      `scale=${rect.w}:${rect.h},setsar=1`,
+      `${sub.filter}:alpha=0`,
+      `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
+      `fps=${profile.fps}`,
+      upload,
+    ]
+    : [base, upload];
+
   const filterArgs = sub.needsComplex
     ? [
       '-filter_complex',
@@ -676,7 +729,7 @@ export function buildChunkArgs({
       '-map', '[v]',
     ]
     : [
-      '-vf', [base, sub.filter, upload].filter(Boolean).join(','),
+      '-vf', cpuChain.filter(Boolean).join(','),
       '-map', '0:v:0',
     ];
 

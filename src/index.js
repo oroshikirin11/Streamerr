@@ -407,6 +407,10 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     ...(config.tracks ?? {}),
     ...(req.body?.trackOverride ?? {}),
   });
+  // Source geometry: subtitles must be rendered at the video's content
+  // rectangle, not the padded output frame, or 4:3 content gets its
+  // positioned subs smeared toward the 16:9 edges.
+  selection.video = tracks.video[0] ?? null;
 
   // Subtitles go through the full-GPU path when the driver supports it —
   // the difference between unstreamable and comfortable on weak CPUs.
@@ -505,6 +509,7 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
     subtitleId: req.body?.subtitleKey ?? null,
     subtitleMode: req.body?.subtitleMode ?? config.tracks?.subtitleMode ?? 'auto',
   });
+  selection.video = tracks.video[0] ?? null;
 
   // Only the source restarts; the publisher keeps the connection open, so
   // this is near-instant rather than an interruption.
