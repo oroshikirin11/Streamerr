@@ -29,9 +29,12 @@ import { PipelinePlayout } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { makeLibrary } from './library/index.js';
 import { suggestRules } from './library/pathmap.js';
+import { dpush, dlist, teeConsole } from './debuglog.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = resolve(__dirname, '../web/build');
+
+teeConsole();
 
 const app = express();
 const server = http.createServer(app);
@@ -92,13 +95,15 @@ function buildEngine({ profile, selection }) {
   e.on('progress', (b) => broadcast('progress', {
     position: b.position, speed: b.speed, drops: b.drops,
   }));
-  e.on('warn', (m) => broadcast('warn', { message: redact(String(m)) }));
+  e.on('warn', (m) => { dpush('warn', m); broadcast('warn', { message: redact(String(m)) }); });
+  e.on('log', (m) => dpush('ffmpeg', m));
   // Distinct from a generic warning: this one predicts the stream failing.
   e.on('tooslow', (d) => broadcast('error', {
     message: `Cannot encode fast enough (${d.speed}x). The stream will stall — `
       + 'try turning subtitles off or lowering the resolution.',
   }));
   e.on('fatal', (err) => {
+    dpush('error', err.message);
     broadcast('error', { message: redact(err.message) });
     if (engine === e) engine = null;
     broadcast('stream', streamStatus());
@@ -191,6 +196,11 @@ function redactedConfig() {
     },
   };
 }
+
+/** Read-only activity log for the web console. No input path exists. */
+app.get('/api/debug/log', (req, res) => {
+  res.json({ entries: dlist(Number(req.query.after) || 0) });
+});
 
 app.get('/api/config', (req, res) => res.json(redactedConfig()));
 

@@ -329,6 +329,13 @@ export class PipelinePlayout extends EventEmitter {
 
     const cached = this._cachedSubs(item.srcPath);
     const clipDuration = this.current.duration;
+    const v = this.selection?.video;
+    if (v) {
+      const rect = contentRect(v, this.profile);
+      this.emit('log', `[geometry] source ${v.width}x${v.height} sar=${v.sar ?? '?'} `
+        + `dar=${v.dar ?? '?'} -> rect ${rect.w}x${rect.h} @${rect.x},${rect.y}`
+        + `${rect.bars ? ' (pillarboxed)' : ''}\n`);
+    }
 
     // Several encodes at once when one process cannot keep up. Only worth it
     // when subtitles are being burned — that is what pins the pipeline to a
@@ -468,6 +475,7 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _spawnSource(args, { kind }) {
+    this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
     const startedAt = Date.now();
     // fd 3 carries -progress so it doesn't fight stderr for the log stream.
     const s = spawn('ffmpeg', args, {

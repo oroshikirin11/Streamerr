@@ -57,6 +57,8 @@ const DEFAULTS = {
   // only reliably portable form.
   paths: { cache: './cache', run: './run' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
+  // Shows the read-only Console page in the panel.
+  devMode: false,
   tracks: {
     // What the user understands. Used both to decide whether a dub is wanted
     // and to choose a subtitle language.

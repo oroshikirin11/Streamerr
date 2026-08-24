@@ -397,6 +397,20 @@
     </div>
   </section>
 
+  <!-- Developer -->
+  <section class="card">
+    <h3>Developer</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.devMode} style="width:auto"
+             onchange={() => api.saveConfig({ devMode: cfg.devMode })} />
+      Developer mode — show the read-only Console page
+    </label>
+    <p class="muted small">
+      Live server and ffmpeg logs in the panel, with stream keys redacted.
+      Useful when reporting a problem.
+    </p>
+  </section>
+
   <!-- Account -->
   <section class="card">
     <h3>Password</h3>
