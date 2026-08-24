@@ -59,5 +59,14 @@
     "_comment": "How many clips ahead of the playhead to keep normalized.",
     "lookahead": 2,
     "cacheLimitGB": 50
+  },
+
+  "_comment4": "Ordered language preferences, most-wanted first. 'de', 'ger' and 'deu' are equivalent. Subtitles are burned into the video, so this choice applies to a whole streaming session.",
+  "tracks": {
+    "audioLanguages": ["jpn", "ger", "eng"],
+    "subtitleLanguages": ["ger", "eng"],
+
+    "_comment": "auto = subtitles when the audio isn't in a language you read, forced-only when it is. off = never. forced = signs and foreign dialogue only.",
+    "subtitleMode": "auto"
   }
 }

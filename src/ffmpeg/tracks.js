@@ -226,6 +226,10 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
 
   // ── subtitles ──
   let subtitle = null;
+  // Why no subtitle was chosen, when none was. "None available" and
+  // "none needed" are very different outcomes and must not read the same.
+  let skipped = null;
+
   if (subtitleMode !== 'off') {
     if (subtitleId != null) {
       subtitle = typeof subtitleId === 'string'
@@ -239,10 +243,20 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
       const audioLang = audio?.language ?? null;
       const wanted = subtitleLanguages.map(normLang);
 
-      // If the audio is already in a preferred subtitle language, full subs
-      // are redundant; forced-only is what a viewer actually wants.
-      if (audioLang && wanted.includes(audioLang)) {
+      if (!wanted.length) {
+        // No stated preference. Behave like an ordinary player: use the
+        // track the file marks as default, else the first non-SDH one.
+        // Matching nothing here would silently disable subtitles on a file
+        // that plainly has them, which is never what someone means by "auto".
+        subtitle = subtitles.find((s) => s.default && !s.hearingImpaired)
+          ?? subtitles.find((s) => !s.hearingImpaired)
+          ?? subtitles[0]
+          ?? null;
+      } else if (audioLang && wanted.includes(audioLang)) {
+        // The audio is already in a language they read, so full subtitles are
+        // redundant — forced-only covers signs and foreign dialogue.
         subtitle = pickByLanguage(subtitles.filter((s) => s.forced), [audioLang]);
+        if (!subtitle) skipped = 'not needed — audio is already in a language you read';
       } else {
         subtitle = pickByLanguage(
           subtitles.filter((s) => !s.hearingImpaired),
@@ -252,11 +266,18 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
     }
   }
 
+  if (!subtitle && !skipped && subtitleMode !== 'off') {
+    skipped = subtitles.length
+      ? 'none matched your languages'
+      : 'this file has none';
+  }
+
   return {
     audio,
     subtitle,
+    skipped,
     // Surfaced so the UI can explain a choice rather than appearing arbitrary.
-    reason: describeChoice(audio, subtitle, subtitleMode),
+    reason: describeChoice(audio, subtitle, subtitleMode, skipped),
   };
 }
 
@@ -270,12 +291,12 @@ function pickByLanguage(list, languages) {
   return null;
 }
 
-function describeChoice(audio, subtitle, mode) {
+function describeChoice(audio, subtitle, mode, skipped) {
   const a = audio
     ? `audio ${audio.language ?? '?'}${audio.channels ? ` ${audio.channels}ch` : ''}`
     : 'no audio';
   if (mode === 'off') return `${a}, subtitles off`;
-  if (!subtitle) return `${a}, no matching subtitles`;
+  if (!subtitle) return `${a}, no subtitles (${skipped ?? 'none selected'})`;
   const kind = subtitle.external ? 'sidecar' : 'embedded';
   const flags = [subtitle.forced && 'forced', subtitle.bitmap && 'bitmap']
     .filter(Boolean).join(', ');

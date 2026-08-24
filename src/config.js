@@ -40,6 +40,15 @@ const DEFAULTS = {
   // only reliably portable form.
   paths: { cache: './cache', run: './run' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
+  // Ordered language preferences, most-wanted first. ISO 639 codes in any
+  // common form — "de", "ger" and "deu" all resolve to the same language.
+  // Empty means "no preference", which falls back to the file's own default
+  // track rather than to nothing.
+  tracks: {
+    audioLanguages: [],
+    subtitleLanguages: [],
+    subtitleMode: 'auto', // auto | off | forced
+  },
 };
 
 /** Shallow-by-section merge — enough for this config's one-level-deep shape. */
