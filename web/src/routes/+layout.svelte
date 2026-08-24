@@ -150,21 +150,12 @@
     link.href = live ? favLive : favIdle;
   });
 
+  // The tab title is what's on air, not which page is open: a red dot plus
+  // the playing title while broadcasting, just the service name otherwise.
   $effect(() => {
-    const wantLive = live;
-    const apply = () => {
-      const bare = document.title.replace(/^🔴 /, '');
-      const want = wantLive ? `🔴 ${bare}` : bare;
-      if (document.title !== want) document.title = want;
-    };
-    apply();
-    // Each page sets its own <title> on navigation, which would drop the
-    // prefix — watch for that and re-apply. The equality guard above stops
-    // the observer from feeding itself.
-    const el = document.querySelector('title');
-    const obs = new MutationObserver(apply);
-    if (el) obs.observe(el, { childList: true, characterData: true, subtree: true });
-    return () => obs.disconnect();
+    document.title = live && stream.playing
+      ? `🔴 ${stream.playing.title}`
+      : 'Jellystreamerr';
   });
 
   let devMode = $state(false);

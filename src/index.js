@@ -553,9 +553,11 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
         : item.title,
       srcPath: library.resolvePath(item),
       duration: item.duration ?? null,
+      image: item.image ?? null,
     });
   }
   engine.setQueue(items);
+  broadcast('stream', streamStatus());
   res.json(streamStatus());
 }));
 

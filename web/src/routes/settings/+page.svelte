@@ -171,8 +171,8 @@
   async function logout() { await api.logout(); location.reload(); }
 </script>
 
-<svelte:head><title>Settings — Jellystreamerr</title></svelte:head>
 
+<div class="wrap">
 <h1>Settings</h1>
 
 {#if !cfg}
@@ -489,11 +489,12 @@
     same settings, in order, with a check after each one.
   </p>
 {/if}
+</div>
 
 <style>
   /* Full-width inputs on a wide monitor stretch absurdly; settings read as a
-     form, and forms want a column. */
-  section, :global(main) > p { max-width: 680px; }
+     form, and forms want a centered column, not a strip down the left edge. */
+  .wrap { max-width: 680px; margin: 0 auto; }
   section { margin-bottom: 16px; }
   section h3 {
     margin: 0 0 4px; padding-bottom: 10px;

@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { api, fmtTime } from '$lib/api.js';
 
   let status = $state({ status: 'stopped', playing: null, queue: [] });
@@ -7,10 +7,34 @@
   let tracks = $state(null);
   let switching = $state(false);
   let note = $state('');
+  let editing = $state(false);
+  let timer;
 
-  onMount(async () => {
+  async function refresh() {
     try { status = await api.streamStatus(); }
     catch (err) { error = err.message; }
+  }
+
+  onMount(() => { refresh(); timer = setInterval(refresh, 4000); });
+  onDestroy(() => clearInterval(timer));
+
+  /** Every edit is a full replacement of the upcoming list, keyed by id. */
+  async function editQueue(fn) {
+    editing = true; error = '';
+    try {
+      const ids = (status.queue ?? []).map((q) => q.id);
+      await api.setQueue(fn(ids));
+      await refresh();
+    } catch (err) { error = err.message; }
+    finally { editing = false; }
+  }
+
+  const removeAt = (i) => editQueue((ids) => ids.filter((_, j) => j !== i));
+  const move = (i, d) => editQueue((ids) => {
+    const next = [...ids];
+    const [x] = next.splice(i, 1);
+    next.splice(i + d, 0, x);
+    return next;
   });
 
   async function loadTracks() {
@@ -40,8 +64,8 @@
   }
 </script>
 
-<svelte:head><title>Queue — Jellystreamerr</title></svelte:head>
 
+<div class="wrap">
 <h1>Queue</h1>
 {#if error}<p class="err">{error}</p>{/if}
 
@@ -104,15 +128,40 @@
 
   <h2 style="margin-top:22px">Up next</h2>
   {#if !status.queue?.length}
-    <p class="muted">Nothing queued — the broadcast ends when this finishes.</p>
+    <p class="muted">
+      Nothing queued — the broadcast ends when this finishes.
+      Add more from the library at any time.
+    </p>
   {:else}
-    <ol class="q">
-      {#each status.queue as item}<li>{item.title}</li>{/each}
-    </ol>
+    <ul class="q">
+      {#each status.queue as item, i (item.id ?? i)}
+        <li>
+          <span class="pos muted small">{i + 1}</span>
+          <span class="qt">{item.title}</span>
+          {#if item.duration}<span class="muted small">{fmtTime(item.duration)}</span>{/if}
+          <span class="qctl">
+            <button class="ic" disabled={editing || i === 0} onclick={() => move(i, -1)}
+                    title="Move up" aria-label="Move up">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button class="ic" disabled={editing || i === status.queue.length - 1} onclick={() => move(i, 1)}
+                    title="Move down" aria-label="Move down">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+            </button>
+            <button class="ic rm" disabled={editing} onclick={() => removeAt(i)}
+                    title="Remove from queue" aria-label="Remove from queue">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </span>
+        </li>
+      {/each}
+    </ul>
   {/if}
 {/if}
+</div>
 
 <style>
+  .wrap { max-width: 680px; margin: 0 auto; }
   .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   .onair-row { display: flex; gap: 14px; align-items: center; }
   .cover {
@@ -126,6 +175,23 @@
     background: transparent; border-color: var(--border); font-size: 13px;
   }
   .line.on { border-color: var(--accent); color: var(--accent); }
-  .q { padding-left: 20px; }
-  .q li { padding: 5px 0; border-bottom: 1px solid var(--border); }
+  .q { list-style: none; padding: 0; margin: 0; }
+  .q li {
+    display: flex; align-items: center; gap: 12px;
+    padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px;
+    border-radius: var(--radius);
+    transition: background .12s ease;
+  }
+  .q li:hover { background: var(--surface-2); }
+  .pos { min-width: 18px; text-align: right; font-variant-numeric: tabular-nums; }
+  .qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qctl { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
+  .q li:hover .qctl, .q li:focus-within .qctl { opacity: 1; }
+  .qctl .ic {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; padding: 0; border-radius: 6px;
+    background: transparent; border-color: transparent; color: var(--muted);
+  }
+  .qctl .ic:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+  .qctl .rm:hover:not(:disabled) { color: var(--danger); }
 </style>

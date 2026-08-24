@@ -34,7 +34,6 @@
   const fmt = (t) => new Date(t).toTimeString().slice(0, 8);
 </script>
 
-<svelte:head><title>Console — Jellystreamerr</title></svelte:head>
 
 <header class="row">
   <h1>Console</h1>

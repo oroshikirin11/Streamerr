@@ -3,12 +3,22 @@
   import { api, fmtTime } from '$lib/api.js';
 
   let libraries = $state([]);
+  // Null = showing the folder cards. The grid only exists inside a library.
   let libraryId = $state(null);
   let items = $state([]);
   let total = $state(0);
   let search = $state('');
   let loading = $state(true);
   let error = $state('');
+  /** Whether a broadcast is running — decides "Stream" vs "Add to queue". */
+  let live = $state(false);
+
+  const currentLibrary = $derived(libraries.find((l) => l.id === libraryId));
+
+  async function refreshLive() {
+    try { live = (await api.streamStatus()).status !== 'stopped'; }
+    catch { live = false; }
+  }
 
   // Drill-down state. Null series = showing the grid.
   let series = $state(null);
@@ -27,18 +37,26 @@
     loading = true;
     error = '';
     try {
+      refreshLive();
       libraries = await api.libraries();
       if (!libraries.length) {
         error = 'No libraries configured. Set one up in Settings.';
         return;
       }
-      libraryId = libraries[0].id;
-      await loadItems();
+      // A single library has no choice to offer — skip straight to its grid.
+      if (libraries.length === 1) await enterLibrary(libraries[0]);
     } catch (err) {
       error = err.message;
     } finally {
       loading = false;
     }
+  }
+
+  async function enterLibrary(l) {
+    libraryId = l.id;
+    search = '';
+    items = [];
+    await loadItems();
   }
 
   async function loadItems() {
@@ -48,6 +66,7 @@
   }
 
   async function openSeries(item) {
+    refreshLive();
     series = item;
     selected = new Set();
     seasonId = null;
@@ -122,7 +141,19 @@
     error = '';
     try {
       const ordered = episodes.filter((e) => selected.has(e.id)).map((e) => e.id);
-      await api.start(ordered, trackOverride);
+      if (live) {
+        // Append behind whatever is already queued — the broadcast is not
+        // interrupted, the selection just plays when its turn comes.
+        const st = await api.streamStatus();
+        if (st.status === 'stopped') {
+          live = false;
+          await api.start(ordered, trackOverride);
+        } else {
+          await api.setQueue([...(st.queue ?? []).map((q) => q.id), ...ordered]);
+        }
+      } else {
+        await api.start(ordered, trackOverride);
+      }
       selected = new Set();
       trackOverride = null;
       // Back to the grid: once it is playing, the transport bar is where you
@@ -136,7 +167,6 @@
   }
 </script>
 
-<svelte:head><title>Library — Jellystreamerr</title></svelte:head>
 
 {#if loading}
   <p class="muted">Loading library…</p>
@@ -144,15 +174,38 @@
 {:else if error && !items.length}
   <div class="card"><p class="err">{error}</p></div>
 
-{:else if !series}
+{:else if !libraryId}
   <header class="row">
     <h1>Library</h1>
-    <div class="spacer"></div>
+  </header>
+  <div class="folders">
+    {#each libraries as l}
+      <button class="folder" onclick={() => enterLibrary(l)}>
+        <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor"
+             stroke-width="1.5" aria-hidden="true">
+          {#if l.type === 'movies'}
+            <path d="M4 5h16v14H4zM4 9h16M8 5v4M16 5v4M4 15h16M8 15v4M16 15v4"/>
+          {:else if l.type === 'tvshows'}
+            <path d="M3 8h18v11H3zM8 21h8M12 8L8 3M12 8l4-5"/>
+          {:else}
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          {/if}
+        </svg>
+        <span class="fname">{l.name}</span>
+        <span class="muted small">
+          {l.type === 'movies' ? 'Movies' : l.type === 'tvshows' ? 'Shows' : 'Media'}
+        </span>
+      </button>
+    {/each}
+  </div>
+
+{:else if !series}
+  <header class="row">
     {#if libraries.length > 1}
-      <select bind:value={libraryId} onchange={loadItems}>
-        {#each libraries as l}<option value={l.id}>{l.name}</option>{/each}
-      </select>
+      <button onclick={() => { libraryId = null; items = []; error = ''; }}>← Library</button>
     {/if}
+    <h1 style="margin:0">{currentLibrary?.name ?? 'Library'}</h1>
+    <div class="spacer"></div>
     <div class="search">
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
            stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -189,12 +242,13 @@
 
 {:else}
   <header class="row">
-    <button onclick={() => { series = null; error = ''; }}>← Library</button>
+    <button onclick={() => { series = null; error = ''; }}>← {currentLibrary?.name ?? 'Library'}</button>
     <h1 style="margin:0">{series.title}</h1>
     <div class="spacer"></div>
     {#if selected.size}
       <button class="primary" disabled={starting} onclick={stream}>
-        {starting ? 'Starting…' : `Stream ${selected.size} episode${selected.size > 1 ? 's' : ''}`}
+        {#if starting}{live ? 'Queueing…' : 'Starting…'}
+        {:else}{live ? 'Add' : 'Stream'} {selected.size} episode{selected.size > 1 ? 's' : ''}{live ? ' to queue' : ''}{/if}
       </button>
     {/if}
   </header>
@@ -275,6 +329,24 @@
 <style>
   .row { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
   .spacer { flex: 1; }
+
+  .folders {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    max-width: 800px;
+  }
+  .folder {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+    padding: 18px 16px 14px; text-align: left;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; color: var(--muted);
+    transition: transform .15s ease, box-shadow .15s ease, border-color .15s;
+  }
+  .folder:hover {
+    transform: translateY(-3px); border-color: var(--accent);
+    box-shadow: 0 10px 24px rgba(0,0,0,.25); color: var(--accent);
+  }
+  .fname { font-size: 15px; font-weight: 500; color: var(--text); }
 
   .search { position: relative; }
   .search svg {

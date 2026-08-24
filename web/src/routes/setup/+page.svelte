@@ -146,7 +146,6 @@
   function removeRule(i) { rules = rules.filter((_, j) => j !== i); }
 </script>
 
-<svelte:head><title>Setup — Jellystreamerr</title></svelte:head>
 
 <div class="wrap">
   <p class="muted small">Setup — step {step + 1} of {STEPS.length}</p>
