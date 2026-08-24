@@ -599,16 +599,17 @@ async function cmdBenchmark() {
   if (withHw > without * 1.15) {
     console.log(`  GPU decode is ${(withHw / without).toFixed(1)}x faster — enable it in Settings.`);
   }
+  // The 720p run is excluded here: it answers "what would a downgrade buy"
+  // and must not be crowned the winner over full-quality configurations.
   const streamable = chosen.subtitle
-    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0, parallel ?? 0, gpuPath ?? 0, qsvPath ?? 0)
+    ? Math.max(with_ ?? 0, withExtracted ?? 0, parallel ?? 0, gpuPath ?? 0, qsvPath ?? 0)
     : Math.max(without, withHw, gpuPath ?? 0, qsvPath ?? 0);
+  console.log('');
   if (streamable < 1.2) {
-    console.log('');
-    console.log('  Nothing here is fast enough to stream this file as configured.');
+    console.log('  Nothing at full quality is fast enough to stream this file as configured.');
     console.log('  Try 720p output, a lighter subtitle track, or subtitles off.');
   } else {
-    console.log('');
-    console.log(`  Fastest usable configuration: ${streamable.toFixed(2)}x realtime.`);
+    console.log(`  Fastest at full quality: ${streamable.toFixed(2)}x realtime — what live playback uses.`);
   }
   console.log('');
 }
