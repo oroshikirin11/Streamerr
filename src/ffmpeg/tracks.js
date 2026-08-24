@@ -62,7 +62,7 @@ export function probeTracks(path) {
       '-v', 'error',
       '-show_streams',
       '-show_entries',
-      'stream=index,codec_name,codec_type,channels,channel_layout,width,height:'
+      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio:'
       + 'stream_tags=language,title:stream_disposition=default,forced,hearing_impaired',
       '-of', 'json',
       path,
@@ -124,6 +124,10 @@ function groupStreams(streams) {
     if (type === 'video') {
       entry.width = s.width ?? null;
       entry.height = s.height ?? null;
+      // Anamorphic sources store one geometry and display another; subtitle
+      // placement must use the DISPLAY shape or 4:3 math lands wrong.
+      entry.sar = s.sample_aspect_ratio ?? null;
+      entry.dar = s.display_aspect_ratio ?? null;
     }
     result[type].push(entry);
   }

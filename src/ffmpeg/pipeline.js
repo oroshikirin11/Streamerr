@@ -46,9 +46,14 @@ import { buildSubtitleFilter } from './tracks.js';
 export function contentRect(video, profile) {
   const W = profile.width;
   const H = profile.height;
-  const vw = video?.width;
+  let vw = video?.width;
   const vh = video?.height;
   if (!vw || !vh) return { w: W, h: H, x: 0, y: 0, bars: false };
+  // Use the display width: anamorphic sources (SAR != 1) are stored narrow
+  // or wide and stretched at playback, and placement must follow what the
+  // viewer sees, not what the file stores.
+  const m = /^(\d+):(\d+)$/.exec(video?.sar ?? '');
+  if (m && +m[1] > 0 && +m[2] > 0) vw = vw * (+m[1] / +m[2]);
   const r = Math.min(W / vw, H / vh);
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
   const w = even(vw * r);

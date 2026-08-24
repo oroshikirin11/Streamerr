@@ -180,18 +180,38 @@
           </p>
         </div>
 
-        <div class="bar">
+        <div class="bar" class:seekable={stream.playing.duration}
+             role="slider" tabindex="0" aria-label="Seek"
+             aria-valuenow={Math.round(position)}
+             onclick={(e) => {
+               if (!stream.playing.duration || busyCtl) return;
+               const r = e.currentTarget.getBoundingClientRect();
+               const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+               ctl(() => api.seek({ position: frac * stream.playing.duration }));
+             }}
+             onkeydown={(e) => {
+               if (e.key === 'ArrowRight') skip(30);
+               if (e.key === 'ArrowLeft') skip(-30);
+             }}>
           <div class="fill" style:width="{stream.playing.duration
             ? Math.min(100, (position / stream.playing.duration) * 100)
             : 0}%"></div>
         </div>
 
         <div class="ctl">
-          <button onclick={() => skip(-30)} disabled={busyCtl} title="Back 30 seconds">-30s</button>
-          <button onclick={togglePause} disabled={busyCtl} title={paused ? 'Resume' : 'Pause'}>
-            {paused ? 'Resume' : 'Pause'}
+          <button class="ic" onclick={() => skip(-30)} disabled={busyCtl} title="Back 30 seconds" aria-label="Back 30 seconds">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg><span class="tiny">30</span>
           </button>
-          <button onclick={() => skip(30)} disabled={busyCtl} title="Forward 30 seconds">+30s</button>
+          <button class="ic" onclick={togglePause} disabled={busyCtl} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
+            {#if paused}
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+            {:else}
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+            {/if}
+          </button>
+          <button class="ic" onclick={() => skip(30)} disabled={busyCtl} title="Forward 30 seconds" aria-label="Forward 30 seconds">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
+          </button>
           <button onclick={openTracks} disabled={busyCtl}>Audio &amp; subs</button>
           <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
         </div>
@@ -350,8 +370,12 @@
   .bar { flex: 1.2; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width .4s linear; }
 
-  .ctl { display: flex; gap: 6px; flex-shrink: 0; }
+  .ctl { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
   .ctl button { padding: 6px 10px; font-size: 13px; }
+  .ctl .ic { display: inline-flex; align-items: center; gap: 3px; padding: 6px 9px; }
+  .tiny { font-size: 10px; }
+  .bar.seekable { cursor: pointer; }
+  .bar.seekable:hover { height: 7px; }
   .panel {
     grid-column: 2; border-top: 1px solid var(--border);
     background: var(--surface); padding: 12px 20px 16px;
