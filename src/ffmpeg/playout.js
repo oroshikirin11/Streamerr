@@ -55,16 +55,16 @@ export class PlayoutEngine extends EventEmitter {
    */
   constructor({
     cacheDir, normalizer, target, statsPeriodMs = 500,
-    fileOutput = false, endBehavior = 'end', initialBurst = 10, caps = null,
+    endBehavior = 'end', initialBurst = 10, caps = null, waitForFirst = true,
   }) {
     super();
     this.cacheDir = cacheDir;
     this.normalizer = normalizer;
     this.target = target;
     this.statsPeriodMs = statsPeriodMs;
-    /** Write to a plain file instead of RTMP — used by the selftest. */
-    this.fileOutput = fileOutput;
     this.initialBurst = initialBurst;
+    /** Block until the first clip is encoded rather than opening on filler. */
+    this.waitForFirst = waitForFirst;
     /** Feature-detected concat demuxer options; see probeConcatCapabilities. */
     this.caps = caps ?? { recursionDepth: true, segmentTimeMetadata: true };
     /**
@@ -139,6 +139,16 @@ export class PlayoutEngine extends EventEmitter {
     this.status = 'starting';
     this.emit('status', this.status);
 
+    // Wait for the first clip before going live. The filler path exists to
+    // cover a clip that isn't ready mid-stream — using it at startup would
+    // put the channel on air showing black while the opening episode is
+    // still encoding, which reads as a broken stream.
+    if (this.waitForFirst && this.queue.length) {
+      const first = this.queue[0];
+      this.emit('preparing', { item: first });
+      await this.normalizer.ensure(first.srcPath, first.trackOverride ?? null);
+    }
+
     // Fill the chain before ffmpeg opens it. The head link must exist, and
     // having the lookahead already written means a slow first normalization
     // can't strand us the moment playback starts.
@@ -169,7 +179,6 @@ export class PlayoutEngine extends EventEmitter {
       head: headPath,
       target: this.target,
       statsPeriodMs: this.statsPeriodMs,
-      fileOutput: this.fileOutput,
       initialBurst: this.initialBurst,
       caps: this.caps,
     });
@@ -204,14 +213,14 @@ export class PlayoutEngine extends EventEmitter {
 
     let stderr = '';
     child.stderr.on('data', (d) => {
-      const s = d.toString();
+      const s = this._redact(d.toString());
       stderr += s;
       if (stderr.length > 64_000) stderr = stderr.slice(-32_000);
       this.emit('log', s);
     });
 
     child.on('error', (err) => {
-      this.emit('error', err);
+      this.emit('error', new Error(this._redact(err.message)));
       this._teardown();
     });
 
@@ -240,6 +249,23 @@ export class PlayoutEngine extends EventEmitter {
 
     this.status = 'running';
     this.emit('status', this.status);
+  }
+
+  /**
+   * Strip the stream key from anything that might be logged.
+   *
+   * ffmpeg prints the full output URL in its own diagnostics, so an otherwise
+   * ordinary error message leaks the key into logs, terminals and bug reports.
+   * Everything emitted from this class goes through here.
+   */
+  _redact(text) {
+    if (!text) return text;
+    // Only meaningful for a network target; a local file path has no secret
+    // and blanking part of it would just corrupt the message.
+    if (!/^rtmps?:\/\//i.test(String(this.target))) return text;
+    const key = String(this.target).split('/').pop();
+    if (!key || key.length < 4) return text;
+    return text.split(key).join('*'.repeat(8));
   }
 
   _teardown() {
@@ -429,27 +455,9 @@ export class PlayoutEngine extends EventEmitter {
  * during normalization, so there is nothing to encode while live.
  */
 export function buildPlayoutArgs({
-  head, target, statsPeriodMs = 500, fileOutput = false, initialBurst = 10,
+  head, target, statsPeriodMs = 500, initialBurst = 10,
   caps = { recursionDepth: true, segmentTimeMetadata: true },
 }) {
-  // Writing to a file exercises the identical concat/copy path minus the RTMP
-  // muxer, which is what the selftest needs in order to verify chaining
-  // without a server.
-  const sink = fileOutput
-    ? ['-f', 'mpegts']
-    : [
-      // Reconnects a dropped RTMP push without killing the process. This is
-      // the only in-ffmpeg mechanism that survives a blip, and Owncast's 10s
-      // deadline leaves no room to restart the whole pipeline.
-      '-f', 'fifo', '-fifo_format', 'flv',
-      '-attempt_recovery', '1', '-recover_any_error', '1',
-      '-restart_with_keyframe', '1', '-recovery_wait_time', '1',
-      '-drop_pkts_on_overflow', '1', '-queue_size', '240',
-      // no_sequence_end: otherwise ffmpeg sends an explicit end-of-sequence
-      // tag on exit and Owncast ends the broadcast.
-      '-flvflags', 'no_duration_filesize+no_sequence_end',
-    ];
-
   return [
     '-hide_banner', '-nostdin',
     // Pace by timestamps. The initial burst fills Owncast's buffer quickly so
@@ -469,12 +477,31 @@ export function buildPlayoutArgs({
     // playlist position from inside a single long-running process.
     ...(caps.segmentTimeMetadata ? ['-segment_time_metadata', '1'] : []),
     '-i', head,
+    // The fifo muxer does NOT perform automatic stream selection — without
+    // explicit maps it reports "Output file does not contain any stream" and
+    // exits, even though the input plainly has both.
+    '-map', '0:v:0', '-map', '0:a:0',
     '-c', 'copy',
+    // FLV codec ids: 7 = AVC, 10 = AAC. Copying from MPEG-TS carries the TS
+    // stream types (27 and 15) across, and the fifo muxer does not sanitise
+    // them for the muxer it wraps — the inner flv muxer then rejects every
+    // packet with "Tag [27][0][0][0] incompatible with output codec id".
+    // Writing flv directly works without this; only the fifo path needs it.
+    '-tag:v', '7', '-tag:a', '10',
     '-muxdelay', '0', '-muxpreload', '0',
     // Without this the muxer will stall video up to 10s waiting on lagging
     // audio, which reads as a freeze.
     '-max_interleave_delta', '0',
-    ...sink,
+    // Reconnects a dropped RTMP push without killing the process. The only
+    // in-ffmpeg mechanism that survives a blip, and Owncast's 10s deadline
+    // leaves no room to restart the whole pipeline.
+    '-f', 'fifo', '-fifo_format', 'flv',
+    '-attempt_recovery', '1', '-recover_any_error', '1',
+    '-restart_with_keyframe', '1', '-recovery_wait_time', '1',
+    '-drop_pkts_on_overflow', '1', '-queue_size', '240',
+    // no_sequence_end: otherwise ffmpeg sends an explicit end-of-sequence tag
+    // on exit and Owncast ends the broadcast.
+    '-flvflags', 'no_duration_filesize+no_sequence_end',
     '-progress', 'pipe:1', '-stats_period', String(statsPeriodMs / 1000),
     target,
   ];

@@ -154,10 +154,12 @@ async function cmdSelftest() {
     const engine = new PlayoutEngine({
       cacheDir: dir,
       normalizer: norm,
-      // A plain file rather than RTMP, so this needs no server. The concat
-      // and copy path under test is otherwise identical.
-      target: join(dir, 'out.ts'),
-      fileOutput: true,
+      // A local .flv rather than an RTMP URL. Everything else — the concat
+      // chain, -c copy, the codec tags, the fifo muxer — is byte-identical to
+      // production, so the destination is the ONLY difference. An earlier
+      // version of this test bypassed the fifo muxer entirely and therefore
+      // missed two bugs that only appear on that path.
+      target: join(dir, 'out.flv'),
       endBehavior: 'end',
       // Keep the startup burst well under one clip, or ffmpeg consumes the
       // whole chain before the lookahead can extend it.
@@ -194,7 +196,7 @@ async function cmdSelftest() {
       setTimeout(res, 120_000).unref?.();
     });
 
-    const outPath = join(dir, 'out.ts');
+    const outPath = join(dir, 'out.flv');
     if (!existsSync(outPath)) die('selftest produced no output');
 
     const actual = await probeDuration(outPath);
@@ -264,6 +266,7 @@ async function cmdStream() {
     engine.enqueue({ id: p, title: basename(p), srcPath: p });
   }
 
+  engine.on('preparing', ({ item }) => console.log(`  preparing ${item.title} before going live …`));
   engine.on('committed', ({ item }) => console.log(`▶ ${item.title}`));
   engine.on('filler', ({ seconds }) => console.log(`… filler (${seconds}s)`));
   engine.on('warn', (m) => console.warn(`! ${m}`));
