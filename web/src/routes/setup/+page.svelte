@@ -16,6 +16,10 @@
   let rtmpUrl = $state('');
   let streamKey = $state('');
   let showKey = $state(false);
+  // Whether a key is already stored. The value itself never reaches the
+  // browser, so the field stays empty and blank means "keep what's there" —
+  // putting the sentinel in the input makes it look like a 7-character key.
+  let keyStored = $state(false);
   let owncastResult = $state(null);
   let testing = $state(false);
 
@@ -47,7 +51,8 @@
     try {
       cfg = await api.config();
       rtmpUrl = cfg.owncast.rtmpUrl || '';
-      streamKey = cfg.owncast.streamKey === '__SET__' ? '__SET__' : '';
+      keyStored = cfg.owncast.streamKey === '__SET__';
+      streamKey = '';
       backend = cfg.encoder.backend;
       width = cfg.encoder.width; height = cfg.encoder.height;
       fps = cfg.encoder.fps; videoBitrate = cfg.encoder.videoBitrate;
@@ -69,7 +74,10 @@
   async function testOwncast() {
     testing = true; owncastResult = null;
     try {
-      owncastResult = await api.checkOwncast({ rtmpUrl, streamKey });
+      owncastResult = await api.checkOwncast({
+        rtmpUrl,
+        streamKey: streamKey || (keyStored ? '__SET__' : ''),
+      });
     } catch (err) {
       owncastResult = { ok: false, error: err.message };
     } finally { testing = false; }
@@ -117,7 +125,7 @@
     saving = true;
     try {
       const patch = {
-        owncast: { rtmpUrl, ...(streamKey && streamKey !== '__SET__' ? { streamKey } : {}) },
+        owncast: { rtmpUrl, ...(streamKey ? { streamKey } : {}) },
         encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate },
         library: libraryPayload(),
         tracks: {
@@ -162,12 +170,18 @@
       <label>Stream key</label>
       <div class="row">
         {#if showKey}
-          <input bind:value={streamKey} placeholder="from Owncast admin" spellcheck="false" />
+          <input bind:value={streamKey}
+                 placeholder={keyStored ? 'leave blank to keep the saved key' : 'from Owncast admin'}
+                 spellcheck="false" />
         {:else}
-          <input type="password" bind:value={streamKey} placeholder="from Owncast admin" />
+          <input type="password" bind:value={streamKey}
+                 placeholder={keyStored ? 'leave blank to keep the saved key' : 'from Owncast admin'} />
         {/if}
         <button onclick={() => (showKey = !showKey)}>{showKey ? 'Hide' : 'Show'}</button>
       </div>
+      {#if keyStored && !streamKey}
+        <p class="muted small">A key is saved. It is never sent back to the browser.</p>
+      {/if}
       <div class="row">
         <button onclick={testOwncast} disabled={testing || !rtmpUrl}>
           {testing ? 'Testing…' : 'Test connection'}
