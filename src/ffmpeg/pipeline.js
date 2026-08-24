@@ -288,6 +288,10 @@ export class PipelinePlayout extends EventEmitter {
     const sub = this.selection?.subtitle;
     const key = this._subKey(item.srcPath);
     if (!key || !this.cacheDir || this._subCache.has(key)) return;
+    // Off by default: extraction reads the whole file, which on a network
+    // mount costs minutes before playback can start, for a gain that measured
+    // at 6%. Enable only where the benchmark shows it pays.
+    if (!this.profile?.extractSubtitles) return;
 
     try {
       const [path, fontsDir] = await Promise.all([

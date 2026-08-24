@@ -327,10 +327,30 @@ async function cmdBenchmark() {
     }
   }
 
+  // Subtitle rendering scales with output pixels, so resolution is the lever
+  // that actually moves it.
+  let lower = null;
+  if (chosen.subtitle && with_ != null && with_ < 1.5) {
+    const small = { ...profile, width: 1280, height: 720 };
+    const a = buildSourceArgs({
+      srcPath: src, offset: 0, profile: small, selection: chosen, tsOffset: 0,
+    }).filter((x) => x !== '-re').map((x) => (x === 'pipe:1' ? '-' : x));
+    const i = a.lastIndexOf('-f');
+    a.splice(i, 2, '-t', String(SECONDS), '-f', 'null');
+    const t0 = Date.now();
+    await run2('ffmpeg', a);
+    lower = SECONDS / ((Date.now() - t0) / 1000);
+    console.log(`  720p output + subs         ${lower.toFixed(2)}x realtime`
+      + (lower < 1.2 ? '   ← still too slow' : ''));
+  }
+
   console.log('');
 
   if (with_ != null) {
     console.log(`  Subtitles cost ${(without / with_).toFixed(1)}x when read from the mkv.`);
+  }
+  if (lower != null && with_) {
+    console.log(`  Dropping to 720p is ${(lower / with_).toFixed(1)}x faster.`);
   }
   if (withExtracted != null && with_ != null) {
     const gain = withExtracted / with_;
@@ -342,7 +362,7 @@ async function cmdBenchmark() {
     console.log(`  GPU decode is ${(withHw / without).toFixed(1)}x faster — enable it in Settings.`);
   }
   const streamable = chosen.subtitle
-    ? Math.max(with_ ?? 0, withExtracted ?? 0)
+    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0)
     : Math.max(without, withHw);
   if (streamable < 1.2) {
     console.log('');

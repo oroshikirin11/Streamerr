@@ -38,6 +38,11 @@ const DEFAULTS = {
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
     // costs more than the decode saved. Measure with `cli.js benchmark`.
     hwDecode: false,
+    // Pull the subtitle track and fonts out to small files before burning.
+    // Measured on an SMB-mounted episode this took 120s and gained 6%, so it
+    // is off by default — the second demux it avoids is not the bottleneck.
+    // Worth trying if `cli.js benchmark` says otherwise on your storage.
+    extractSubtitles: false,
   },
   // Chain scripts live inside `cache` alongside the .ts files they reference —
   // nested .ffconcat scripts resolve relative paths against their own

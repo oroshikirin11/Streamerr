@@ -78,6 +78,7 @@
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           hwDecode: Boolean(cfg.encoder.hwDecode),
+          extractSubtitles: Boolean(cfg.encoder.extractSubtitles),
         };
       }
       if (section === 'library') patch.library = libraryPayload();
@@ -242,6 +243,17 @@
       win for 10-bit HEVC on a weak CPU, a loss for 8-bit H.264 on a strong
       one. Measure it with <code>cli.js benchmark &lt;file&gt;</code> rather
       than guessing.
+    </p>
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" bind:checked={cfg.encoder.extractSubtitles} style="width:auto" />
+      Extract subtitles before burning
+    </label>
+    <p class="muted small">
+      Reads the whole file once to pull the subtitle track and fonts out. On a
+      network mount this can take minutes before playback starts, and measured
+      here it gained only 6% &mdash; so it is off unless the benchmark shows
+      it pays on your storage.
     </p>
 
     <div class="actions">
