@@ -683,13 +683,16 @@ export function buildSourceArgs({
     // HDR sources must be tone-mapped to BT.709 or the SDR stream comes out
     // washed. Fixed-function on Intel VPP, and placed AFTER the scale so it
     // runs at output size, not 4K.
+    // mode=fast selects the faster VPP scaler; at a 2:1 downscale (4K to
+    // 1080p) the output is visually identical and the EU cost drops.
+    const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     const scalePart = selection?.video?.hdr
-      ? `scale_vaapi=w=${rect.w}:h=${rect.h},`
+      ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
         + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
       // format=nv12 is load-bearing: 10-bit sources decode to P010 surfaces,
       // and h264_vaapi accepts only NV12 — without the GPU-side conversion
       // the encoder dies with -22 (Invalid argument) on every 10-bit file.
-      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12`;
+      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
     const subChain = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
       + `[0:v]${scalePart}[b];[b][ov]overlay_vaapi`;
@@ -704,6 +707,9 @@ export function buildSourceArgs({
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
       '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      // Extra decode surfaces let decode run ahead of scale/encode instead
+      // of lock-stepping — pipelining, not quality.
+      '-extra_hw_frames', '8',
       ...(offset > 0 ? ['-ss', shift] : []),
       '-i', srcPath,
       '-f', 'lavfi', ...canvasCap,
@@ -712,6 +718,8 @@ export function buildSourceArgs({
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),
+      // Deeper encoder queue overlaps encode with upstream stages.
+      '-async_depth', '4',
       ...audioArgs(profile),
       '-r', eff.rate, '-fps_mode', 'cfr',
       '-output_ts_offset', Number(tsOffset).toFixed(3),
