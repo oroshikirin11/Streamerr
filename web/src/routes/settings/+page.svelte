@@ -77,6 +77,7 @@
           fps: +cfg.encoder.fps, videoBitrate: cfg.encoder.videoBitrate,
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
+          hwDecode: Boolean(cfg.encoder.hwDecode),
         };
       }
       if (section === 'library') patch.library = libraryPayload();
@@ -231,6 +232,17 @@
 
     <label>Render device</label>
     <input bind:value={cfg.encoder.device} spellcheck="false" />
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" bind:checked={cfg.encoder.hwDecode} style="width:auto" />
+      Decode on the GPU
+    </label>
+    <p class="muted small">
+      Whether this helps depends on the machine and the file &mdash; a large
+      win for 10-bit HEVC on a weak CPU, a loss for 8-bit H.264 on a strong
+      one. Measure it with <code>cli.js benchmark &lt;file&gt;</code> rather
+      than guessing.
+    </p>
 
     <div class="actions">
       <button class="primary" onclick={() => save('encoder')}>Save</button>

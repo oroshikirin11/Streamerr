@@ -33,6 +33,11 @@ const DEFAULTS = {
     videoBitrate: '4500k',
     audioBitrate: '160k',
     gopSeconds: 2,
+    // Decode on the GPU. Whether this helps depends entirely on the machine
+    // and the source: it is a large win for 10-bit HEVC on a weak CPU, and a
+    // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
+    // costs more than the decode saved. Measure with `cli.js benchmark`.
+    hwDecode: false,
   },
   // Chain scripts live inside `cache` alongside the .ts files they reference —
   // nested .ffconcat scripts resolve relative paths against their own

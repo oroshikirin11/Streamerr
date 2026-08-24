@@ -286,9 +286,9 @@ async function cmdBenchmark() {
   console.log(`  tracks  : ${chosen.reason}\n`);
 
   const SECONDS = 20;
-  const run = async (label, selection) => {
+  const run = async (label, selection, hwDecode = false) => {
     const a = buildSourceArgs({
-      srcPath: src, offset: 0, profile, selection, tsOffset: 0,
+      srcPath: src, offset: 0, profile, selection, tsOffset: 0, hwDecode,
     })
       // Measure encoding throughput, not realtime pacing.
       .filter((x) => x !== '-re')
@@ -305,21 +305,32 @@ async function cmdBenchmark() {
     return speed;
   };
 
-  const without = await run('without subtitles', { audio: chosen.audio, subtitle: null });
-  const with_ = chosen.subtitle
-    ? await run('with subtitles', chosen)
-    : null;
+  const noSubs = { audio: chosen.audio, subtitle: null };
+  const without = await run('software decode, no subs', noSubs, false);
+  const withHw = await run('hardware decode, no subs', noSubs, true);
+  const with_ = chosen.subtitle ? await run('software decode + subs', chosen, false) : null;
+  const withHwSubs = chosen.subtitle ? await run('hardware decode + subs', chosen, true) : null;
 
   console.log('');
-  if (with_ == null) {
-    console.log('  No subtitle would be burned in for this file.\n');
-  } else if (with_ < 1.2) {
-    console.log(`  Burning these subtitles costs ${(without / with_).toFixed(1)}x.`);
-    console.log('  Options: pick a lighter subtitle track, lower the output');
-    console.log('  resolution, or turn subtitles off for this title.\n');
-  } else {
-    console.log('  Fast enough to stream with subtitles burned in.\n');
+  const best = Math.max(without, withHw, with_ ?? 0, withHwSubs ?? 0);
+
+  if (with_ != null) {
+    console.log(`  Subtitles cost ${(without / with_).toFixed(1)}x on software decode.`);
   }
+  if (withHw > without * 1.15) {
+    console.log(`  Hardware decode is ${(withHw / without).toFixed(1)}x faster — worth`);
+    console.log('  enabling with encoder.hwDecode = true in settings.');
+  }
+  const streamable = chosen.subtitle ? Math.max(with_, withHwSubs) : Math.max(without, withHw);
+  if (streamable < 1.2) {
+    console.log('');
+    console.log('  Nothing here is fast enough to stream this file as configured.');
+    console.log('  Try 720p output, a lighter subtitle track, or subtitles off.');
+  } else {
+    console.log('');
+    console.log(`  Fastest usable configuration: ${streamable.toFixed(2)}x realtime.`);
+  }
+  console.log('');
 }
 
 function run2(bin, argv) {

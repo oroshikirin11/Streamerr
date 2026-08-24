@@ -375,6 +375,7 @@ const item = (self) => self.current?.item?.title ?? 'clip';
  */
 export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
+  hwDecode = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -395,9 +396,19 @@ export function buildSourceArgs({
       '-map', '0:v:0',
     ];
 
+  // Hardware decode without -hwaccel_output_format, so frames land back in
+  // system memory ready for the software filters. libass cannot touch GPU
+  // frames, and a manual hwdownload round-trip would cost more than it saves.
+  // Worth most on weak CPUs with 10-bit HEVC, where software decode dominates.
+  const useHw = hwDecode ?? profile.hwDecode ?? false;
+  const decodeArgs = useHw
+    ? ['-hwaccel', 'vaapi', '-hwaccel_device', profile.device ?? '/dev/dri/renderD128']
+    : [];
+
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     ...be.deviceArgs(profile),
+    ...decodeArgs,
     // Input-side seek: fast, and the only form that skips decoding work.
     ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
     '-re',
