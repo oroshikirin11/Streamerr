@@ -194,10 +194,14 @@
       <div><label>Width</label><input type="number" bind:value={cfg.encoder.width} /></div>
       <div><label>Height</label><input type="number" bind:value={cfg.encoder.height} /></div>
       <div><label>Framerate</label><input type="number" bind:value={cfg.encoder.fps} /></div>
-      <div><label>Video bitrate</label><input bind:value={cfg.encoder.videoBitrate} /></div>
-      <div><label>Audio bitrate</label><input bind:value={cfg.encoder.audioBitrate} /></div>
+      <div><label>Video bitrate (kbps)</label><input bind:value={cfg.encoder.videoBitrate} /></div>
+      <div><label>Audio bitrate (kbps)</label><input bind:value={cfg.encoder.audioBitrate} /></div>
       <div><label>Keyframes (s)</label><input type="number" bind:value={cfg.encoder.gopSeconds} /></div>
     </div>
+    <p class="muted small">
+      Bitrates are in kbps &mdash; 4500 is a reasonable 1080p30 figure, and
+      anything above your upload speed will stutter for viewers.
+    </p>
     <p class="muted small">
       Keyframe interval must divide Owncast's segment length. Two seconds is
       what its documentation recommends; changing it can break segmenting.

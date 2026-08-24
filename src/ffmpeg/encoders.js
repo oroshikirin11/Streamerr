@@ -25,6 +25,27 @@ export const LADDER = ['vaapi', 'qsv', 'nvenc', 'amf', 'videotoolbox', 'x264'];
  * @property {string} device        DRM render node, for vaapi/qsv
  */
 
+/**
+ * Normalise a bitrate to a form ffmpeg reads the way a human meant it.
+ *
+ * ffmpeg treats a bare number as BITS per second, so "12000" means 12 kbps —
+ * not 12 Mbps — and produces a picture made of coloured blocks. Nobody typing
+ * into a bitrate field means bits, so a unitless value is read as kbps.
+ */
+export function normalizeBitrate(value, fallback = '4500k') {
+  if (value == null || value === '') return fallback;
+  const m = String(value).trim().match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)(?:b(?:it)?s?(?:\/s)?)?$/);
+  if (!m) return fallback;
+
+  const n = parseFloat(m[1]);
+  const unit = m[2].toLowerCase();
+  if (unit === 'm') return `${Math.round(n * 1000)}k`;
+  if (unit === 'k') return `${Math.round(n)}k`;
+  // Unitless. Values this small are certainly kbps; a genuine bits-per-second
+  // figure for video would be in the millions.
+  return `${Math.round(n)}k`;
+}
+
 const bufsize = (rate) => {
   // Two seconds of video at the target rate. Accepts "4500k" or a raw number.
   const m = String(rate).match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/);

@@ -89,6 +89,25 @@ for (const key of Object.keys(config.paths)) {
   config.paths[key] = isAbsolute(p) ? p : resolve(ROOT, p);
 }
 
+/**
+ * Repair a stored bitrate that ffmpeg would read as bits per second.
+ * An existing config written before normalization existed can still hold a
+ * bare number, which would silently encode at 1/1000 the intended rate.
+ */
+export function normalizeStoredBitrates(normalize) {
+  const before = [config.encoder?.videoBitrate, config.encoder?.audioBitrate];
+  if (config.encoder?.videoBitrate !== undefined) {
+    config.encoder.videoBitrate = normalize(config.encoder.videoBitrate, '4500k');
+  }
+  if (config.encoder?.audioBitrate !== undefined) {
+    config.encoder.audioBitrate = normalize(config.encoder.audioBitrate, '160k');
+  }
+  const after = [config.encoder?.videoBitrate, config.encoder?.audioBitrate];
+  return before[0] !== after[0] || before[1] !== after[1]
+    ? { before, after }
+    : null;
+}
+
 export function ensureDirs() {
   for (const dir of Object.values(config.paths)) {
     mkdirSync(dir, { recursive: true });

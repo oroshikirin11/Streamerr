@@ -234,7 +234,7 @@
         <div><label>Width</label><input type="number" bind:value={width} /></div>
         <div><label>Height</label><input type="number" bind:value={height} /></div>
         <div><label>FPS</label><input type="number" bind:value={fps} /></div>
-        <div><label>Bitrate</label><input bind:value={videoBitrate} /></div>
+        <div><label>Bitrate (kbps)</label><input bind:value={videoBitrate} /></div>
       </div>
 
     {:else if step === 2}

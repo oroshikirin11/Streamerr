@@ -13,13 +13,15 @@ import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 import {
-  config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, ROOT,
+  config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact,
+  normalizeStoredBitrates, ROOT,
 } from './config.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
 } from './auth.js';
 import { probeAll, selectBackend, probeConcatCapabilities } from './ffmpeg/probe.js';
+import { normalizeBitrate } from './ffmpeg/encoders.js';
 import { PlayoutEngine, testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { makeLibrary } from './library/index.js';
@@ -196,6 +198,17 @@ app.put('/api/config', (req, res) => {
   }
   if (patch.library?.jellyfin?.apiKey === '__SET__') delete patch.library.jellyfin.apiKey;
   delete patch.auth; // password changes go through their own endpoint
+
+  // ffmpeg reads a bare number as BITS per second, so a stored "12000"
+  // means 12 kbps and produces a picture made of coloured blocks. Normalise
+  // on the way in so no client can persist a value that means something
+  // 1000x different from what was intended.
+  if (patch.encoder?.videoBitrate !== undefined) {
+    patch.encoder.videoBitrate = normalizeBitrate(patch.encoder.videoBitrate, '4500k');
+  }
+  if (patch.encoder?.audioBitrate !== undefined) {
+    patch.encoder.audioBitrate = normalizeBitrate(patch.encoder.audioBitrate, '160k');
+  }
 
   // The panel expresses intent — which languages you understand, and whether
   // you want the original audio or a dub. The engine consumes ordered
@@ -535,6 +548,11 @@ wss.on('connection', (ws, req) => {
 // ── start ──────────────────────────────────────────────────────────────
 
 ensureDirs();
+const fixed = normalizeStoredBitrates(normalizeBitrate);
+if (fixed) {
+  console.warn(`! repaired bitrate config: ${fixed.before.join(', ')} -> ${fixed.after.join(', ')}`);
+  saveConfig({ encoder: { videoBitrate: config.encoder.videoBitrate, audioBitrate: config.encoder.audioBitrate } });
+}
 const { port, host } = config.server;
 server.listen(port, host, () => {
   console.log(`jellystreamerr listening on http://${host}:${port}`);
