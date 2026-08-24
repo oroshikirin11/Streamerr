@@ -1,0 +1,47 @@
+services:
+  jellystreamerr:
+    build: .
+    image: jellystreamerr:latest
+    container_name: jellystreamerr
+    restart: unless-stopped
+
+    ports:
+      - "8099:8099"
+
+    devices:
+      # Only the render node. card0 is for modesetting and would be an
+      # unnecessary privilege bump.
+      - /dev/dri/renderD128:/dev/dri/renderD128
+
+    group_add:
+      # Must be the NUMERIC gid of the render group as the LXC sees it:
+      #   stat -c '%g' /dev/dri/renderD128
+      # Quoted deliberately — an unquoted YAML integer gets mangled. The
+      # image's /etc/group comes from a different distro, so only the number
+      # is meaningful; the name will not match and does not need to.
+      #
+      # If `privileged: true` appears to fix a permission problem, this
+      # value is wrong. Fix the gid instead.
+      - "989"
+
+    environment:
+      - JELLYSTREAMERR_CONFIG=/config/config.json
+      # Leave the VAAPI driver to autodetection. Only force it if `probe`
+      # reports vaapi failing on hardware you know works — iHD for Intel
+      # Broadwell+, i965 for older Intel, radeonsi for AMD.
+      # - LIBVA_DRIVER_NAME=iHD
+
+    volumes:
+      # Config holds the Owncast stream key and Jellyfin API key.
+      - ./config:/config
+
+      # Normalized clip cache. Sized by normalizer.cacheLimitGB — put it on
+      # fast local storage, not the media array.
+      - ./cache:/app/cache
+
+      # The media library, read-only: this service never writes to it.
+      #
+      # IMPORTANT: mount it at the SAME path the panel will resolve to, and
+      # set library.pathMap in config.json to translate whatever Jellyfin
+      # reports (typically /media/...) into this path.
+      - /extHdd:/extHdd:ro
