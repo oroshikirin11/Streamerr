@@ -75,7 +75,13 @@ function streamStatus() {
  * none of them need a new engine.
  */
 function buildEngine({ profile, selection }) {
-  const e = new PipelinePlayout({ target: rtmpTarget(), profile, selection });
+  const e = new PipelinePlayout({
+    target: rtmpTarget(),
+    profile,
+    selection,
+    // Extracted subtitle tracks and embedded fonts live here.
+    cacheDir: config.paths.cache,
+  });
 
   e.on('status', () => broadcast('stream', streamStatus()));
   e.on('nowplaying', () => broadcast('stream', streamStatus()));

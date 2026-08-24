@@ -34,6 +34,7 @@ import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
+import { extractSubtitle, extractFonts } from './subcache.js';
 
 /** Treat a source that dies this fast as broken rather than finished. */
 const SOURCE_FAIL_MS = 2_000;
@@ -47,12 +48,15 @@ export class PipelinePlayout extends EventEmitter {
    * @param {object} o.profile   encoder profile incl. resolved `backend`
    * @param {object} [o.selection] track selection from selectTracks()
    */
-  constructor({ target, profile, selection = null, statsPeriodMs = 500 }) {
+  constructor({ target, profile, selection = null, statsPeriodMs = 500, cacheDir = null }) {
     super();
     this.target = target;
     this.profile = profile;
     this.selection = selection;
     this.statsPeriodMs = statsPeriodMs;
+    /** Where extracted subtitle tracks and fonts are kept. */
+    this.cacheDir = cacheDir;
+    this._subCache = new Map();   // `${srcPath}:${typeIndex}` -> {path, fontsDir}
 
     this.status = 'stopped';   // stopped | running | paused
     this.publisher = null;
@@ -83,6 +87,7 @@ export class PipelinePlayout extends EventEmitter {
     this._spawnPublisher();
 
     const first = this.queue.shift();
+    await this.prepare(first);
     this._play(first, 0);
     this.status = 'running';
     this.emit('status', this.status);
@@ -149,7 +154,10 @@ export class PipelinePlayout extends EventEmitter {
   setSelection(selection) {
     this.selection = selection;
     if (this.current && this.status === 'running') {
-      this._play(this.current.item, this.position, { duration: this.current.duration });
+      const item = this.current.item;
+      const pos = this.position;
+      const dur = this.current.duration;
+      this.prepare(item).finally(() => this._play(item, pos, { duration: dur }));
     }
     this.emit('selection', selection);
   }
@@ -230,6 +238,7 @@ export class PipelinePlayout extends EventEmitter {
     this.current = { item, offset, duration: duration ?? item.duration ?? null };
     this.position = offset;
 
+    const cached = this._cachedSubs(item.srcPath);
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       offset,
@@ -237,6 +246,8 @@ export class PipelinePlayout extends EventEmitter {
       selection: this.selection,
       tsOffset: this.timeline,
       statsPeriodMs: this.statsPeriodMs,
+      extractedPath: cached?.path ?? null,
+      fontsDir: cached?.fontsDir ?? null,
     });
 
     this._spawnSource(args, { kind: 'clip' });
@@ -254,6 +265,38 @@ export class PipelinePlayout extends EventEmitter {
           }
         })
         .catch(() => { /* seek simply stays unclamped */ });
+    }
+  }
+
+  _subKey(srcPath) {
+    const sub = this.selection?.subtitle;
+    return sub && !sub.external ? `${srcPath}:${sub.typeIndex}` : null;
+  }
+
+  _cachedSubs(srcPath) {
+    const k = this._subKey(srcPath);
+    return k ? this._subCache.get(k) ?? null : null;
+  }
+
+  /**
+   * Pull the chosen subtitle track and any embedded fonts out to small files.
+   *
+   * Done before the source starts, because pointing the filter at the media
+   * file costs a second full demux of a multi-gigabyte episode.
+   */
+  async prepare(item) {
+    const sub = this.selection?.subtitle;
+    const key = this._subKey(item.srcPath);
+    if (!key || !this.cacheDir || this._subCache.has(key)) return;
+
+    try {
+      const [path, fontsDir] = await Promise.all([
+        extractSubtitle(item.srcPath, sub, this.cacheDir),
+        extractFonts(item.srcPath, this.cacheDir),
+      ]);
+      if (path) this._subCache.set(key, { path, fontsDir });
+    } catch {
+      // Falling back to reading from the media file is slower, not broken.
     }
   }
 
@@ -352,7 +395,7 @@ export class PipelinePlayout extends EventEmitter {
       this.stop();
       return;
     }
-    this._play(next, 0);
+    this.prepare(next).finally(() => this._play(next, 0));
     this.emit('queue', this.snapshot());
   }
 
@@ -375,12 +418,13 @@ const item = (self) => self.current?.item?.title ?? 'clip';
  */
 export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
-  hwDecode = null,
+  hwDecode = null, extractedPath = null, fontsDir = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
 
-  const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath);
+  const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
+    { extractedPath, fontsDir });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
   const base = scaleFilter(profile);
   const upload = be.uploadFilter(profile);

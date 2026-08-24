@@ -338,8 +338,10 @@ export function escapeFilterPath(p) {
  *
  * @returns {{ filter: string|null, overlayInput: string|null, needsComplex: boolean }}
  */
-export function buildSubtitleFilter(subtitle, mediaPath) {
+export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   if (!subtitle) return { filter: null, overlayInput: null, needsComplex: false };
+  const { extractedPath = null, fontsDir = null } = opts;
+  const fonts = fontsDir ? `:fontsdir='${escapeFilterPath(fontsDir)}'` : '';
 
   if (subtitle.bitmap) {
     // Bitmap subs cannot be handled by a simple -vf chain; the caller must
@@ -353,16 +355,27 @@ export function buildSubtitleFilter(subtitle, mediaPath) {
 
   if (subtitle.external) {
     return {
-      filter: `subtitles=filename='${escapeFilterPath(subtitle.path)}'`,
+      filter: `subtitles=filename='${escapeFilterPath(subtitle.path)}'${fonts}`,
       overlayInput: null,
       needsComplex: false,
     };
   }
 
-  // Embedded text subs: `si` selects among the file's subtitle streams and is
-  // a subtitle-relative index, not the absolute stream index.
+  // Prefer a pre-extracted copy. Pointing the filter at the media file makes
+  // libavfilter demux the whole thing a second time alongside the main
+  // decode — barely visible locally, ruinous over a network mount.
+  if (extractedPath) {
+    return {
+      filter: `subtitles=filename='${escapeFilterPath(extractedPath)}'${fonts}`,
+      overlayInput: null,
+      needsComplex: false,
+    };
+  }
+
+  // `si` selects among the file's subtitle streams and is a subtitle-relative
+  // index, not the absolute stream index.
   return {
-    filter: `subtitles=filename='${escapeFilterPath(mediaPath)}':si=${subtitle.typeIndex}`,
+    filter: `subtitles=filename='${escapeFilterPath(mediaPath)}':si=${subtitle.typeIndex}${fonts}`,
     overlayInput: null,
     needsComplex: false,
   };

@@ -20,6 +20,7 @@ import {
 } from './ffmpeg/probe.js';
 import { PlayoutEngine, probeDuration, testRtmpConnection } from './ffmpeg/playout.js';
 import { PipelinePlayout, buildSourceArgs } from './ffmpeg/pipeline.js';
+import { extractSubtitle, extractFonts } from './ffmpeg/subcache.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
@@ -286,9 +287,9 @@ async function cmdBenchmark() {
   console.log(`  tracks  : ${chosen.reason}\n`);
 
   const SECONDS = 20;
-  const run = async (label, selection, hwDecode = false) => {
+  const run = async (label, selection, hwDecode = false, extra = {}) => {
     const a = buildSourceArgs({
-      srcPath: src, offset: 0, profile, selection, tsOffset: 0, hwDecode,
+      srcPath: src, offset: 0, profile, selection, tsOffset: 0, hwDecode, ...extra,
     })
       // Measure encoding throughput, not realtime pacing.
       .filter((x) => x !== '-re')
@@ -306,22 +307,43 @@ async function cmdBenchmark() {
   };
 
   const noSubs = { audio: chosen.audio, subtitle: null };
-  const without = await run('software decode, no subs', noSubs, false);
-  const withHw = await run('hardware decode, no subs', noSubs, true);
-  const with_ = chosen.subtitle ? await run('software decode + subs', chosen, false) : null;
-  const withHwSubs = chosen.subtitle ? await run('hardware decode + subs', chosen, true) : null;
+  const without = await run('no subtitles', noSubs, false);
+  const withHw = await run('no subtitles, GPU decode', noSubs, true);
+  const with_ = chosen.subtitle ? await run('subs read from the mkv', chosen, false) : null;
+
+  // Reading subtitles from the media file makes libavfilter demux the whole
+  // thing a second time. Extracting the track first should remove that.
+  let withExtracted = null;
+  let extractedPath = null;
+  if (chosen.subtitle) {
+    const cacheDir = join(tmpdir(), 'jellystreamerr-subcache');
+    const t0 = Date.now();
+    extractedPath = await extractSubtitle(src, chosen.subtitle, cacheDir);
+    const fontsDir = await extractFonts(src, cacheDir);
+    if (extractedPath) {
+      console.log(`  (extracted subtitles in ${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+      withExtracted = await run('subs extracted first', chosen, false,
+        { extractedPath, fontsDir });
+    }
+  }
 
   console.log('');
-  const best = Math.max(without, withHw, with_ ?? 0, withHwSubs ?? 0);
 
   if (with_ != null) {
-    console.log(`  Subtitles cost ${(without / with_).toFixed(1)}x on software decode.`);
+    console.log(`  Subtitles cost ${(without / with_).toFixed(1)}x when read from the mkv.`);
+  }
+  if (withExtracted != null && with_ != null) {
+    const gain = withExtracted / with_;
+    console.log(gain > 1.15
+      ? `  Extracting them first is ${gain.toFixed(1)}x faster — this is now automatic.`
+      : '  Extracting them first made little difference here.');
   }
   if (withHw > without * 1.15) {
-    console.log(`  Hardware decode is ${(withHw / without).toFixed(1)}x faster — worth`);
-    console.log('  enabling with encoder.hwDecode = true in settings.');
+    console.log(`  GPU decode is ${(withHw / without).toFixed(1)}x faster — enable it in Settings.`);
   }
-  const streamable = chosen.subtitle ? Math.max(with_, withHwSubs) : Math.max(without, withHw);
+  const streamable = chosen.subtitle
+    ? Math.max(with_ ?? 0, withExtracted ?? 0)
+    : Math.max(without, withHw);
   if (streamable < 1.2) {
     console.log('');
     console.log('  Nothing here is fast enough to stream this file as configured.');
