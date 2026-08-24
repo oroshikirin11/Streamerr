@@ -16,7 +16,7 @@ import {
   config, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, CONFIG_PATH,
 } from './config.js';
 import {
-  probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
+  probeAll, selectBackend, probeBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
 import { PlayoutEngine, probeDuration, testRtmpConnection } from './ffmpeg/playout.js';
 import {
@@ -459,8 +459,68 @@ async function cmdBenchmark() {
     }
   }
 
+  // QSV variant of the same pipeline, through libvpl. Same GPU, different
+  // driver stack — Jellyfin ships this path in production on identical
+  // hardware. The number decides whether it beats VAAPI here, not theory.
+  let qsvPath = null;
+  if (chosen.subtitle) {
+    const q = await probeBackend('qsv', config.encoder.device);
+    if (!q.ok) {
+      console.log(`  QSV: not usable (${q.error})`);
+    } else {
+      const v = tracks.video[0] ?? {};
+      const dec = { hevc: 'hevc_qsv', h264: 'h264_qsv', av1: 'av1_qsv' }[v.codec];
+      const subF = chosen.subtitle.external
+        ? `subtitles=filename=${escapeFilterPath(chosen.subtitle.path)}:alpha=1`
+        : `subtitles=filename=${escapeFilterPath(src)}:si=${chosen.subtitle.typeIndex}:alpha=1`;
+      const hdr = ['smpte2084', 'arib-std-b67'].includes(v.colorTransfer) || v.hdr;
+      const vpp = hdr
+        ? `vpp_qsv=w=${profile.width}:h=${profile.height}:format=nv12:tonemap=1`
+        : `vpp_qsv=w=${profile.width}:h=${profile.height}:format=nv12`;
+      const a = [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-init_hw_device', `vaapi=va:${config.encoder.device}`,
+        '-init_hw_device', 'qsv=qs@va', '-filter_hw_device', 'qs',
+        '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv',
+        ...(dec ? ['-c:v', dec] : []),
+        '-i', src,
+        '-f', 'lavfi',
+        '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=30,format=rgba`,
+        '-filter_complex',
+        `[1:v]${subF},format=rgba,hwupload=extra_hw_frames=16[ov];`
+        + `[0:v]${vpp}[b];[b][ov]overlay_qsv[v]`,
+        '-map', '[v]', '-c:v', 'h264_qsv',
+        '-b:v', profile.videoBitrate, '-g', '60', '-bf', '0',
+        '-an', '-t', String(SECONDS), '-f', 'null', '-',
+      ];
+      const t0 = Date.now();
+      const err = await runProc('ffmpeg', a).then(() => null).catch((e) => e.message);
+      if (err) {
+        console.log(`  QSV pipeline + subs        FAILED: ${err.split('\n').filter(Boolean).slice(-1)[0]}`);
+        if (hdr) {
+          // tonemap=1 is the most version-sensitive piece; measure without it
+          // so a missing tonemap doesn't hide the throughput answer.
+          const a2 = a.map((x) => x.replace(':tonemap=1', ''));
+          const t1 = Date.now();
+          const e2 = await runProc('ffmpeg', a2).then(() => null).catch((e) => e.message);
+          if (!e2) {
+            qsvPath = SECONDS / ((Date.now() - t1) / 1000);
+            console.log(`  QSV, no tonemap            ${qsvPath.toFixed(2)}x realtime  (colours would be wrong — throughput probe only)`);
+          }
+        }
+      } else {
+        qsvPath = SECONDS / ((Date.now() - t0) / 1000);
+        console.log(`  QSV pipeline + subs        ${qsvPath.toFixed(2)}x realtime`
+          + (qsvPath < 1.2 ? '   ← too slow' : ''));
+      }
+    }
+  }
+
   console.log('');
 
+  if (qsvPath != null && gpuPath != null) {
+    console.log(`  QSV is ${(qsvPath / gpuPath).toFixed(2)}x the VAAPI pipeline's speed.`);
+  }
   if (gpuPath != null && with_) {
     console.log(`  Full-GPU pipeline is ${(gpuPath / with_).toFixed(1)}x faster than CPU burn-in.`);
   }
@@ -486,7 +546,7 @@ async function cmdBenchmark() {
     console.log(`  GPU decode is ${(withHw / without).toFixed(1)}x faster — enable it in Settings.`);
   }
   const streamable = chosen.subtitle
-    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0, parallel ?? 0, gpuPath ?? 0)
+    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0, parallel ?? 0, gpuPath ?? 0, qsvPath ?? 0)
     : Math.max(without, withHw);
   if (streamable < 1.2) {
     console.log('');
