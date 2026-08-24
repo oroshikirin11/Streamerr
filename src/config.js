@@ -101,4 +101,19 @@ export function rtmpTargetRedacted(cfg = config) {
   return base ? `${base}/${'*'.repeat(8)}` : '(unconfigured)';
 }
 
+/**
+ * Remove the stream key from arbitrary text.
+ *
+ * ffmpeg prints the full output URL in its own diagnostics, so any error
+ * message that quotes it leaks live credentials into terminals, logs and
+ * pasted bug reports. Every path that can surface ffmpeg output — not just
+ * the streaming engine — has to go through this.
+ */
+export function redact(text, cfg = config) {
+  if (!text) return text;
+  const key = cfg.owncast?.streamKey;
+  if (!key || key.length < 4) return text;
+  return String(text).split(key).join('*'.repeat(8));
+}
+
 export { CONFIG_PATH, ROOT };

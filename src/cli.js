@@ -12,7 +12,9 @@ import { spawn } from 'child_process';
 import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve, basename as pathBasename } from 'path';
-import { config, ensureDirs, rtmpTarget, rtmpTargetRedacted } from './config.js';
+import {
+  config, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact,
+} from './config.js';
 import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
@@ -21,7 +23,7 @@ import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
 
-const die = (msg) => { console.error(`\n✗ ${msg}\n`); process.exit(1); };
+const die = (msg) => { console.error(`\n✗ ${redact(String(msg))}\n`); process.exit(1); };
 const basename = (p) => pathBasename(p);
 
 function fmtTime(seconds) {
@@ -125,7 +127,7 @@ async function cmdTestConnect() {
     return;
   }
 
-  console.error(`✗ rejected\n\n${res.error}\n`);
+  console.error(`✗ rejected\n\n${redact(res.error)}\n`);
   console.error('Common causes:');
   console.error('  • wrong stream key            → check owncast.streamKey');
   console.error('  • another publisher connected → Owncast allows only one at a time');
@@ -315,16 +317,16 @@ async function cmdStream() {
   const t0 = Date.now();
   engine.on('committed', ({ item, duration }) =>
     console.log(`▶ ${item.title}  (${fmtTime(duration)})`));
-  engine.on('warn', (m) => console.warn(`! ${m}`));
+  engine.on('warn', (m) => console.warn(`! ${redact(String(m))}`));
   // Surface connection trouble. fifo's recovery keeps the encoder alive
   // through a dropped push, which is what we want — but it must not be
   // silent, or a stream that never reaches the server looks perfectly fine.
   engine.on('log', (line) => {
     if (/rtmp|recover|Connection|refused|reset|broken pipe|Error/i.test(line)) {
-      process.stderr.write(`! ${line.trim()}\n`);
+      process.stderr.write(`! ${redact(line.trim())}\n`);
     }
   });
-  engine.on('fatal', (e) => { console.error(`\n✗ ${e.message}\n`); engine.cleanup(); process.exit(1); });
+  engine.on('fatal', (e) => { console.error(`\n✗ ${redact(e.message)}\n`); engine.cleanup(); process.exit(1); });
   engine.on('ended', () => {
     console.log('\nstream ended');
     engine.cleanup();
