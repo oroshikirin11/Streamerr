@@ -51,6 +51,7 @@ import { buildSubtitleFilter } from './tracks.js';
  */
 export function effectiveFps(video, profile) {
   const cap = profile.fps ?? 30;
+  if (profile.fpsMode === 'fixed') return { rate: String(cap), fps: cap };
   const m = /^(\d+)\/(\d+)$/.exec(video?.frameRate ?? '');
   if (m && +m[2] > 0) {
     const f = +m[1] / +m[2];

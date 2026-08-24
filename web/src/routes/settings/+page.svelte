@@ -74,7 +74,8 @@
         patch.encoder = {
           backend: cfg.encoder.backend,
           width: +cfg.encoder.width, height: +cfg.encoder.height,
-          fps: +cfg.encoder.fps, videoBitrate: cfg.encoder.videoBitrate,
+          fps: +cfg.encoder.fps, fpsMode: cfg.encoder.fpsMode || 'auto',
+          videoBitrate: cfg.encoder.videoBitrate,
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           hwDecode: Boolean(cfg.encoder.hwDecode),
@@ -197,14 +198,27 @@
     <div class="g3">
       <div><label>Width</label><input type="number" bind:value={cfg.encoder.width} /></div>
       <div><label>Height</label><input type="number" bind:value={cfg.encoder.height} /></div>
-      <div><label>Framerate</label><input type="number" bind:value={cfg.encoder.fps} /></div>
+      <div>
+        <label>Framerate</label>
+        <select bind:value={cfg.encoder.fpsMode}>
+          <option value="auto">Auto — match source</option>
+          <option value="fixed">Fixed</option>
+        </select>
+      </div>
+      <div>
+        <label>{cfg.encoder.fpsMode === 'fixed' ? 'Framerate' : 'Framerate cap'}</label>
+        <input type="number" bind:value={cfg.encoder.fps} />
+      </div>
       <div><label>Video bitrate (kbps)</label><input bind:value={cfg.encoder.videoBitrate} /></div>
       <div><label>Audio bitrate (kbps)</label><input bind:value={cfg.encoder.audioBitrate} /></div>
       <div><label>Keyframes (s)</label><input type="number" bind:value={cfg.encoder.gopSeconds} /></div>
     </div>
     <p class="muted small">
       Bitrates are in kbps &mdash; 4500 is a reasonable 1080p30 figure, and
-      anything above your upload speed will stutter for viewers.
+      anything above your upload speed will stutter for viewers. Auto
+      framerate outputs each file at its native rate (24fps anime stays
+      24fps &mdash; less GPU work, no judder) up to the cap; 60fps sources
+      are brought down to it.
     </p>
     <p class="muted small">
       Keyframe interval must divide Owncast's segment length. Two seconds is

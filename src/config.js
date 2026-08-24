@@ -30,6 +30,9 @@ const DEFAULTS = {
     width: 1920,
     height: 1080,
     fps: 30,
+    // 'auto' matches each file's native rate up to `fps` as a cap;
+    // 'fixed' always outputs exactly `fps`.
+    fpsMode: 'auto',
     videoBitrate: '4500k',
     audioBitrate: '160k',
     gopSeconds: 2,
