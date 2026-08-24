@@ -249,8 +249,36 @@ async function cmdStream() {
     profile,
     cacheLimitBytes: config.normalizer.cacheLimitGB * 1024 ** 3,
   });
-  norm.on('start', ({ src }) => console.log(`  normalizing ${basename(src)} …`));
-  norm.on('done', ({ src, ms }) => console.log(`  ready ${basename(src)} (${(ms / 1000).toFixed(1)}s)`));
+  // Normalizing a full episode takes minutes. Without progress output a
+  // healthy encode looks exactly like a hung one.
+  // Keyed by cache key, not path — several clips can be encoding at once,
+  // and their progress events interleave.
+  const durations = new Map();
+  norm.on('start', async ({ src, key }) => {
+    console.log(`  normalizing ${basename(src)} …`);
+    try {
+      durations.set(key, await probeDuration(src));
+    } catch { /* percentage is best-effort; elapsed still shows */ }
+  });
+
+  let lastNorm = 0;
+  norm.on('progress', ({ key, outTimeUs }) => {
+    const now = Date.now();
+    if (now - lastNorm < 3000) return;
+    lastNorm = now;
+    const done = outTimeUs / 1e6;
+    const total = durations.get(key);
+    const pct = total ? ` (${Math.round((done / total) * 100)}%)` : '';
+    process.stdout.write(`\r    encoded ${fmtTime(done)}${pct}          `);
+  });
+
+  norm.on('done', ({ src, ms, path }) => {
+    process.stdout.write('\r');
+    probeDuration(path).then((dur) => {
+      console.log(`  ready ${basename(src)} — ${fmtTime(dur)} in ${(ms / 1000).toFixed(0)}s `
+        + `(${(dur / (ms / 1000)).toFixed(1)}× realtime)`);
+    }).catch(() => console.log(`  ready ${basename(src)} (${(ms / 1000).toFixed(0)}s)`));
+  });
 
   const engine = new PlayoutEngine({
     cacheDir: config.paths.cache,
@@ -288,6 +316,12 @@ async function cmdStream() {
 }
 
 const basename = (p) => p.split('/').pop();
+
+function fmtTime(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
 
 function run(bin, argv) {
   return new Promise((res, rej) => {
