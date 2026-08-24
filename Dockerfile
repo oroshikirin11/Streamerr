@@ -20,6 +20,10 @@ RUN pacman -Syu --noconfirm \
       # the host GPU, and an image that ships only iHD fails on AMD with
       # "unsupported drm device by media driver: amdg".
       intel-media-driver \
+      # oneVPL GPU runtime — without it QSV fails with "MFX session -9"
+      # despite the hardware supporting it. QSV unlocks SFC (scale during
+      # decode in fixed function), the main untried lever for 4K sources.
+      vpl-gpu-rt \
       libva-intel-driver \
       libva-mesa-driver \
       mesa \
