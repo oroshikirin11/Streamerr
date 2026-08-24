@@ -41,11 +41,11 @@ const DEFAULTS = {
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
     // costs more than the decode saved. Measure with `cli.js benchmark`.
     hwDecode: false,
-    // Pull the subtitle track and fonts out to small files before burning.
-    // Measured on an SMB-mounted episode this took 120s and gained 6%, so it
-    // is off by default — the second demux it avoids is not the bottleneck.
-    // Worth trying if `cli.js benchmark` says otherwise on your storage.
-    extractSubtitles: false,
+    // Extract subtitle tracks to small files in the background (during the
+    // previous clip's playback), avoiding a full second demux of the mkv
+    // over the network while streaming — measured at +24% on Bluray remuxes.
+    // Never delays going live; false disables.
+    extractSubtitles: true,
     // Encode this many chunks of a clip at once when burning subtitles.
     // libass is single-threaded, so one process cannot use the rest of the
     // CPU; several can. 1 disables it. Only engages when subtitles are on,

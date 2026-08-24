@@ -472,7 +472,7 @@ async function cmdBenchmark() {
         '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${profile.fps},format=rgba`,
         '-filter_complex',
         `[1:v]${subFilter},format=rgba,hwupload[ov];`
-        + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}[b];`
+        + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}:format=nv12[b];`
         + `[b][ov]overlay_vaapi[out]`,
         '-map', '[out]', '-c:v', 'h264_vaapi', '-b:v', profile.videoBitrate,
         '-an', '-t', String(SECONDS), '-f', 'null', '-',
@@ -485,6 +485,25 @@ async function cmdBenchmark() {
         gpuPath = SECONDS / ((Date.now() - t0) / 1000);
         console.log(`  full-GPU pipeline + subs   ${gpuPath.toFixed(2)}x realtime`
           + (gpuPath < 1.2 ? '   ← too slow' : '   ← the Jellyfin approach'));
+      }
+      // Same graph with the subtitle read from a small extracted file
+      // instead of a second demux of the whole mkv over the network.
+      if (extractedPath) {
+        console.log('  measuring: full-GPU + extracted subs …');
+        const subX = `subtitles=filename=${escapeFilterPath(extractedPath)}:alpha=1`;
+        const ax = a.map((x) => x === undefined ? x : x);
+        const gi = ax.findIndex((x) => typeof x === 'string' && x.includes('overlay_vaapi'));
+        ax[gi] = `[1:v]${subX},format=rgba,hwupload[ov];`
+          + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}:format=nv12[b];`
+          + `[b][ov]overlay_vaapi[out]`;
+        const t1 = Date.now();
+        const e2 = await runProc('ffmpeg', ax).then(() => null).catch((e) => e.message);
+        if (!e2) {
+          const g2 = SECONDS / ((Date.now() - t1) / 1000);
+          gpuPath = Math.max(gpuPath ?? 0, g2);
+          console.log(`  full-GPU + extracted subs  ${g2.toFixed(2)}x realtime`
+            + (g2 < 1.2 ? '   ← too slow' : ''));
+        }
       }
     }
   }
