@@ -14,9 +14,45 @@
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import {
-  existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync,
+  unlinkSync, writeFileSync,
 } from 'fs';
 import { join } from 'path';
+
+/**
+ * Remove debris an abrupt shutdown can leave in the cache directory.
+ *
+ * Everything here is crash-safe by protocol — `.partial` files only become
+ * cache entries via rename, font dirs only count once `.done` exists, chunk
+ * dirs are keyed by pid — but the protocol makes orphans, not corruption,
+ * and orphans accumulate forever unless someone sweeps. Called once at
+ * startup, before anything writes.
+ */
+export function sweepCache(cacheDir) {
+  let removed = 0;
+  let entries;
+  try {
+    entries = readdirSync(cacheDir, { withFileTypes: true });
+  } catch {
+    return 0; // nothing cached yet
+  }
+  for (const e of entries) {
+    const p = join(cacheDir, e.name);
+    try {
+      if (e.isFile() && e.name.endsWith('.partial')) {
+        unlinkSync(p); removed++;
+      } else if (e.isDirectory() && e.name.startsWith('chunks-')) {
+        // Keyed by the pid of a process that no longer exists.
+        rmSync(p, { recursive: true, force: true }); removed++;
+      } else if (e.isDirectory() && e.name.startsWith('fonts-')
+                 && !existsSync(join(p, '.done'))) {
+        // Interrupted dump; it would be redone anyway — redo it cleanly.
+        rmSync(p, { recursive: true, force: true }); removed++;
+      }
+    } catch { /* a live sweep must never take the service down */ }
+  }
+  return removed;
+}
 
 /** Subtitle codec → the container to extract it into. */
 const EXT_FOR = {

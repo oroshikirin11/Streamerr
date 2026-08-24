@@ -6,7 +6,7 @@
  * so nothing here carries a real default.
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { resolve, dirname, isAbsolute } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -147,7 +147,12 @@ export function ensureDirs() {
  */
 export function saveConfig(patch) {
   const merged = merge(config, patch);
-  writeFileSync(CONFIG_PATH, JSON.stringify(stripComments(merged), null, 2) + '\n');
+  // Write-then-rename: a kill mid-write must never leave a truncated
+  // config.json — it holds every setting and the credential hashes, and a
+  // corrupt one bricks the service until someone edits it by hand.
+  const tmp = `${CONFIG_PATH}.tmp`;
+  writeFileSync(tmp, JSON.stringify(stripComments(merged), null, 2) + '\n');
+  renameSync(tmp, CONFIG_PATH);
 
   for (const key of Object.keys(config)) delete config[key];
   Object.assign(config, merged);

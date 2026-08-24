@@ -27,6 +27,7 @@ import { normalizeBitrate } from './ffmpeg/encoders.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
+import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
 import { suggestRules } from './library/pathmap.js';
 import { dpush, dlist, teeConsole } from './debuglog.js';
@@ -601,6 +602,10 @@ wss.on('connection', (ws, req) => {
 // ── start ──────────────────────────────────────────────────────────────
 
 ensureDirs();
+{
+  const swept = sweepCache(config.paths.cache);
+  if (swept) console.log(`swept ${swept} leftover cache entr${swept === 1 ? 'y' : 'ies'} from a previous run`);
+}
 const fixed = normalizeStoredBitrates(normalizeBitrate);
 if (fixed) {
   console.warn(`! repaired bitrate config: ${fixed.before.join(', ')} -> ${fixed.after.join(', ')}`);
