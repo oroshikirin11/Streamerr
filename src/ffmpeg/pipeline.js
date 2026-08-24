@@ -79,6 +79,16 @@ export class PipelinePlayout extends EventEmitter {
     this.position = 0;
 
     this._stopping = false;
+    /**
+     * Stall recovery. The old engine had a watchdog; the rework lost it, and
+     * a wedged source or publisher then hangs the broadcast silently — the
+     * UI keeps its last state while Owncast times out. A source that stops
+     * producing progress gets respawned at the current position; repeated
+     * respawns escalate to fatal instead of looping forever.
+     */
+    this._lastBlockAt = null;
+    this._respawns = [];
+    this._watch = null;
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────
@@ -96,6 +106,46 @@ export class PipelinePlayout extends EventEmitter {
     this._play(first, 0);
     this.status = 'running';
     this.emit('status', this.status);
+
+    this._lastBlockAt = Date.now();
+    this._watch = setInterval(() => this._checkHealth(), 2000);
+    this._watch.unref?.();
+  }
+
+  _checkHealth() {
+    if (this.status !== 'running' || !this.source) return;
+    const silent = Date.now() - (this._lastBlockAt ?? Date.now());
+    // Health beacon: one line every ~14s into docker logs, so a wedged
+    // broadcast leaves evidence of its exact state instead of a mystery.
+    this._beat = (this._beat ?? 0) + 1;
+    if (this._beat % 7 === 0) {
+      this.emit('log', `[health] pos=${this.position.toFixed(1)}s `
+        + `timeline=${this.timeline.toFixed(1)}s queue=${this.queue.length} `
+        + `srcPid=${this.source?.pid ?? '-'} pubPid=${this.publisher?.pid ?? '-'} `
+        + `silent=${(silent / 1000).toFixed(1)}s\n`);
+    }
+    // Owncast drops after 10s of socket silence — recover well inside that.
+    if (silent < 5000) return;
+
+    // Owncast drops the broadcast after 10s of socket silence, so recovery
+    // has to move before that. Respawning the source at the current position
+    // is cheap and the publisher keeps the connection.
+    const now = Date.now();
+    this._respawns = this._respawns.filter((t) => now - t < 60_000);
+    if (this._respawns.length >= 3) {
+      this.emit('fatal', new Error(
+        'Source stalled 3 times within a minute — giving up. Last position '
+        + `${this.position.toFixed(1)}s. Check docker logs for the ffmpeg error.`,
+      ));
+      this.stop();
+      return;
+    }
+    this._respawns.push(now);
+    this.emit('warn', `source silent for ${(silent / 1000).toFixed(0)}s — respawning at ${this.position.toFixed(1)}s`);
+    this._lastBlockAt = Date.now();
+    if (this.current) {
+      this._play(this.current.item, this.position, { duration: this.current.duration });
+    }
   }
 
   stop() {
@@ -210,6 +260,7 @@ export class PipelinePlayout extends EventEmitter {
     p.on('close', (code) => {
       const ranMs = Date.now() - startedAt;
       this.publisher = null;
+      if (this._watch) { clearInterval(this._watch); this._watch = null; }
       this._killSource();
 
       const wasStopping = this._stopping;
@@ -411,12 +462,18 @@ export class PipelinePlayout extends EventEmitter {
 
     parser.on('block', (b) => {
       if (b.outTimeUs == null) return;
+      this._lastBlockAt = Date.now();
       const out = b.outTimeUs / 1e6;
       // Advance the published timeline by real progress, so the next source
       // continues rather than rewinding.
       this.timeline += Math.max(0, out - lastOut);
       lastOut = out;
-      if (kind === 'clip') this.position = startOffset + out;
+      if (kind === 'clip') {
+        this.position = startOffset + out;
+        if (this.current?.duration) {
+          this.position = Math.min(this.position, this.current.duration);
+        }
+      }
 
       if (kind === 'clip' && b.speed != null) {
         if (b.speed < 0.95) {
