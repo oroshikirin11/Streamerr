@@ -483,7 +483,7 @@ export function buildPlayoutArgs({
  * Uses libx264 deliberately — always present, and this is testing the network
  * path, not the encoder.
  */
-export function testRtmpConnection(target, { seconds = 2, timeoutMs = 20_000 } = {}) {
+export function testRtmpConnection(target, { seconds = 3, timeoutMs = 45_000 } = {}) {
   return new Promise((resolve) => {
     const child = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-nostdin',

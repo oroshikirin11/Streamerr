@@ -177,21 +177,27 @@
           <input type="password" bind:value={streamKey}
                  placeholder={keyStored ? 'leave blank to keep the saved key' : 'from Owncast admin'} />
         {/if}
-        <button onclick={() => (showKey = !showKey)}>{showKey ? 'Hide' : 'Show'}</button>
+        {#if streamKey}
+          <button onclick={() => (showKey = !showKey)}>{showKey ? 'Hide' : 'Show'}</button>
+        {/if}
       </div>
       {#if keyStored && !streamKey}
         <p class="muted small">A key is saved. It is never sent back to the browser.</p>
       {/if}
       <div class="row">
-        <button onclick={testOwncast} disabled={testing || !rtmpUrl}>
-          {testing ? 'Testing…' : 'Test connection'}
+        <button onclick={() => testOwncast()} disabled={testing || !rtmpUrl}>
+          {testing ? 'Streaming colour bars…' : 'Test connection'}
         </button>
-        <span class="muted small">pushes 2 seconds of colour bars</span>
+        <span class="muted small">pushes 10 seconds of colour bars</span>
       </div>
+      <p class="muted small">
+        Owncast buffers before anything reaches a viewer, so it may go live a
+        few seconds after the test finishes rather than during it.
+      </p>
       {#if owncastResult}
         <div class="result" class:bad={!owncastResult.ok}>
           {#if owncastResult.ok}
-            Owncast accepted the stream — responded in {owncastResult.ms} ms
+            Owncast accepted the stream — {owncastResult.seconds}s pushed in {(owncastResult.ms / 1000).toFixed(1)}s
           {:else}
             {owncastResult.error}
           {/if}
