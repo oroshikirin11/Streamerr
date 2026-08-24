@@ -13,7 +13,9 @@ import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { config, ensureDirs, rtmpTarget, rtmpTargetRedacted } from './config.js';
-import { probeAll, selectBackend, ffmpegAvailable } from './ffmpeg/probe.js';
+import {
+  probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
+} from './ffmpeg/probe.js';
 import { Normalizer } from './ffmpeg/normalizer.js';
 import { PlayoutEngine, probeDuration, buildPlayoutArgs } from './ffmpeg/playout.js';
 
@@ -52,7 +54,13 @@ async function cmdProbe() {
 
   const usable = results.filter((r) => r.ok);
   if (!usable.length) die('No usable H.264 encoder found.');
-  console.log(`\n→ "auto" would select: ${usable[0].backend} (${usable[0].label})\n`);
+  console.log(`\n→ "auto" would select: ${usable[0].backend} (${usable[0].label})`);
+
+  const caps = await probeConcatCapabilities();
+  console.log(`\nffmpeg ${caps.version ?? '(unknown version)'} — concat demuxer:`);
+  console.log(`  ${caps.recursionDepth ? '✓' : '✗'} recursion_depth`
+    + (caps.recursionDepth ? '' : '   ← chain depth is capped by this build'));
+  console.log(`  ${caps.segmentTimeMetadata ? '✓' : '✗'} segment_time_metadata\n`);
 }
 
 // ── normalize ──────────────────────────────────────────────────────────
@@ -154,6 +162,7 @@ async function cmdSelftest() {
       // Keep the startup burst well under one clip, or ffmpeg consumes the
       // whole chain before the lookahead can extend it.
       initialBurst: 2,
+      caps: await probeConcatCapabilities(),
     });
 
     // Normalize everything up front. This test is about whether the chain
@@ -245,6 +254,8 @@ async function cmdStream() {
     cacheDir: config.paths.cache,
     normalizer: norm,
     target,
+    endBehavior: 'end',
+    caps: await probeConcatCapabilities(),
   });
 
   for (const a of args) {

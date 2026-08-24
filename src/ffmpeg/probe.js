@@ -124,3 +124,59 @@ export async function ffmpegAvailable() {
   const { ok } = await run(['-hide_banner', '-version'], 5000);
   return ok;
 }
+
+/** ffmpeg's reported version string, e.g. "7.1.5" — null if unparseable. */
+export async function ffmpegVersion() {
+  const { text } = await capture(['-hide_banner', '-version'], 5000);
+  const m = /^ffmpeg version n?(\d+\.\d+(?:\.\d+)?)/m.exec(text || '');
+  return m ? m[1] : null;
+}
+
+/**
+ * Whether a demuxer exposes a given private option on THIS build.
+ *
+ * Option availability varies by version, and passing one that doesn't exist
+ * is fatal — ffmpeg refuses to start with "Unrecognized option", which for a
+ * long-running stream means it dies instantly rather than degrading. So every
+ * version-sensitive flag gets checked rather than assumed.
+ */
+export async function demuxerHasOption(demuxer, option) {
+  const { text } = await capture(['-hide_banner', '-h', `demuxer=${demuxer}`], 10_000);
+  if (!text) return false;
+  // Options are listed as "  -name  <type>  ..." in the help output.
+  return new RegExp(`^\\s*-${option}\\b`, 'm').test(text);
+}
+
+/** Run ffmpeg and return combined output regardless of exit status. */
+function capture(args, timeoutMs = 10_000) {
+  return new Promise((resolve) => {
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = '';
+    let timer = setTimeout(() => { timer = null; child.kill('SIGKILL'); }, timeoutMs);
+
+    const collect = (d) => { text += d.toString(); };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+
+    child.on('error', () => {
+      if (timer) clearTimeout(timer);
+      resolve({ text: null });
+    });
+    child.on('close', () => {
+      if (timer) clearTimeout(timer);
+      resolve({ text });
+    });
+  });
+}
+
+/**
+ * Feature detection for the playout path. Probed once at startup and passed
+ * into buildPlayoutArgs, so the same code runs on old and new ffmpeg.
+ */
+export async function probeConcatCapabilities() {
+  const [recursionDepth, segmentTimeMetadata] = await Promise.all([
+    demuxerHasOption('concat', 'recursion_depth'),
+    demuxerHasOption('concat', 'segment_time_metadata'),
+  ]);
+  return { recursionDepth, segmentTimeMetadata, version: await ffmpegVersion() };
+}

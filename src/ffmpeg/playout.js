@@ -56,7 +56,7 @@ export class PlayoutEngine extends EventEmitter {
    */
   constructor({
     cacheDir, normalizer, target, statsPeriodMs = 500,
-    fileOutput = false, endBehavior = 'end', initialBurst = 10,
+    fileOutput = false, endBehavior = 'end', initialBurst = 10, caps = null,
   }) {
     super();
     this.cacheDir = cacheDir;
@@ -66,6 +66,8 @@ export class PlayoutEngine extends EventEmitter {
     /** Write to a plain file instead of RTMP — used by the selftest. */
     this.fileOutput = fileOutput;
     this.initialBurst = initialBurst;
+    /** Feature-detected concat demuxer options; see probeConcatCapabilities. */
+    this.caps = caps ?? { recursionDepth: true, segmentTimeMetadata: true };
     /**
      * What to do when the queue runs dry:
      *   'end'    — terminate the chain so playback stops cleanly
@@ -170,6 +172,7 @@ export class PlayoutEngine extends EventEmitter {
       statsPeriodMs: this.statsPeriodMs,
       fileOutput: this.fileOutput,
       initialBurst: this.initialBurst,
+      caps: this.caps,
     });
 
     const startedAt = Date.now();
@@ -438,6 +441,7 @@ export class PlayoutEngine extends EventEmitter {
  */
 export function buildPlayoutArgs({
   head, target, statsPeriodMs = 500, fileOutput = false, initialBurst = 10,
+  caps = { recursionDepth: true, segmentTimeMetadata: true },
 }) {
   // Writing to a file exercises the identical concat/copy path minus the RTMP
   // muxer, which is what the selftest needs in order to verify chaining
@@ -468,10 +472,13 @@ export function buildPlayoutArgs({
     // Default is 10. Without this the channel dies on the 11th clip with
     // "Too deep recursion". Depth costs no memory; a 400-link chain peaked
     // under 2 MB RSS.
-    '-recursion_depth', '2147483647',
+    //
+    // Not present on every ffmpeg build, and an unrecognised option is fatal
+    // rather than ignored — so it is feature-detected, never assumed.
+    ...(caps.recursionDepth ? ['-recursion_depth', '2147483647'] : []),
     // Attaches lavf.concat.start_time to each packet — the only way to know
     // playlist position from inside a single long-running process.
-    '-segment_time_metadata', '1',
+    ...(caps.segmentTimeMetadata ? ['-segment_time_metadata', '1'] : []),
     '-i', head,
     '-c', 'copy',
     '-muxdelay', '0', '-muxpreload', '0',
