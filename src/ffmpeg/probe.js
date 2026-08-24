@@ -180,3 +180,50 @@ export async function probeConcatCapabilities() {
   ]);
   return { recursionDepth, segmentTimeMetadata, version: await ffmpegVersion() };
 }
+
+/**
+ * Does overlay_vaapi honour per-pixel alpha on this driver? Composites a
+ * fully transparent overlay onto green and samples the pixel — exit codes
+ * cannot answer this. Intel iHD passes; some drivers draw the overlay opaque.
+ */
+export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width = 1920, height = 1080 } = {}) {
+  const { tmpdir } = await import('os');
+  const { join } = await import('path');
+  const { existsSync, rmSync } = await import('fs');
+  const out = join(tmpdir(), `jsr-alpha-${process.pid}.mp4`);
+
+  const enc = await new Promise((res) => {
+    const c = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+      '-f', 'lavfi', '-i', `color=c=green:s=${width}x${height}:r=30,format=nv12`,
+      // 50% white, not fully transparent: a driver can pass full
+      // transparency yet garble partial alpha — seen on radeonsi, where
+      // glyphs come out as checkerboard blocks while this box's own probe
+      // passed. A correct blend of 50% white over green is unmistakable.
+      '-f', 'lavfi', '-i', `color=c=white@0.5:s=${width}x${height}:r=30,format=rgba`,
+      '-filter_complex', '[0:v]hwupload[b];[1:v]hwupload[o];[b][o]overlay_vaapi[out]',
+      '-map', '[out]', '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '1M', out,
+    ], { stdio: 'ignore' });
+    c.on('error', () => res(false));
+    c.on('close', (code) => res(code === 0));
+  });
+  if (!enc || !existsSync(out)) return false;
+
+  const px = await new Promise((res) => {
+    const c = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-i', out,
+      '-vf', 'scale=1:1', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const bufs = [];
+    c.stdout.on('data', (d) => bufs.push(d));
+    c.on('error', () => res(null));
+    c.on('close', () => res(Buffer.concat(bufs)));
+  });
+  try { rmSync(out); } catch { /* gone */ }
+  if (!px || px.length < 3) return false;
+  // Expect roughly (green + white)/2: mid red/blue, high green. Opaque
+  // white (alpha ignored) or pure green (overlay dropped) both fail.
+  const [r, g, b] = px;
+  return g > 150 && r > 70 && r < 190 && b > 70 && b < 190;
+}

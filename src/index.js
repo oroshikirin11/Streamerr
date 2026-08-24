@@ -20,7 +20,9 @@ import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
 } from './auth.js';
-import { probeAll, selectBackend, probeConcatCapabilities } from './ffmpeg/probe.js';
+import {
+  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
+} from './ffmpeg/probe.js';
 import { normalizeBitrate } from './ffmpeg/encoders.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout } from './ffmpeg/pipeline.js';
@@ -405,6 +407,16 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     ...(config.tracks ?? {}),
     ...(req.body?.trackOverride ?? {}),
   });
+
+  // Subtitles go through the full-GPU path when the driver supports it —
+  // the difference between unstreamable and comfortable on weak CPUs.
+  if (selection.subtitle && profile.backend === 'vaapi') {
+    if (globalThis.__alphaOk === undefined) {
+      globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
+        { width: profile.width, height: profile.height });
+    }
+    profile.gpuSubs = globalThis.__alphaOk && config.encoder.gpuSubs !== false;
+  }
 
   const conn = await testRtmpConnection(rtmpTarget());
   if (!conn.ok) {

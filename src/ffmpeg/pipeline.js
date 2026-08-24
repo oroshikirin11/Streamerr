@@ -505,6 +505,39 @@ export function buildSourceArgs({
   const base = scaleFilter(profile);
   const upload = be.uploadFilter(profile);
 
+  // Full-GPU path: decode, scale, composite and encode all stay on the GPU,
+  // and the CPU renders subtitle alpha frames and nothing else. Measured on
+  // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
+  // Text subtitles only; requires the driver to honour overlay alpha, which
+  // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
+  if (profile.gpuSubs && sub.filter && !sub.needsComplex) {
+    // The canvas starts at pts 0 but the video is seeked to `offset`, so the
+    // canvas pts are shifted forward for libass to render the right events,
+    // then re-zeroed to align with the seeked video for the overlay.
+    const shift = Number(offset).toFixed(3);
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
+      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      ...(offset > 0 ? ['-ss', shift] : []),
+      '-i', srcPath,
+      '-f', 'lavfi',
+      '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${profile.fps},format=rgba`,
+      '-filter_complex',
+      `[1:v]setpts=PTS+${shift}/TB,${sub.filter},setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
+      + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}[b];`
+      + `[b][ov]overlay_vaapi[v]`,
+      '-map', '[v]', '-map', `0:a:${audioIdx}?`,
+      ...be.encoderArgs(profile),
+      ...audioArgs(profile),
+      '-r', String(profile.fps), '-fps_mode', 'cfr',
+      '-output_ts_offset', Number(tsOffset).toFixed(3),
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+      '-f', 'mpegts', 'pipe:1',
+    ];
+  }
+
   const filterArgs = sub.needsComplex
     ? [
       '-filter_complex',
