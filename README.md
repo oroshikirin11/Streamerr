@@ -61,6 +61,58 @@ a machine can advertise five H.264 encoders and successfully run two.
 `selftest` needs no Owncast and no network. It builds four deliberately
 mismatched clips, chains them, and checks the output duration is exact.
 
+## Existing compose stack
+
+If your `docker-compose.yml` sits next to the checkout rather than inside it:
+
+```
+/srv/
+├── docker-compose.yml        <- your stack
+├── Jellystreamerr/           <- this repo
+└── jellystreamerr/           <- runtime state (created below)
+    ├── config/
+    └── cache/
+```
+
+Relative paths in compose resolve from the **compose file's** directory, so
+the build context and volumes differ from the standalone file:
+
+```yaml
+  jellystreamerr:
+    build: ./Jellystreamerr
+    image: jellystreamerr:latest
+    container_name: jellystreamerr
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "989"                       # stat -c '%g' /dev/dri/renderD128
+    environment:
+      - JELLYSTREAMERR_CONFIG=/config/config.json
+    volumes:
+      - ./jellystreamerr/config:/config
+      - ./jellystreamerr/cache:/app/cache
+      - /extHdd:/extHdd:ro
+```
+
+Keeping state in `./jellystreamerr/` rather than inside the checkout means
+`git pull` never touches your config or cache, and the repo stays clean.
+
+```bash
+cd /srv
+mkdir -p jellystreamerr/config jellystreamerr/cache
+cp Jellystreamerr/config.example.json jellystreamerr/config/config.json
+$EDITOR jellystreamerr/config/config.json      # rtmpUrl + streamKey
+
+docker compose build jellystreamerr
+docker compose run --rm jellystreamerr node src/cli.js probe
+```
+
+The cache holds normalized clips and grows to `normalizer.cacheLimitGB` —
+put it on fast local storage, not the media array.
+
 ## Requirements
 
 - Node 20+

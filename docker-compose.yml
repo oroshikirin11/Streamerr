@@ -1,3 +1,10 @@
+# Standalone compose — run from inside the repo:  docker compose up -d
+#
+# If your compose file lives ALONGSIDE the checkout rather than inside it
+# (e.g. /srv/docker-compose.yml with the repo at /srv/Jellystreamerr), see
+# "Existing compose stack" in the README: the build context and every
+# relative volume path change, because they resolve from the compose file's
+# directory, not the repo's.
 services:
   jellystreamerr:
     build: .
