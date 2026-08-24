@@ -203,7 +203,20 @@ app.post('/api/check/pathmap', async (req, res) => {
     const reported = libs.flatMap((l) => l.locations ?? []);
     const local = (req.body?.localRoots ?? ['/extHdd', '/media', '/mnt', '/data'])
       .filter((p) => existsSync(p));
-    res.json({ reported, local, suggested: suggestRules(reported, local) });
+
+    // The common case is that no mapping is needed at all — a Jellyfin in an
+    // LXC with the same mount reports paths this container can already open.
+    // Checking is trivial and saves the user reasoning about it.
+    const reachable = reported.filter((p) => existsSync(p));
+    const noMappingNeeded = reported.length > 0 && reachable.length === reported.length;
+
+    res.json({
+      reported,
+      local,
+      reachable,
+      noMappingNeeded,
+      suggested: noMappingNeeded ? [] : suggestRules(reported, local),
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

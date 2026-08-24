@@ -28,10 +28,8 @@
       "roots": []
     },
 
-    "_comment": "Jellyfin reports paths as ITS process sees them. Map them to what this machine sees. Longest prefix wins.",
-    "pathMap": [
-      { "from": "/media/", "to": "/extHdd/" }
-    ]
+    "_comment": "Usually empty. Only needed when Jellyfin reports paths this service cannot open — e.g. a Jellyfin in Docker with -v /extHdd:/media reports /media/... while this container sees /extHdd/... Setup detects whether any mapping is required. Longest prefix wins.",
+    "pathMap": []
   },
 
   "encoder": {

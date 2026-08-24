@@ -106,6 +106,7 @@
     pathmap = null;
     try {
       pathmap = await api.checkPathmap(libraryPayload());
+      if (pathmap.noMappingNeeded) rules = rules.filter((r) => r.from && r.to);
       if (!rules.length && pathmap.suggested?.length) rules = pathmap.suggested;
     } catch (err) { error = err.message; }
   }
@@ -271,27 +272,44 @@
       {/if}
 
     {:else if step === 3}
-      <h2>Where do those files live here?</h2>
-      <p class="muted">
-        Jellyfin reports paths as its own container sees them. This service has
-        different mounts, so those paths need translating.
-      </p>
-      {#if pathmap}
-        <p class="muted small">Jellyfin reports: {pathmap.reported.join(', ') || '—'}</p>
-        <p class="muted small">Visible here: {pathmap.local.join(', ') || '—'}</p>
-      {/if}
-      {#each rules as r, i}
-        <div class="row">
-          <input bind:value={r.from} placeholder="/media/" spellcheck="false" />
-          <span class="muted">→</span>
-          <input bind:value={r.to} placeholder="/extHdd/" spellcheck="false" />
-          <button onclick={() => removeRule(i)}>Remove</button>
+      <h2>Can we open your media?</h2>
+
+      {#if !pathmap}
+        <p class="muted">Checking…</p>
+
+      {:else if pathmap.noMappingNeeded && !rules.length}
+        <div class="result">
+          Nothing to do — every path Jellyfin reports is already readable here.
         </div>
-      {/each}
-      <button onclick={addRule}>Add rule</button>
-      <p class="muted small">
-        Leave empty if Jellyfin and this service see identical paths.
-      </p>
+        <p class="muted small" style="margin-top:10px">
+          {pathmap.reported.join(', ')}
+        </p>
+        <p class="muted small">
+          This step only matters when the two run with different mounts, such as
+          a Jellyfin in Docker that sees <code>/media</code> where this service
+          sees <code>/extHdd</code>. Yours match, so continue.
+        </p>
+
+      {:else}
+        <p class="muted">
+          Jellyfin reports paths as its own process sees them. Some of these
+          are not readable here, so they need translating.
+        </p>
+        <p class="muted small">
+          Jellyfin reports: {pathmap.reported.join(', ') || '—'}
+        </p>
+        <p class="muted small">Readable here: {pathmap.reachable?.join(', ') || 'none'}</p>
+
+        {#each rules as r, i}
+          <div class="row">
+            <input bind:value={r.from} placeholder="/media/" spellcheck="false" />
+            <span class="muted">→</span>
+            <input bind:value={r.to} placeholder="/extHdd/" spellcheck="false" />
+            <button onclick={() => removeRule(i)}>Remove</button>
+          </div>
+        {/each}
+        <button onclick={addRule} style="margin-top:10px">Add rule</button>
+      {/if}
 
     {:else}
       <h2>Languages</h2>
