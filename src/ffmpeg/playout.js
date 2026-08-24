@@ -300,10 +300,6 @@ export class PlayoutEngine extends EventEmitter {
       // not be mistaken for a finished one.
       if (!this.queue.length) {
         if (this.endBehavior === 'end') {
-          // Nothing left to play. Close the chain so the last link has no
-          // successor and playback stops cleanly instead of dying on a
-          // missing nested script.
-          this._writeTerminator();
           this.terminated = true;
           break;
         }
@@ -364,7 +360,12 @@ export class PlayoutEngine extends EventEmitter {
     const duration = await probeDuration(path);
 
     this.normalizer.pin(key);
-    this._writeLink(key);
+    // If this was the last item and we're not keeping the channel alive with
+    // filler, write it as a terminal link — no successor reference. A link
+    // pointing at a script that never gets written is a hard error; a link
+    // with no pointer at all ends playback cleanly with exit 0.
+    const isLast = !this.queue.length && this.endBehavior === 'end';
+    this._writeLink(key, { terminal: isLast });
 
     this.committed.push({ ...item, key, duration });
     this.committedDuration += duration;
@@ -398,28 +399,17 @@ export class PlayoutEngine extends EventEmitter {
    * any moment and a partially-written script is a parse error that kills the
    * process. Rename is atomic within a directory.
    */
-  _writeLink(clipKey) {
+  _writeLink(clipKey, { terminal = false } = {}) {
     const i = this.linkIndex++;
     const body = [
       'ffconcat version 1.0',
       `file ${clipKey}.ts`,
-      `file ${linkName(i + 1)}`,
+      ...(terminal ? [] : [`file ${linkName(i + 1)}`]),
       '',
     ].join('\n');
 
     this._atomicWrite(linkName(i), body);
-  }
-
-  /**
-   * Close the chain: an .ffconcat containing only the header.
-   *
-   * The previous link already references this filename, so it has to exist —
-   * but with no entries, playback simply ends. Without it, ffmpeg reaches a
-   * nonexistent nested script and exits with an error instead.
-   */
-  _writeTerminator() {
-    this._atomicWrite(linkName(this.linkIndex), 'ffconcat version 1.0\n');
-    this.emit('terminated', { atLink: this.linkIndex });
+    if (terminal) this.emit('terminated', { atLink: i });
   }
 
   /**
