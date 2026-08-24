@@ -316,11 +316,12 @@
       Extract subtitles in the background
     </label>
     <p class="muted small">
-      Pulls the subtitle track and fonts out to small local files while the
-      previous episode plays, so burning them doesn't read the whole file a
-      second time over the network &mdash; measured 24% faster on Bluray
-      remuxes. Never delays playback; the first episode of a session still
-      reads them from the file directly.
+      Pulls the subtitle track and fonts out to small local files, so burning
+      them doesn't read the whole file a second time during playback &mdash;
+      measured 24% faster on Bluray remuxes, and required for very large files,
+      where the in-band read stalls the encoder entirely. The first broadcast
+      of a file waits for this one-time read (&ldquo;Preparing&rdquo;); every
+      later one starts instantly from the cache.
     </p>
 
     <div class="actions">

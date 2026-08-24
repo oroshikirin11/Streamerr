@@ -64,6 +64,15 @@ export async function extractSubtitle(srcPath, sub, cacheDir) {
   if (existsSync(out)) return out;
 
   const tmp = `${out}.partial`;
+  // Extraction demuxes the whole container, so the kill-switch must scale
+  // with the file: a fixed 120s cap silently killed every extraction of a
+  // large remux, which then fell back to the far worse in-band read. Budget
+  // a pessimistic 30 MB/s plus slack, capped at an hour.
+  let timeout = 600_000;
+  try {
+    timeout = Math.min(3_600_000,
+      Math.max(600_000, (statSync(srcPath).size / 30e6) * 1000 + 120_000));
+  } catch { /* keep the default */ }
   const ok = await run([
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-i', srcPath,
@@ -74,7 +83,7 @@ export async function extractSubtitle(srcPath, sub, cacheDir) {
     // cannot infer it from the extension and refuses to write anything.
     '-f', MUXER_FOR[ext],
     tmp,
-  ]);
+  ], undefined, timeout);
 
   if (!ok || !existsSync(tmp)) {
     safeUnlink(tmp);
@@ -130,13 +139,13 @@ function safeUnlink(p) {
   try { unlinkSync(p); } catch { /* already gone */ }
 }
 
-function run(args, cwd) {
+function run(args, cwd, timeoutMs = 120_000) {
   return new Promise((resolve) => {
     const child = spawn('ffmpeg', args, {
       stdio: ['ignore', 'ignore', 'pipe'],
       cwd,
     });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.on('error', () => { clearTimeout(timer); resolve(false); });
     child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
   });

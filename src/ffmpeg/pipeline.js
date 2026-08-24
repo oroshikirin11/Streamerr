@@ -79,7 +79,7 @@ export function contentRect(video, profile) {
   const y = Math.round((H - h) / 2);
   return { w, h, x, y, bars: x > 1 || y > 1 };
 }
-import { extractSubtitle, extractFonts } from './subcache.js';
+import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
 import { ChunkScheduler } from './chunker.js';
 
 /** Treat a source that dies this fast as broken rather than finished. */
@@ -145,7 +145,32 @@ export class PipelinePlayout extends EventEmitter {
     this._stopping = false;
 
     const first = this.queue.shift();
-    await this.prepare(first);
+    // If the chosen subtitle lives inside the container and no extracted copy
+    // exists, extract it BEFORE connecting. The subtitles filter reads the
+    // ENTIRE file during its init before producing one frame — minutes on a
+    // big remux — which overruns both Owncast's 10s silence deadline and the
+    // watchdog's grace, guaranteeing an endless respawn loop. Extraction
+    // costs the same single read but happens off-air, once ever: the result
+    // is cached on disk keyed by size+mtime.
+    if (this._needsExtraction(first)) {
+      this.status = 'preparing';
+      this.current = { item: first, offset: 0, duration: first.duration ?? null };
+      this.emit('status', this.status);
+      const t0 = Date.now();
+      this.emit('log', '[subs] extracting subtitles before going live — '
+        + 'first playback of a file reads it once in full\n');
+      await this._extract(first);
+      this.emit('log', `[subs] prepared in ${((Date.now() - t0) / 1000).toFixed(0)}s\n`);
+      // The user may have hit Stop while the extraction ran.
+      if (this._stopping) {
+        this.status = 'stopped';
+        this.emit('status', this.status);
+        this.emit('ended');
+        return;
+      }
+    } else {
+      await this.prepare(first);
+    }
     // Warm before connecting: Owncast drops a session that is silent for its
     // first 10s, and a cold Bluray over SMB can take longer than that to
     // open. Reading the head first means the source starts hot.
@@ -182,6 +207,25 @@ export class PipelinePlayout extends EventEmitter {
 
     if (silent < limit) return;
     const now = Date.now();
+    // A source that never produced a single block will not start producing
+    // on its Nth identical respawn — each restart begins the same doomed
+    // startup from zero. The per-minute rule below cannot catch this: with
+    // a 30s first-block grace it is exactly 2 respawns/minute, forever.
+    if (!this._sawBlock) {
+      this._deadSpawns = (this._deadSpawns ?? 0) + 1;
+      if (this._deadSpawns >= 3) {
+        this.emit('fatal', new Error(
+          'The encoder produced no output in 3 attempts (~90s). If this clip '
+          + 'burns embedded subtitles, the subtitles filter may be reading '
+          + 'the whole file at startup — check the [subs] lines in the '
+          + 'console for a failed or disabled extraction.',
+        ));
+        this.stop();
+        return;
+      }
+    } else {
+      this._deadSpawns = 0;
+    }
     this._respawns = this._respawns.filter((t) => now - t < 60_000);
     if (this._respawns.length >= 3) {
       this.emit('fatal', new Error(
@@ -386,7 +430,7 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     this._spawnSource(args, { kind: 'clip' });
-    if (this.queue[0]) { this._warm(this.queue[0]); this._extractSubs(this.queue[0]); }
+    if (this.queue[0]) { this._warm(this.queue[0]); this._extract(this.queue[0]); }
     this.emit('nowplaying', this.snapshot());
 
     this._fillDuration(item);
@@ -494,7 +538,7 @@ export class PipelinePlayout extends EventEmitter {
   async prepare(item) {
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
-    this._extractSubs(item);
+    this._extract(item);
   }
 
   /**
@@ -507,26 +551,45 @@ export class PipelinePlayout extends EventEmitter {
    * the subtitle source is a kilobyte-sized local file. The first episode of
    * a session still reads from the mkv rather than delaying go-live.
    */
-  _extractSubs(item) {
+  _extract(item) {
     const sub = this.selection?.subtitle;
     const key = this._subKey(item?.srcPath);
-    if (!key || !this.cacheDir || this._subCache.has(key)) return;
-    if (this.profile?.extractSubtitles === false) return;
-    if (this._extracting?.has(key)) return;
-    (this._extracting ??= new Set()).add(key);
+    if (!key || !this.cacheDir) return Promise.resolve(null);
+    if (this._subCache.has(key)) return Promise.resolve(this._subCache.get(key));
+    if (this.profile?.extractSubtitles === false) return Promise.resolve(null);
+    this._extracting ??= new Map();
+    if (this._extracting.has(key)) return this._extracting.get(key);
 
     const t0 = Date.now();
-    Promise.all([
+    const p = Promise.all([
       extractSubtitle(item.srcPath, sub, this.cacheDir),
       extractFonts(item.srcPath, this.cacheDir),
     ]).then(([path, fontsDir]) => {
-      if (path) {
-        this._subCache.set(key, { path, fontsDir });
-        this.emit('log', `[subs] extracted for ${item.title ?? item.srcPath} `
-          + `in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
-      }
-    }).catch(() => { /* mkv-read fallback is slower, not broken */ })
+      if (!path) return null;
+      const entry = { path, fontsDir };
+      this._subCache.set(key, entry);
+      this.emit('log', `[subs] extracted for ${item.title ?? item.srcPath} `
+        + `in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+      return entry;
+    }).catch(() => null)
       .finally(() => this._extracting.delete(key));
+    this._extracting.set(key, p);
+    return p;
+  }
+
+  /**
+   * Whether going live must wait for extraction: an embedded text subtitle
+   * with no cached copy. External subs are already small files, and bitmap
+   * subs are composited from the main input, so neither pays the in-band
+   * second read that makes waiting necessary.
+   */
+  _needsExtraction(item) {
+    const sub = this.selection?.subtitle;
+    const key = this._subKey(item?.srcPath);
+    return Boolean(key && this.cacheDir
+      && this.profile?.extractSubtitles !== false
+      && isExtractable(sub)
+      && !this._subCache.has(key));
   }
 
   /** Black card on the pipe, so a pause doesn't starve the publisher. */
@@ -621,11 +684,32 @@ export class PipelinePlayout extends EventEmitter {
       const ranMs = Date.now() - startedAt;
       if (code !== 0) {
         const tail = lastLines(stderr, 3);
+        // A clip that exits with an error before producing a single frame
+        // did not "finish" — it failed. Advancing here turns one broken
+        // filtergraph into a silent march through the whole queue, each
+        // episode dying identically. One bad file among good ones is still
+        // skipped (the second failure in a row stops the broadcast).
+        if (!this._sawBlock) {
+          this._deadClips = (this._deadClips ?? 0) + 1;
+          if (this._deadClips >= 2) {
+            this.emit('fatal', new Error(
+              `Two clips in a row produced no output (last: exit ${code} — ${tail}). `
+              + 'Stopping instead of burning through the queue.',
+            ));
+            this.stop();
+            return;
+          }
+          this.emit('warn', `could not play ${item(this)}: ${tail}`);
+          this._advance();
+          return;
+        }
         if (ranMs < SOURCE_FAIL_MS) {
           this.emit('warn', `could not play ${item(this)}: ${tail}`);
         } else if (tail) {
           this.emit('log', `[source exit ${code} after ${(ranMs / 1000).toFixed(1)}s] ${tail}\n`);
         }
+      } else if (this._sawBlock) {
+        this._deadClips = 0;
       }
       this._advance();
     });
@@ -746,13 +830,14 @@ export function buildSourceArgs({
     const subChain = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
       + `[0:v]${scalePart}[b];[b][ov]overlay_vaapi`;
+    // Pillarboxing stays on the GPU via pad_vaapi, exactly like the no-subs
+    // path. The earlier approach — hwupload a black frame and composite onto
+    // it with a second overlay_vaapi — handed the encoder frames from a
+    // different hw-frames context and it rejected every one with -22, so 4:3
+    // subtitled clips "played" for 20s and died without a frame.
     const graph = rect.bars
-      ? `${subChain}[vs];[2:v]hwupload[bg];[bg][vs]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`
+      ? `${subChain},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}[v]`
       : `${subChain}[v]`;
-    const bgInput = rect.bars
-      ? ['-f', 'lavfi', ...canvasCap,
-        '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${eff.rate},format=nv12`]
-      : [];
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -764,7 +849,6 @@ export function buildSourceArgs({
       '-i', srcPath,
       '-f', 'lavfi', ...canvasCap,
       '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`,
-      ...bgInput,
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),

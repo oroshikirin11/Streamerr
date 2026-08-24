@@ -447,7 +447,17 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   }
 
   engine = buildEngine({ profile, selection });
-  await engine.start(items);
+  // Not awaited: going live can legitimately take minutes when the first
+  // clip's subtitles must be extracted (one full read of the file), and an
+  // HTTP request cannot sit open that long. The engine reports 'preparing'
+  // then 'running' over the status feed; failures arrive the same way.
+  const e = engine;
+  e.start(items).catch((err) => {
+    dpush('error', `start failed: ${err.message}`);
+    broadcast('error', { message: redact(String(err.message ?? err)) });
+    try { e.stop(); } catch { /* already down */ }
+    if (engine === e) engine = null;
+  });
   res.json({ ok: true, tracks: selection.reason, ...streamStatus() });
 }));
 

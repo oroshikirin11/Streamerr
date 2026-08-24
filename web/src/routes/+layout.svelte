@@ -22,9 +22,10 @@
   /** Fraction of the seek strip under the cursor, for the time bubble. */
   let hoverFrac = $state(null);
 
-  const live = $derived(
-    stream.status === 'running' || stream.status === 'starting'
-    || stream.status === 'paused');
+  const live = $derived(stream.status === 'running' || stream.status === 'paused');
+  /** First-time subtitle extraction before going live — can take minutes. */
+  const preparing = $derived(
+    stream.status === 'preparing' || stream.status === 'starting');
   const paused = $derived(stream.status === 'paused');
 
   onMount(async () => {
@@ -38,7 +39,7 @@
     // state. Stripped from production builds.
     if (mock) {
       stream = {
-        status: 'running',
+        status: page.url.searchParams.get('mock') === 'prep' ? 'preparing' : 'running',
         playing: {
           title: "Frieren: Beyond Journey's End — S1E1",
           duration: 1563,
@@ -68,6 +69,14 @@
   function startFeed() {
     connectStatus((msg) => {
       if (msg.type === 'stream') {
+        if (msg.payload.status === 'preparing' && stream.status !== 'preparing') {
+          toast = {
+            kind: 'info',
+            message: 'Preparing subtitles — the first playback of a file reads '
+              + 'it once in full, then it goes live automatically.',
+          };
+          setTimeout(() => { toast = null; }, 12000);
+        }
         stream = msg.payload;
         if (msg.payload.position != null) position = msg.payload.position;
       } else if (msg.type === 'progress') {
@@ -126,9 +135,8 @@
     finally { busyCtl = false; }
   }
 
-  // The browser tab doubles as a status light: the favicon is the brand mark
-  // in accent colours normally and turns red while broadcasting, and the tab
-  // title gains a red dot — visible even when the panel is a background tab.
+  // The browser tab doubles as a status light, visible even when the panel
+  // is a background tab.
   const favicon = (c1, c2) => 'data:image/svg+xml,' + encodeURIComponent(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">`
     + `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">`
@@ -136,8 +144,11 @@
     + `</linearGradient></defs>`
     + `<rect width="32" height="32" rx="8" fill="url(#g)"/>`
     + `<path d="M12 9.5v13l11-6.5z" fill="#fff"/></svg>`);
-  const favIdle = favicon('#6ba3f0', '#8b5cf6');
-  const favLive = favicon('#f0836b', '#d0402f');
+  // Green = broadcasting, red = not — the user's chosen semantics, matching
+  // the on-air pill in the sidebar. Amber while preparing subtitles.
+  const favIdle = favicon('#f0836b', '#d0402f');
+  const favLive = favicon('#5fc493', '#1f7a50');
+  const favPrep = favicon('#f0c36b', '#c98a2e');
 
   $effect(() => {
     let link = document.querySelector('link[rel="icon"]');
@@ -147,15 +158,17 @@
       document.head.appendChild(link);
     }
     link.type = 'image/svg+xml';
-    link.href = live ? favLive : favIdle;
+    link.href = live ? favLive : preparing ? favPrep : favIdle;
   });
 
-  // The tab title is what's on air, not which page is open: a red dot plus
-  // the playing title while broadcasting, just the service name otherwise.
+  // The tab title is what's on air, not which page is open: the playing
+  // title while broadcasting or preparing, just the service name otherwise.
   $effect(() => {
     document.title = live && stream.playing
-      ? `🔴 ${stream.playing.title}`
-      : 'Jellystreamerr';
+      ? `🟢 ${stream.playing.title}`
+      : preparing && stream.playing
+        ? `⏳ ${stream.playing.title}`
+        : 'Jellystreamerr';
   });
 
   let devMode = $state(false);
@@ -216,9 +229,9 @@
         <strong>Jellystreamerr</strong>
       </div>
       <div class="status">
-        <span class="onair" class:live>
-          <span class="dot" class:live></span>
-          {live ? 'On air' : 'Offline'}
+        <span class="onair" class:live class:prep={preparing}>
+          <span class="dot" class:live class:prep={preparing}></span>
+          {live ? 'On air' : preparing ? 'Preparing' : 'Offline'}
         </span>
         {#if speed && live}
           <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
@@ -252,7 +265,7 @@
              aria-valuemin="0" aria-valuemax={Math.round(stream.playing.duration ?? 0)}
              aria-valuenow={Math.round(position)}
              onclick={(e) => {
-               if (!stream.playing.duration || busyCtl) return;
+               if (!stream.playing.duration || busyCtl || preparing) return;
                const r = e.currentTarget.getBoundingClientRect();
                const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
                ctl(() => api.seek({ position: frac * stream.playing.duration }));
@@ -285,7 +298,8 @@
             <div class="np">
               <p class="title">
                 {stream.playing.title}
-                {#if paused}<span class="pill">Paused</span>{/if}
+                {#if paused}<span class="pill">Paused</span>
+                {:else if preparing}<span class="pill">Preparing subtitles…</span>{/if}
               </p>
               <p class="muted small">
                 {fmtTime(position)}
@@ -296,23 +310,23 @@
           </div>
 
           <div class="ctl">
-            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl} title="Back 30 seconds" aria-label="Back 30 seconds">
+            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl || preparing} title="Back 30 seconds" aria-label="Back 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg><span class="tiny">30</span>
             </button>
-            <button class="ic play" onclick={togglePause} disabled={busyCtl} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
+            <button class="ic play" onclick={togglePause} disabled={busyCtl || preparing} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
               {#if paused}
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
               {:else}
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
               {/if}
             </button>
-            <button class="ic" onclick={() => skip(30)} disabled={busyCtl} title="Forward 30 seconds" aria-label="Forward 30 seconds">
+            <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing} title="Forward 30 seconds" aria-label="Forward 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
             </button>
           </div>
 
           <div class="fright">
-            <button onclick={openTracks} disabled={busyCtl}>Audio &amp; subs</button>
+            <button onclick={openTracks} disabled={busyCtl || preparing}>Audio &amp; subs</button>
             <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
           </div>
         </div>
@@ -474,21 +488,28 @@
     padding: 0 8px 14px;
     display: flex; align-items: center; gap: 8px; font-size: 12px;
   }
+  /* Green = broadcasting, red = not, amber = preparing subtitles. */
   .onair {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 3px 10px 3px 8px; border-radius: 999px;
-    background: var(--surface-2); color: var(--muted);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
     font-weight: 500; letter-spacing: .02em;
   }
   .onair.live {
-    background: color-mix(in srgb, var(--danger) 14%, transparent);
-    color: var(--danger);
+    background: color-mix(in srgb, var(--success) 14%, transparent);
+    color: var(--success);
   }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-  .dot.live { background: var(--danger); animation: pulse 2s ease-in-out infinite; }
+  .onair.prep {
+    background: color-mix(in srgb, #c98a2e 16%, transparent);
+    color: #c98a2e;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); flex-shrink: 0; }
+  .dot.live { background: var(--success); animation: pulse 2s ease-in-out infinite; }
+  .dot.prep { background: #c98a2e; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 40%, transparent); }
-    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 0%, transparent); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 40%, transparent); }
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent); }
   }
   .speed { color: var(--muted); font-variant-numeric: tabular-nums; }
   .speed.slow { color: var(--danger); }
