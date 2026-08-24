@@ -20,9 +20,19 @@ import { EventEmitter } from 'events';
 import { statSync, existsSync, renameSync, unlinkSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { BACKENDS, audioArgs, scaleFilter } from './encoders.js';
+import {
+  probeTracks, listSubtitles, selectTracks, buildSubtitleFilter,
+} from './tracks.js';
 
-/** Stable id for "this file, at this profile". Changing settings re-keys. */
-export function cacheKey(srcPath, profile) {
+/**
+ * Stable id for "this file, at this profile, with these tracks".
+ *
+ * Track selection belongs in the key because subtitles are burned into the
+ * video and the audio track is baked in — the same source file with German
+ * subs is a genuinely different output than with English, so they must not
+ * collide in the cache.
+ */
+export function cacheKey(srcPath, profile, selection = null) {
   const st = statSync(srcPath);
   return createHash('sha1').update(JSON.stringify({
     src: srcPath,
@@ -33,20 +43,58 @@ export function cacheKey(srcPath, profile) {
       vb: profile.videoBitrate, ab: profile.audioBitrate,
       gop: profile.gopSeconds, backend: profile.backend,
     },
+    // Only the identifying parts of the selection, so an unrelated metadata
+    // difference doesn't invalidate an otherwise identical encode.
+    t: selection ? {
+      a: selection.audio?.typeIndex ?? null,
+      s: selection.subtitle
+        ? (selection.subtitle.external
+          ? `x:${selection.subtitle.path}`
+          : `i:${selection.subtitle.typeIndex}`)
+        : null,
+    } : null,
   })).digest('hex').slice(0, 16);
 }
 
-export function buildNormalizeArgs(srcPath, outPath, profile) {
+/**
+ * @param {string} srcPath
+ * @param {string} outPath
+ * @param {object} profile
+ * @param {object|null} selection  from selectTracks(): { audio, subtitle }
+ */
+export function buildNormalizeArgs(srcPath, outPath, profile, selection = null) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
+
+  const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath);
+  const audioIdx = selection?.audio?.typeIndex ?? 0;
+
+  // Software decode → software scale → subtitles → hwupload → hardware encode.
+  // Everything before hwupload must be software: software filters cannot
+  // operate on hardware frames, and there is no hardware equivalent of
+  // subtitle rendering.
+  const base = scaleFilter(profile);
+  const upload = be.uploadFilter(profile);
+
+  const filterArgs = sub.needsComplex
+    // Bitmap subtitles (PGS/VOBSUB) are images, not text — they cannot go
+    // through the `subtitles` filter and must be composited instead.
+    ? [
+      '-filter_complex',
+      `[0:v:0]${base}[base];[base][${sub.overlayInput}]overlay[ov];[ov]${upload}[vout]`,
+      '-map', '[vout]',
+    ]
+    : [
+      '-vf', [base, sub.filter, upload].filter(Boolean).join(','),
+      '-map', '0:v:0',
+    ];
 
   return [
     '-hide_banner', '-nostdin', '-y',
     ...be.deviceArgs(profile),
     '-i', srcPath,
-    // Software decode + software scale, then hand off to the GPU. Software
-    // filters cannot operate on hardware frames, so hwupload must come last.
-    '-vf', `${scaleFilter(profile)},${be.uploadFilter(profile)}`,
+    ...filterArgs,
+    '-map', `0:a:${audioIdx}?`,
     ...be.encoderArgs(profile),
     ...audioArgs(profile),
     '-fps_mode', 'cfr',
@@ -73,11 +121,15 @@ export class Normalizer extends EventEmitter {
    * @param {object} opts.profile   encoder profile incl. resolved `backend`
    * @param {number} opts.cacheLimitBytes
    */
-  constructor({ cacheDir, profile, cacheLimitBytes = 50 * 1024 ** 3 }) {
+  constructor({ cacheDir, profile, cacheLimitBytes = 50 * 1024 ** 3, trackPrefs = {} }) {
     super();
     this.cacheDir = cacheDir;
     this.profile = profile;
     this.cacheLimitBytes = cacheLimitBytes;
+    /** Default audio/subtitle language preferences; see tracks.js. */
+    this.trackPrefs = trackPrefs;
+    /** srcPath -> resolved selection, so we probe each file only once. */
+    this._selections = new Map();
 
     /** key -> Promise, so two requests for the same clip share one encode. */
     this.inflight = new Map();
@@ -89,6 +141,17 @@ export class Normalizer extends EventEmitter {
     return join(this.cacheDir, `${key}.ts`);
   }
 
+  /**
+   * The cache key a clip will encode to, resolving track selection first.
+   * Callers that need to know "is this ready?" must go through here rather
+   * than calling cacheKey() directly, or they compute a different key than
+   * ensure() does and every lookup misses.
+   */
+  async keyFor(srcPath, override = null) {
+    const selection = await this.resolveSelection(srcPath, override);
+    return cacheKey(srcPath, this.profile, selection);
+  }
+
   has(key) {
     return existsSync(this.pathFor(key));
   }
@@ -97,34 +160,59 @@ export class Normalizer extends EventEmitter {
   unpin(key) { this.pinned.delete(key); }
 
   /**
+   * Resolve which audio and subtitle tracks a file should be encoded with.
+   * Cached per path — ffprobe on a large file over a network mount is not
+   * free, and the queue asks repeatedly.
+   *
+   * @param {object} [override] per-item choice from the UI, merged over defaults
+   */
+  async resolveSelection(srcPath, override = null) {
+    if (!override && this._selections.has(srcPath)) {
+      return this._selections.get(srcPath);
+    }
+    const tracks = await probeTracks(srcPath);
+    const subtitles = await listSubtitles(srcPath, tracks);
+    const selection = selectTracks(tracks, subtitles, {
+      ...this.trackPrefs,
+      ...(override ?? {}),
+    });
+    selection.tracks = tracks;
+    selection.subtitles = subtitles;
+
+    if (!override) this._selections.set(srcPath, selection);
+    return selection;
+  }
+
+  /**
    * Get a normalized copy of `srcPath`, encoding it if necessary.
    * Concurrent calls for the same clip share a single ffmpeg run.
-   * @returns {Promise<{key: string, path: string, cached: boolean}>}
+   * @returns {Promise<{key: string, path: string, cached: boolean, selection: object}>}
    */
-  async ensure(srcPath) {
+  async ensure(srcPath, override = null) {
     if (!existsSync(srcPath)) {
       throw new Error(`Source file does not exist: ${srcPath}`);
     }
-    const key = cacheKey(srcPath, this.profile);
+    const selection = await this.resolveSelection(srcPath, override);
+    const key = cacheKey(srcPath, this.profile, selection);
     const out = this.pathFor(key);
 
-    if (existsSync(out)) return { key, path: out, cached: true };
+    if (existsSync(out)) return { key, path: out, cached: true, selection };
     if (this.inflight.has(key)) return this.inflight.get(key);
 
-    const job = this._encode(srcPath, key, out)
+    const job = this._encode(srcPath, key, out, selection)
       .finally(() => this.inflight.delete(key));
     this.inflight.set(key, job);
     return job;
   }
 
-  _encode(srcPath, key, out) {
+  _encode(srcPath, key, out, selection = null) {
     // Encode to a temp name and rename on success, so a crashed or killed
     // job can never leave a truncated file that looks like a cache hit.
     const tmp = `${out}.partial`;
-    const args = buildNormalizeArgs(srcPath, tmp, this.profile);
+    const args = buildNormalizeArgs(srcPath, tmp, this.profile, selection);
     const startedAt = Date.now();
 
-    this.emit('start', { key, src: srcPath });
+    this.emit('start', { key, src: srcPath, selection });
 
     return new Promise((resolve, reject) => {
       const child = spawn('ffmpeg', [...args, '-progress', 'pipe:1'], {
@@ -162,9 +250,9 @@ export class Normalizer extends EventEmitter {
           return reject(err);
         }
         const ms = Date.now() - startedAt;
-        this.emit('done', { key, src: srcPath, path: out, ms });
+        this.emit('done', { key, src: srcPath, path: out, ms, selection });
         this.evict();
-        resolve({ key, path: out, cached: false });
+        resolve({ key, path: out, cached: false, selection });
       });
     });
   }

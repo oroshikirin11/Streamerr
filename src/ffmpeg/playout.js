@@ -29,7 +29,6 @@ import { EventEmitter } from 'events';
 import { writeFileSync, renameSync, existsSync } from 'fs';
 import { join } from 'path';
 import { ProgressParser, ProgressWatchdog } from './progress.js';
-import { cacheKey } from './normalizer.js';
 
 /**
  * How many links to keep written beyond the one currently playing.
@@ -125,7 +124,7 @@ export class PlayoutEngine extends EventEmitter {
   async _prefetch() {
     const lookahead = this.normalizer.profile.lookahead ?? 2;
     for (const item of this.queue.slice(0, lookahead)) {
-      this.normalizer.ensure(item.srcPath).catch((err) => {
+      this.normalizer.ensure(item.srcPath, item.trackOverride ?? null).catch((err) => {
         this.emit('warn', `prefetch failed for ${item.srcPath}: ${err.message}`);
       });
     }
@@ -336,7 +335,7 @@ export class PlayoutEngine extends EventEmitter {
 
     let key;
     try {
-      key = cacheKey(item.srcPath, this.normalizer.profile);
+      key = await this.normalizer.keyFor(item.srcPath, item.trackOverride ?? null);
     } catch (err) {
       this.queue.shift(); // unreadable source — drop it
       throw new Error(`${item.srcPath}: ${err.message}`);
@@ -344,7 +343,7 @@ export class PlayoutEngine extends EventEmitter {
 
     if (!this.normalizer.has(key)) {
       // Not ready. Keep it queued, make sure it's encoding, and buy time.
-      this.normalizer.ensure(item.srcPath).catch((err) => {
+      this.normalizer.ensure(item.srcPath, item.trackOverride ?? null).catch((err) => {
         this.emit('warn', `normalize failed for ${item.title ?? item.srcPath}: ${err.message}`);
         // Drop it so the queue can't wedge on one bad file.
         const i = this.queue.indexOf(item);
