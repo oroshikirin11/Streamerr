@@ -544,7 +544,8 @@ async function cmdBenchmark() {
         }
       } else {
         qsvPath = SECONDS / ((Date.now() - t0) / 1000);
-        console.log(`  QSV pipeline + subs        ${qsvPath.toFixed(2)}x realtime`
+        const ql = chosen.subtitle ? 'QSV pipeline + subs   ' : 'QSV pipeline, no subs ';
+        console.log(`  ${ql}     ${qsvPath.toFixed(2)}x realtime`
           + (qsvPath < 1.2 ? '   ← too slow' : ''));
       }
     }
