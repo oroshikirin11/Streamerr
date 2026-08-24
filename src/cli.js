@@ -322,7 +322,9 @@ async function cmdStream() {
   // through a dropped push, which is what we want — but it must not be
   // silent, or a stream that never reaches the server looks perfectly fine.
   engine.on('log', (line) => {
-    if (/rtmp|recover|Connection|refused|reset|broken pipe|Error/i.test(line)) {
+    // Match trouble only. Matching "rtmp" catches ffmpeg's own banner line,
+    // which then reads as a warning on a perfectly healthy stream.
+    if (/recover|refused|reset by peer|broken pipe|timed out|Error|Failed/i.test(line)) {
       process.stderr.write(`! ${redact(line.trim())}\n`);
     }
   });
