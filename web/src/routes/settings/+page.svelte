@@ -317,8 +317,8 @@
   <section class="card">
     <h3>Languages</h3>
     <p class="muted small">
-      Subtitles are burned into the picture, so this applies to a whole
-      broadcast rather than per episode.
+      Your preferred language is selected automatically, like Jellyfin.
+      You can change audio or subtitles at any time, including mid-episode.
     </p>
     <label>Languages you understand</label>
     <input value={(cfg.tracks.languages || []).join(', ')}

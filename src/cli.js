@@ -19,6 +19,7 @@ import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
 import { PlayoutEngine, probeDuration, testRtmpConnection } from './ffmpeg/playout.js';
+import { PipelinePlayout } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
@@ -255,6 +256,115 @@ async function cmdSelftest() {
   }
 }
 
+
+// ── pipetest ───────────────────────────────────────────────────────────
+
+/**
+ * The claim the split-pipeline design rests on: seeking, pausing and changing
+ * tracks restart only the SOURCE, while the publisher — and therefore the RTMP
+ * connection — keeps running throughout.
+ *
+ * Asserts the publisher process id never changes across all of those
+ * operations, and that the output is continuous.
+ */
+async function cmdPipetest() {
+  if (!(await ffmpegAvailable())) die('ffmpeg is not on PATH.');
+
+  const dir = mkdtempSync(join(tmpdir(), 'jellystreamerr-pipe-'));
+  const CLIPS = 3;
+  const CLIP_SECONDS = 20;
+
+  try {
+    console.log(`\nGenerating ${CLIPS} clips of ${CLIP_SECONDS}s …\n`);
+    const sources = [];
+    for (let i = 0; i < CLIPS; i++) {
+      const p = join(dir, `src${i}.mkv`);
+      await run('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', `testsrc2=s=640x360:r=30`,
+        '-f', 'lavfi', '-i', `sine=frequency=${300 + i * 150}:sample_rate=48000`,
+        '-t', String(CLIP_SECONDS),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-ar', '48000', p,
+      ]);
+      sources.push(p);
+    }
+
+    const profile = {
+      ...(await resolveProfile()),
+      width: 640, height: 360, fps: 30,
+      videoBitrate: '1200k', audioBitrate: '128k', gopSeconds: 2,
+    };
+    console.log(`Encoding via ${profile.backend} → local flv\n`);
+
+    const out = join(dir, 'out.flv');
+    const engine = new PipelinePlayout({ target: out, profile });
+
+    const publisherPids = new Set();
+    const sourcePids = new Set();
+    const events = [];
+
+    engine.on('warn', (m) => console.warn(`  ! ${m}`));
+    engine.on('fatal', (e) => console.error(`  ✗ ${e.message}`));
+
+    const watch = setInterval(() => {
+      if (engine.publisher?.pid) publisherPids.add(engine.publisher.pid);
+      if (engine.source?.pid) sourcePids.add(engine.source.pid);
+    }, 100);
+
+    await engine.start(sources.map((srcPath, i) => ({
+      id: `c${i}`, title: `clip ${i}`, srcPath, duration: CLIP_SECONDS,
+    })));
+
+    const at = (ms, label, fn) => setTimeout(() => {
+      if (engine.status === 'stopped') return;
+      events.push(`${label} @ ${engine.position.toFixed(1)}s`);
+      console.log(`  ${label}`);
+      try { fn(); } catch (err) { console.warn(`  ! ${label}: ${err.message}`); }
+    }, ms);
+
+    at(4000,  'seek +8s',  () => engine.seek({ delta: 8 }));
+    at(9000,  'pause',     () => engine.pause());
+    at(14000, 'resume',    () => engine.resume());
+    at(19000, 'seek -5s',  () => engine.seek({ delta: -5 }));
+    at(24000, 'stop',      () => engine.stop());
+
+    await new Promise((res) => {
+      engine.on('ended', res);
+      setTimeout(res, 60_000).unref?.();
+    });
+    clearInterval(watch);
+    await new Promise((r) => setTimeout(r, 500));
+
+    if (!existsSync(out)) die('pipetest produced no output');
+    const duration = await probeDuration(out).catch(() => null);
+
+    console.log('\n─────────────────────────────────────');
+    console.log(`  operations    : ${events.length} (${events.join(', ')})`);
+    console.log(`  publisher pids: ${publisherPids.size}  ${[...publisherPids].join(', ')}`);
+    console.log(`  source pids   : ${sourcePids.size}`);
+    console.log(`  output        : ${duration ? duration.toFixed(1) + 's' : 'unreadable'}`);
+    console.log('─────────────────────────────────────');
+
+    const onePublisher = publisherPids.size === 1;
+    const manySources = sourcePids.size >= 4;
+    const playable = duration != null && duration > 15;
+
+    if (onePublisher && manySources && playable) {
+      console.log('\n✓ PASS — one publisher survived every seek, pause and resume.\n');
+    } else {
+      console.log('\n✗ FAIL');
+      if (!onePublisher) console.log(`  publisher restarted (${publisherPids.size} processes)`);
+      if (!manySources) console.log(`  expected several source restarts, saw ${sourcePids.size}`);
+      if (!playable) console.log('  output too short or unreadable');
+      console.log('');
+      process.exitCode = 1;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ── stream ─────────────────────────────────────────────────────────────
 
 async function cmdStream() {
@@ -371,6 +481,7 @@ const commands = {
   tracks: cmdTracks,
   testconnect: cmdTestConnect,
   selftest: cmdSelftest,
+  pipetest: cmdPipetest,
   stream: cmdStream,
 };
 
@@ -382,6 +493,7 @@ jellystreamerr
   tracks <file>         list audio/subtitle tracks and what would be picked
   testconnect           check Owncast accepts our stream key
   selftest              prove gapless chaining locally (no Owncast needed)
+  pipetest              prove seek/pause keep the connection alive
   stream <file...>      stream files to the configured Owncast
 `);
   process.exit(cmd ? 1 : 0);

@@ -313,8 +313,8 @@
     {:else}
       <h2>Languages</h2>
       <p class="muted">
-        Most-wanted first. Subtitles are burned into the picture, so this
-        applies to a whole broadcast rather than per episode.
+        Your preferred language is picked automatically. You can override it
+        per episode, or change it while something is playing.
       </p>
     <label>Languages you understand</label>
       <input value={(cfgTracks.languages || []).join(', ')}
