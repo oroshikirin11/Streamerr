@@ -96,12 +96,13 @@
     } catch (err) { error = err.message; }
   }
 
-  async function testOwncast() {
-    testing = 'owncast'; owncastResult = null;
+  async function testOwncast(watch = false) {
+    testing = watch ? 'owncast-watch' : 'owncast'; owncastResult = null;
     try {
       owncastResult = await api.checkOwncast({
         rtmpUrl: cfg.owncast.rtmpUrl,
         streamKey: streamKey || (keyStored ? '__SET__' : ''),
+        watch,
       });
     } catch (err) { owncastResult = { ok: false, error: err.message }; }
     finally { testing = ''; }
@@ -169,15 +170,18 @@
 
     <div class="actions">
       <button class="primary" onclick={() => save('owncast')}>Save</button>
-      <button onclick={testOwncast} disabled={testing === 'owncast'}>
-        {testing === 'owncast' ? 'Streaming colour bars…' : 'Test connection'}
+      <button onclick={() => testOwncast(false)} disabled={!!testing}>
+        {testing === 'owncast' ? 'Checking…' : 'Test connection'}
+      </button>
+      <button onclick={() => testOwncast(true)} disabled={!!testing}>
+        {testing === 'owncast-watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
       </button>
       {#if saved === 'owncast'}<span class="ok small">Saved</span>{/if}
     </div>
     {#if owncastResult}
       <div class="result" class:bad={!owncastResult.ok}>
         {owncastResult.ok
-          ? `Accepted — ${owncastResult.seconds}s pushed`
+          ? `Accepted — ${owncastResult.seconds}s pushed in ${(owncastResult.ms / 1000).toFixed(0)}s`
           : owncastResult.error}
       </div>
     {/if}

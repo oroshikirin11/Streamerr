@@ -69,16 +69,17 @@
 
   const parseList = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
-  async function testOwncast() {
-    testing = true; owncastResult = null;
+  async function testOwncast(watch = false) {
+    testing = watch ? 'watch' : 'quick'; owncastResult = null;
     try {
       owncastResult = await api.checkOwncast({
         rtmpUrl,
         streamKey: streamKey || (keyStored ? '__SET__' : ''),
+        watch,
       });
     } catch (err) {
       owncastResult = { ok: false, error: err.message };
-    } finally { testing = false; }
+    } finally { testing = ''; }
   }
 
   async function loadEncoders() {
@@ -180,14 +181,18 @@
         <p class="muted small">A key is saved. It is never sent back to the browser.</p>
       {/if}
       <div class="row">
-        <button onclick={() => testOwncast()} disabled={testing || !rtmpUrl}>
-          {testing ? 'Streaming colour bars…' : 'Test connection'}
+        <button onclick={() => testOwncast(false)} disabled={!!testing || !rtmpUrl}>
+          {testing === 'quick' ? 'Checking…' : 'Test connection'}
         </button>
-        <span class="muted small">pushes 10 seconds of colour bars</span>
+        <button onclick={() => testOwncast(true)} disabled={!!testing || !rtmpUrl}>
+          {testing === 'watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
+        </button>
       </div>
       <p class="muted small">
-        Owncast buffers before anything reaches a viewer, so it may go live a
-        few seconds after the test finishes rather than during it.
+        The quick check just proves the key is accepted. To actually see colour
+        bars on your Owncast page, use the 30-second version &mdash; Owncast
+        buffers several seconds of video before it can play anything, so a
+        short burst is accepted and then gone before it ever becomes visible.
       </p>
       {#if owncastResult}
         <div class="result" class:bad={!owncastResult.ok}>

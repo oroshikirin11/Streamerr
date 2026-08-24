@@ -194,12 +194,18 @@ app.post('/api/check/owncast', async (req, res) => {
   if (engine) return res.status(409).json({ error: 'Stop the current broadcast first' });
 
   const target = `${String(url).replace(/\/+$/, '')}/${key}`;
-  // Long enough to be watchable. Owncast segments to HLS with several
-  // seconds of latency, so a 2s push is accepted by the server but has
-  // finished and disconnected before a viewer could ever see it.
-  const seconds = 10;
+  // Two different questions. "Does it accept us" only needs a few seconds and
+  // no pacing. "Can I watch it appear" needs realtime pacing AND enough
+  // content for Owncast to build a playable HLS playlist — it buffers several
+  // segments before a viewer sees anything.
+  const watch = Boolean(req.body?.watch);
+  const seconds = watch ? 30 : 3;
   const t0 = Date.now();
-  const result = await testRtmpConnection(target, { seconds });
+  const result = await testRtmpConnection(target, {
+    seconds,
+    realtime: watch,
+    timeoutMs: (seconds + 20) * 1000,
+  });
   res.json(result.ok
     ? { ok: true, ms: Date.now() - t0, seconds }
     : { ok: false, error: redact(result.error) });

@@ -483,10 +483,17 @@ export function buildPlayoutArgs({
  * Uses libx264 deliberately — always present, and this is testing the network
  * path, not the encoder.
  */
-export function testRtmpConnection(target, { seconds = 3, timeoutMs = 45_000 } = {}) {
+export function testRtmpConnection(target, {
+  seconds = 3, timeoutMs = 45_000, realtime = false,
+} = {}) {
   return new Promise((resolve) => {
     const child = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
+      // Without -re this encodes the whole clip as fast as it can and dumps
+      // it in about a second, so the server logs a stream that started and
+      // ended immediately and never has enough content to serve. A test meant
+      // to be watched has to be paced like a real stream.
+      ...(realtime ? ['-re'] : []),
       '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30',
       '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
       '-t', String(seconds),
