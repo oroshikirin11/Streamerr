@@ -69,10 +69,12 @@ If your `docker-compose.yml` sits next to the checkout rather than inside it:
 /srv/
 ├── docker-compose.yml        <- your stack
 ├── Jellystreamerr/           <- this repo
-└── jellystreamerr/           <- runtime state (created below)
-    ├── config/
-    └── cache/
+├── jellystreamerr-config/    <- runtime state (created below)
+└── jellystreamerr-cache/
 ```
+
+Give it its own state directories rather than reusing a `config/` that
+belongs to another service in the same stack.
 
 Relative paths in compose resolve from the **compose file's** directory, so
 the build context and volumes differ from the standalone file:
@@ -92,23 +94,28 @@ the build context and volumes differ from the standalone file:
     environment:
       - JELLYSTREAMERR_CONFIG=/config/config.json
     volumes:
-      - ./jellystreamerr/config:/config
-      - ./jellystreamerr/cache:/app/cache
+      - ./jellystreamerr-config:/config
+      - ./jellystreamerr-cache:/app/cache
       - /extHdd:/extHdd:ro
 ```
 
-Keeping state in `./jellystreamerr/` rather than inside the checkout means
-`git pull` never touches your config or cache, and the repo stays clean.
+Keeping state beside the checkout rather than inside it means `git pull`
+never touches your config or cache.
 
 ```bash
 cd /srv
-mkdir -p jellystreamerr/config jellystreamerr/cache
-cp Jellystreamerr/config.example.json jellystreamerr/config/config.json
-$EDITOR jellystreamerr/config/config.json      # rtmpUrl + streamKey
+mkdir -p jellystreamerr-config jellystreamerr-cache
+cp Jellystreamerr/config.example.json jellystreamerr-config/config.json
+$EDITOR jellystreamerr-config/config.json      # rtmpUrl + streamKey
 
 docker compose build jellystreamerr
 docker compose run --rm jellystreamerr node src/cli.js probe
 ```
+
+> **One GPU consumer at a time while testing.** If another container in the
+> stack also has `/dev/dri/renderD128` and is holding a VAAPI encode session,
+> the probe can fail in a way that looks exactly like a broken driver. Stop
+> it before probing.
 
 The cache holds normalized clips and grows to `normalizer.cacheLimitGB` —
 put it on fast local storage, not the media array.
