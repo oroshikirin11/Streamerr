@@ -62,7 +62,7 @@ export function probeTracks(path) {
       '-v', 'error',
       '-show_streams',
       '-show_entries',
-      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio:'
+      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio,r_frame_rate,color_transfer:'
       + 'stream_tags=language,title:stream_disposition=default,forced,hearing_impaired',
       '-of', 'json',
       path,
@@ -128,6 +128,10 @@ function groupStreams(streams) {
       // placement must use the DISPLAY shape or 4:3 math lands wrong.
       entry.sar = s.sample_aspect_ratio ?? null;
       entry.dar = s.display_aspect_ratio ?? null;
+      // Exact fraction ("24000/1001") so output framerate can match the
+      // source without drift; hdr flags whether tone mapping is required.
+      entry.frameRate = s.r_frame_rate ?? null;
+      entry.hdr = ['smpte2084', 'arib-std-b67'].includes(s.color_transfer);
     }
     result[type].push(entry);
   }

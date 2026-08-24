@@ -43,6 +43,22 @@ import { buildSubtitleFilter } from './tracks.js';
  * rendering subs on the full frame instead smears their positions toward
  * the pillarbox bars.
  */
+/**
+ * Output framerate for a clip: the source's own rate when it is at or below
+ * the profile cap. Forcing 23.976fps anime to 30fps duplicates every fourth
+ * frame — 25% more GPU work on scale, composite and encode for zero quality
+ * gain, plus judder. Returns { rate: string for -r/lavfi, fps: number }.
+ */
+export function effectiveFps(video, profile) {
+  const cap = profile.fps ?? 30;
+  const m = /^(\d+)\/(\d+)$/.exec(video?.frameRate ?? '');
+  if (m && +m[2] > 0) {
+    const f = +m[1] / +m[2];
+    if (f > 5 && f <= cap + 0.01) return { rate: video.frameRate, fps: f };
+  }
+  return { rate: String(cap), fps: cap };
+}
+
 export function contentRect(video, profile) {
   const W = profile.width;
   const H = profile.height;
@@ -340,7 +356,8 @@ export class PipelinePlayout extends EventEmitter {
     if (v) {
       const rect = contentRect(v, this.profile);
       this.emit('log', `[geometry] source ${v.width}x${v.height} sar=${v.sar ?? '?'} `
-        + `dar=${v.dar ?? '?'} -> rect ${rect.w}x${rect.h} @${rect.x},${rect.y}`
+        + `dar=${v.dar ?? '?'} fps=${v.frameRate ?? '?'}${v.hdr ? ' HDR' : ''} `
+        + `-> rect ${rect.w}x${rect.h} @${rect.x},${rect.y}`
         + `${rect.bars ? ' (pillarboxed)' : ''}\n`);
     }
 
@@ -656,20 +673,27 @@ export function buildSourceArgs({
     // content lands where the author put it instead of smearing toward the
     // pillarbox bars of the 16:9 output.
     const rect = contentRect(selection?.video, profile);
+    const eff = effectiveFps(selection?.video, profile);
     const shift = Number(offset).toFixed(3);
+    // HDR sources must be tone-mapped to BT.709 or the SDR stream comes out
+    // washed. Fixed-function on Intel VPP, and placed AFTER the scale so it
+    // runs at output size, not 4K.
+    const scalePart = selection?.video?.hdr
+      ? `scale_vaapi=w=${rect.w}:h=${rect.h},`
+        + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
+      // format=nv12 is load-bearing: 10-bit sources decode to P010 surfaces,
+      // and h264_vaapi accepts only NV12 — without the GPU-side conversion
+      // the encoder dies with -22 (Invalid argument) on every 10-bit file.
+      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12`;
     const subChain = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
-      // format=nv12 is load-bearing: 10-bit sources decode to P010
-      // surfaces, and h264_vaapi accepts only NV12 — without the GPU-side
-      // conversion the encoder dies with -22 (Invalid argument) on every
-      // 10-bit file while 8-bit ones work, which looks like a mystery.
-      + `[0:v]scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12[b];[b][ov]overlay_vaapi`;
+      + `[0:v]${scalePart}[b];[b][ov]overlay_vaapi`;
     const graph = rect.bars
       ? `${subChain}[vs];[2:v]hwupload[bg];[bg][vs]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`
       : `${subChain}[v]`;
     const bgInput = rect.bars
       ? ['-f', 'lavfi', ...canvasCap,
-        '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps},format=nv12`]
+        '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${eff.rate},format=nv12`]
       : [];
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -678,13 +702,13 @@ export function buildSourceArgs({
       ...(offset > 0 ? ['-ss', shift] : []),
       '-i', srcPath,
       '-f', 'lavfi', ...canvasCap,
-      '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${profile.fps},format=rgba`,
+      '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`,
       ...bgInput,
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
-      ...be.encoderArgs(profile),
+      ...be.encoderArgs({ ...profile, fps: eff.fps }),
       ...audioArgs(profile),
-      '-r', String(profile.fps), '-fps_mode', 'cfr',
+      '-r', eff.rate, '-fps_mode', 'cfr',
       '-output_ts_offset', Number(tsOffset).toFixed(3),
       '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
       '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
