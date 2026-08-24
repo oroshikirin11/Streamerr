@@ -41,10 +41,12 @@ const DEFAULTS = {
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
     // costs more than the decode saved. Measure with `cli.js benchmark`.
     hwDecode: false,
-    // Extract subtitle tracks to small files in the background (during the
-    // previous clip's playback), avoiding a full second demux of the mkv
-    // over the network while streaming — measured at +24% on Bluray remuxes.
-    // Never delays going live; false disables.
+    // Retained for config compatibility only — the engine now ALWAYS
+    // extracts embedded subtitles before their first broadcast. Burning them
+    // straight from the container makes ffmpeg read the whole file a second
+    // time (+24% cost on remuxes) and never produces a frame at all on very
+    // large files, so this must not be disableable: a stale `false` saved by
+    // an older build put the engine into an endless startup loop.
     extractSubtitles: true,
     // Encode this many chunks of a clip at once when burning subtitles.
     // libass is single-threaded, so one process cannot use the rest of the

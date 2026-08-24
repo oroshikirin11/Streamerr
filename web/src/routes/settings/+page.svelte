@@ -99,7 +99,6 @@
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           hwDecode: Boolean(cfg.encoder.hwDecode),
-          extractSubtitles: Boolean(cfg.encoder.extractSubtitles),
           parallelChunks: +cfg.encoder.parallelChunks || 1,
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
@@ -311,17 +310,12 @@
       <code>cli.js benchmark &lt;file&gt;</code> shows a clear win.
     </p>
 
-    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
-      <input type="checkbox" bind:checked={cfg.encoder.extractSubtitles} style="width:auto" />
-      Extract subtitles in the background
-    </label>
-    <p class="muted small">
-      Pulls the subtitle track and fonts out to small local files, so burning
-      them doesn't read the whole file a second time during playback &mdash;
-      measured 24% faster on Bluray remuxes, and required for very large files,
-      where the in-band read stalls the encoder entirely. The first broadcast
-      of a file waits for this one-time read (&ldquo;Preparing&rdquo;); every
-      later one starts instantly from the cache.
+    <p class="muted small" style="margin-top:14px;">
+      Embedded subtitles are extracted to a local cache before their first
+      broadcast (the &ldquo;Preparing&rdquo; state) &mdash; burning them
+      straight from the media file would read the whole file a second time
+      during playback, which is slower on every file and fatal on large ones.
+      Cached files make every later broadcast start instantly.
     </p>
 
     <div class="actions">

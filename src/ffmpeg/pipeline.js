@@ -177,7 +177,10 @@ export class PipelinePlayout extends EventEmitter {
     await this._warm(first);
     this._spawnPublisher();
     this._play(first, 0);
-    this.status = 'running';
+    // 'running' is claimed only when the encoder actually produces output
+    // (first progress block) — a green "On air" during a startup that later
+    // fails is a lie the user rightly called out.
+    this.status = 'starting';
     this.emit('status', this.status);
 
     this._lastBlockAt = Date.now();
@@ -556,7 +559,6 @@ export class PipelinePlayout extends EventEmitter {
     const key = this._subKey(item?.srcPath);
     if (!key || !this.cacheDir) return Promise.resolve(null);
     if (this._subCache.has(key)) return Promise.resolve(this._subCache.get(key));
-    if (this.profile?.extractSubtitles === false) return Promise.resolve(null);
     this._extracting ??= new Map();
     if (this._extracting.has(key)) return this._extracting.get(key);
 
@@ -587,7 +589,6 @@ export class PipelinePlayout extends EventEmitter {
     const sub = this.selection?.subtitle;
     const key = this._subKey(item?.srcPath);
     return Boolean(key && this.cacheDir
-      && this.profile?.extractSubtitles !== false
       && isExtractable(sub)
       && !this._subCache.has(key));
   }
@@ -632,6 +633,10 @@ export class PipelinePlayout extends EventEmitter {
       if (b.outTimeUs == null) return;
       this._lastBlockAt = Date.now();
       this._sawBlock = true;
+      if (this.status === 'starting') {
+        this.status = 'running';
+        this.emit('status', this.status);
+      }
       const out = b.outTimeUs / 1e6;
       // Advance the published timeline by real progress, so the next source
       // continues rather than rewinding.
@@ -779,7 +784,7 @@ export function buildSourceArgs({
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
       '-vf', rect.bars
-        ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}`
+        ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
         : scalePart,
       '-map', '0:v:0', '-map', `0:a:${audioIdx}?`,
       ...be.encoderArgs(profEff),
@@ -827,17 +832,21 @@ export function buildSourceArgs({
       // and h264_vaapi accepts only NV12 — without the GPU-side conversion
       // the encoder dies with -22 (Invalid argument) on every 10-bit file.
       : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
-    const subChain = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+    // overlay_vaapi must be the LAST filter before the encoder. Measured on
+    // the N100: scale→overlay→encode works, scale→pad→encode works, but
+    // routing overlay_vaapi's output through ANY further VPP stage — another
+    // overlay, or pad_vaapi — makes h264_vaapi reject every frame with -22,
+    // so 4:3 subtitled clips ran ~20s and died without producing output.
+    // Pillarboxing therefore happens on the video BEFORE the composite, and
+    // the subtitle canvas (still rendered at the content rectangle, so ASS
+    // positioning is unaffected) is overlaid at the rectangle's offset.
+    const base = rect.bars
+      ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
+      : scalePart;
+    const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
-      + `[0:v]${scalePart}[b];[b][ov]overlay_vaapi`;
-    // Pillarboxing stays on the GPU via pad_vaapi, exactly like the no-subs
-    // path. The earlier approach — hwupload a black frame and composite onto
-    // it with a second overlay_vaapi — handed the encoder frames from a
-    // different hw-frames context and it rejected every one with -22, so 4:3
-    // subtitled clips "played" for 20s and died without a frame.
-    const graph = rect.bars
-      ? `${subChain},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}[v]`
-      : `${subChain}[v]`;
+      + `[0:v]${base}[b];[b][ov]overlay_vaapi`
+      + (rect.bars ? `=x=${rect.x}:y=${rect.y}` : '') + '[v]';
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
