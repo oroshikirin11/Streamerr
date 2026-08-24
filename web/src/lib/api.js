@@ -42,6 +42,7 @@ export const api = {
   login: (password) => request('POST', '/api/auth/login', { password }),
   logout: () => request('POST', '/api/auth/logout'),
   setupPassword: (password) => request('POST', '/api/auth/setup', { password }),
+  changePassword: (current, next) => request('POST', '/api/auth/password', { current, next }),
 
   config: () => request('GET', '/api/config'),
   saveConfig: (patch) => request('PUT', '/api/config', patch),

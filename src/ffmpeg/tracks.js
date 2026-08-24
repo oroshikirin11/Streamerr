@@ -190,7 +190,7 @@ export async function listSubtitles(mediaPath, probed = null) {
  * @typedef {object} TrackPrefs
  * @property {string[]} audioLanguages     ordered preference, e.g. ["jpn","eng"]
  * @property {string[]} subtitleLanguages  ordered preference, e.g. ["ger","eng"]
- * @property {'auto'|'off'|'forced'} subtitleMode
+ * @property {'auto'|'always'|'off'|'forced'} subtitleMode
  * @property {number|null} [audioIndex]     explicit override (typeIndex)
  * @property {number|string|null} [subtitleId] explicit override: typeIndex, or a sidecar path
  */
@@ -235,6 +235,14 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
       subtitle = typeof subtitleId === 'string'
         ? subtitles.find((s) => s.external && s.path === subtitleId) ?? null
         : subtitles.find((s) => !s.external && s.typeIndex === subtitleId) ?? null;
+    } else if (subtitleMode === 'always') {
+      // Subtitles regardless of what the audio is — for people who simply
+      // prefer reading along.
+      subtitle = pickByLanguage(
+        subtitles.filter((s) => !s.hearingImpaired),
+        subtitleLanguages.map(normLang),
+      ) ?? subtitles.find((s) => !s.hearingImpaired) ?? subtitles[0] ?? null;
+      if (!subtitle) skipped = 'this file has none';
     } else if (subtitleMode === 'forced') {
       // Forced subs only translate foreign dialogue — the usual choice when
       // you understand the spoken language.

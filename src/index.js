@@ -108,6 +108,20 @@ app.post('/api/auth/setup', async (req, res) => {
 // Everything below requires a session once a password is set.
 app.use('/api', auth);
 
+/** Changing the password needs the current one, even with a valid session. */
+app.post('/api/auth/password', async (req, res) => {
+  const { current, next } = req.body ?? {};
+  if (passwordHash() && !(await verifyPassword(current ?? '', passwordHash()))) {
+    return res.status(403).json({ error: 'Current password is wrong' });
+  }
+  try {
+    saveConfig({ auth: { passwordHash: await hashPassword(next ?? '') } });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ── config ─────────────────────────────────────────────────────────────
 
 /** Secrets never leave the server; the UI shows whether one is set, not what. */
@@ -141,6 +155,23 @@ app.put('/api/config', (req, res) => {
   }
   if (patch.library?.jellyfin?.apiKey === '__SET__') delete patch.library.jellyfin.apiKey;
   delete patch.auth; // password changes go through their own endpoint
+
+  // The panel expresses intent — which languages you understand, and whether
+  // you want the original audio or a dub. The engine consumes ordered
+  // language lists. Deriving here means any client gets it right, and the two
+  // representations cannot drift apart.
+  if (patch.tracks?.languages || patch.tracks?.audioMode) {
+    const merged = { ...config.tracks, ...patch.tracks };
+    const langs = merged.languages ?? [];
+    patch.tracks = {
+      ...patch.tracks,
+      // Original audio means "don't prefer any language", which falls through
+      // to the file's default track — the original, for essentially every
+      // release that carries more than one audio track.
+      audioLanguages: merged.audioMode === 'dubbed' ? langs : [],
+      subtitleLanguages: langs,
+    };
+  }
 
   try {
     saveConfig(patch);

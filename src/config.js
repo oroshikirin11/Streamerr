@@ -40,14 +40,22 @@ const DEFAULTS = {
   // only reliably portable form.
   paths: { cache: './cache', run: './run' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
-  // Ordered language preferences, most-wanted first. ISO 639 codes in any
-  // common form — "de", "ger" and "deu" all resolve to the same language.
-  // Empty means "no preference", which falls back to the file's own default
-  // track rather than to nothing.
   tracks: {
+    // What the user understands. Used both to decide whether a dub is wanted
+    // and to choose a subtitle language.
+    languages: ['eng'],
+    // 'original' keeps the source language — for anime that means Japanese,
+    // and is what most people want. 'dubbed' prefers a track in `languages`.
+    audioMode: 'original',
+    // auto | always | forced | off. 'auto' shows subtitles only when the
+    // audio is in a language the user does not understand, which gives
+    // subtitled anime and un-subtitled English films from one setting.
+    subtitleMode: 'auto',
+
+    // Low-level form the engine consumes. Derived from the above when saved
+    // through the panel; still settable directly for unusual cases.
     audioLanguages: [],
-    subtitleLanguages: [],
-    subtitleMode: 'auto', // auto | off | forced
+    subtitleLanguages: ['eng'],
   },
 };
 

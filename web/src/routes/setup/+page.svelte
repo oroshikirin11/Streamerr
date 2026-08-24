@@ -43,9 +43,7 @@
   let rules = $state([]);
 
   // step 5
-  let audioLangs = $state('jpn, ger, eng');
-  let subLangs = $state('ger, eng');
-  let subtitleMode = $state('auto');
+  let cfgTracks = $state({ languages: ['eng'], audioMode: 'original', subtitleMode: 'auto' });
 
   onMount(async () => {
     try {
@@ -61,11 +59,11 @@
       jellyfinKey = cfg.library.jellyfin?.apiKey === '__SET__' ? '__SET__' : '';
       fsRoots = (cfg.library.filesystem?.roots || []).join('\n');
       rules = cfg.library.pathMap || [];
-      if (cfg.tracks) {
-        audioLangs = (cfg.tracks.audioLanguages || []).join(', ');
-        subLangs = (cfg.tracks.subtitleLanguages || []).join(', ');
-        subtitleMode = cfg.tracks.subtitleMode || 'auto';
-      }
+      cfgTracks = {
+        languages: cfg.tracks?.languages ?? ['eng'],
+        audioMode: cfg.tracks?.audioMode ?? 'original',
+        subtitleMode: cfg.tracks?.subtitleMode ?? 'auto',
+      };
     } catch (err) { error = err.message; }
   });
 
@@ -129,11 +127,7 @@
         owncast: { rtmpUrl, ...(streamKey ? { streamKey } : {}) },
         encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate },
         library: libraryPayload(),
-        tracks: {
-          audioLanguages: parseList(audioLangs),
-          subtitleLanguages: parseList(subLangs),
-          subtitleMode,
-        },
+        tracks: cfgTracks,
       };
       if (provider === 'jellyfin' && jellyfinKey === '__SET__') delete patch.library.jellyfin.apiKey;
       await api.saveConfig(patch);
@@ -317,16 +311,33 @@
         Most-wanted first. Subtitles are burned into the picture, so this
         applies to a whole broadcast rather than per episode.
       </p>
+    <label>Languages you understand</label>
+      <input value={(cfgTracks.languages || []).join(', ')}
+             oninput={(e) => (cfgTracks.languages = parseList(e.currentTarget.value))}
+             placeholder="eng" spellcheck="false" />
+      <p class="muted small">
+        Used both to pick a dub and to choose a subtitle language.
+      </p>
+
       <label>Audio</label>
-      <input bind:value={audioLangs} placeholder="jpn, ger, eng" spellcheck="false" />
+      <select bind:value={cfgTracks.audioMode}>
+        <option value="original">Original language &mdash; Japanese for anime</option>
+        <option value="dubbed">Dubbed into your language when available</option>
+      </select>
+
       <label>Subtitles</label>
-      <input bind:value={subLangs} placeholder="ger, eng" spellcheck="false" />
-      <label>When to show subtitles</label>
-      <select bind:value={subtitleMode}>
-        <option value="auto">Automatic — only when the audio isn't in a language you read</option>
-        <option value="forced">Forced only — signs and foreign dialogue</option>
+      <select bind:value={cfgTracks.subtitleMode}>
+        <option value="auto">Only when you don&rsquo;t understand the audio</option>
+        <option value="always">Always</option>
+        <option value="forced">Forced only &mdash; signs and foreign dialogue</option>
         <option value="off">Never</option>
       </select>
+      <p class="muted small">
+        With original audio and the first subtitle option, anime plays in
+        Japanese with your subtitles and an English film plays with none.
+        Individual episodes can still be overridden from the library.
+      </p>
+
     {/if}
 
     {#if error}<p class="err">{error}</p>{/if}
