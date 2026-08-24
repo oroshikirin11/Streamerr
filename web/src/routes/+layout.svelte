@@ -375,8 +375,9 @@
 
   footer {
     grid-column: 2; border-top: 1px solid var(--border);
-    background: var(--surface); padding: 10px 20px;
+    background: var(--surface); padding: 10px 24px;
     display: flex; align-items: center; gap: 16px;
+    justify-content: space-between;
   }
   .cover {
     width: 38px; height: 54px; object-fit: cover; border-radius: 4px;
@@ -385,7 +386,7 @@
   .np { min-width: 0; flex: 0 1 300px; }
   .np .title { margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .np p { margin: 2px 0 0; }
-  .bar { flex: 3; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+  .bar { flex: 2; max-width: 900px; margin: 0 24px; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width .4s linear; }
 
   .ctl { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
