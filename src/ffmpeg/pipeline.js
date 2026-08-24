@@ -126,10 +126,14 @@ export class PipelinePlayout extends EventEmitter {
 
     this.queue = [...items];
     this._stopping = false;
-    this._spawnPublisher();
 
     const first = this.queue.shift();
     await this.prepare(first);
+    // Warm before connecting: Owncast drops a session that is silent for its
+    // first 10s, and a cold Bluray over SMB can take longer than that to
+    // open. Reading the head first means the source starts hot.
+    await this._warm(first);
+    this._spawnPublisher();
     this._play(first, 0);
     this.status = 'running';
     this.emit('status', this.status);
@@ -142,6 +146,11 @@ export class PipelinePlayout extends EventEmitter {
   _checkHealth() {
     if (this.status !== 'running' || !this.source) return;
     const silent = Date.now() - (this._lastBlockAt ?? Date.now());
+    // A source that has not produced its FIRST block yet is starting, not
+    // stalled — huge files over SMB need many seconds to open, and the
+    // subtitles filter opens the same file a second time. Killing it early
+    // just restarts the wait from zero, forever.
+    const limit = this._sawBlock ? 5000 : 30_000;
     // Health beacon: one line every ~14s into docker logs, so a wedged
     // broadcast leaves evidence of its exact state instead of a mystery.
     this._beat = (this._beat ?? 0) + 1;
@@ -154,9 +163,7 @@ export class PipelinePlayout extends EventEmitter {
     // Owncast drops after 10s of socket silence — recover well inside that.
     if (silent < 5000) return;
 
-    // Owncast drops the broadcast after 10s of socket silence, so recovery
-    // has to move before that. Respawning the source at the current position
-    // is cheap and the publisher keeps the connection.
+    if (silent < limit) return;
     const now = Date.now();
     this._respawns = this._respawns.filter((t) => now - t < 60_000);
     if (this._respawns.length >= 3) {
@@ -361,6 +368,7 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     this._spawnSource(args, { kind: 'clip' });
+    if (this.queue[0]) this._warm(this.queue[0]);
     this.emit('nowplaying', this.snapshot());
 
     this._fillDuration(item);
@@ -427,6 +435,28 @@ export class PipelinePlayout extends EventEmitter {
     if (this.publisher?.stdin.writable) sched.start(this.publisher.stdin);
   }
 
+  /**
+   * Pull the head of a file through the page cache so the source's open and
+   * probe are fast. Fire-and-forget for upcoming clips; awaited once for the
+   * very first clip before the RTMP connection exists.
+   */
+  async _warm(item) {
+    if (!item?.srcPath || this._warmed?.has(item.srcPath)) return;
+    (this._warmed ??= new Set()).add(item.srcPath);
+    const t0 = Date.now();
+    try {
+      const { createReadStream } = await import('fs');
+      await new Promise((resolve) => {
+        const rs = createReadStream(item.srcPath, { start: 0, end: 48 * 1024 * 1024 });
+        rs.on('data', () => {});
+        rs.on('end', resolve);
+        rs.on('error', resolve);
+        setTimeout(() => { rs.destroy(); resolve(); }, 25_000).unref?.();
+      });
+      this.emit('log', `[warm] ${item.title ?? item.srcPath} head read in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+    } catch { /* warming is best-effort */ }
+  }
+
   _subKey(srcPath) {
     const sub = this.selection?.subtitle;
     return sub && !sub.external ? `${srcPath}:${sub.typeIndex}` : null;
@@ -476,6 +506,8 @@ export class PipelinePlayout extends EventEmitter {
 
   _spawnSource(args, { kind }) {
     this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
+    this._sawBlock = false;
+    this._lastBlockAt = Date.now();
     const startedAt = Date.now();
     // fd 3 carries -progress so it doesn't fight stderr for the log stream.
     const s = spawn('ffmpeg', args, {
@@ -500,6 +532,7 @@ export class PipelinePlayout extends EventEmitter {
     parser.on('block', (b) => {
       if (b.outTimeUs == null) return;
       this._lastBlockAt = Date.now();
+      this._sawBlock = true;
       const out = b.outTimeUs / 1e6;
       // Advance the published timeline by real progress, so the next source
       // continues rather than rewinding.
@@ -550,8 +583,13 @@ export class PipelinePlayout extends EventEmitter {
       if (kind === 'hold') return;     // only ends when we replace it
 
       const ranMs = Date.now() - startedAt;
-      if (code !== 0 && ranMs < SOURCE_FAIL_MS) {
-        this.emit('warn', `could not play ${item(this)}: ${lastLines(stderr, 3)}`);
+      if (code !== 0) {
+        const tail = lastLines(stderr, 3);
+        if (ranMs < SOURCE_FAIL_MS) {
+          this.emit('warn', `could not play ${item(this)}: ${tail}`);
+        } else if (tail) {
+          this.emit('log', `[source exit ${code} after ${(ranMs / 1000).toFixed(1)}s] ${tail}\n`);
+        }
       }
       this._advance();
     });
