@@ -651,8 +651,12 @@ export function buildSourceArgs({
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
-  const base = scaleFilter(profile);
-  const upload = be.uploadFilter(profile);
+  // Source-rate matching applies to every path, not just the GPU one —
+  // duplicating 24fps to 30 is wasted work and judder wherever it happens.
+  const effAll = effectiveFps(selection?.video, profile);
+  const profEff = { ...profile, fps: effAll.fps };
+  const base = scaleFilter(profEff).replace(`fps=${effAll.fps}`, `fps=${effAll.rate}`);
+  const upload = be.uploadFilter(profEff);
 
   // Full-GPU path: decode, scale, composite and encode all stay on the GPU,
   // and the CPU renders subtitle alpha frames and nothing else. Measured on
@@ -673,7 +677,7 @@ export function buildSourceArgs({
     // content lands where the author put it instead of smearing toward the
     // pillarbox bars of the 16:9 output.
     const rect = contentRect(selection?.video, profile);
-    const eff = effectiveFps(selection?.video, profile);
+    const eff = effAll;
     const shift = Number(offset).toFixed(3);
     // HDR sources must be tone-mapped to BT.709 or the SDR stream comes out
     // washed. Fixed-function on Intel VPP, and placed AFTER the scale so it
@@ -724,7 +728,7 @@ export function buildSourceArgs({
       `scale=${rect.w}:${rect.h},setsar=1`,
       `${sub.filter}:alpha=0`,
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
-      `fps=${profile.fps}`,
+      `fps=${effAll.rate}`,
       upload,
     ]
     : [base, upload];
@@ -763,7 +767,7 @@ export function buildSourceArgs({
     '-i', srcPath,
     ...filterArgs,
     '-map', `0:a:${audioIdx}?`,
-    ...be.encoderArgs(profile),
+    ...be.encoderArgs(profEff),
     ...audioArgs(profile),
     // Continue the published timeline instead of restarting at zero.
     '-output_ts_offset', Number(tsOffset).toFixed(3),
@@ -790,8 +794,12 @@ export function buildChunkArgs({
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
-  const base = scaleFilter(profile);
-  const upload = be.uploadFilter(profile);
+  // Source-rate matching applies to every path, not just the GPU one —
+  // duplicating 24fps to 30 is wasted work and judder wherever it happens.
+  const effAll = effectiveFps(selection?.video, profile);
+  const profEff = { ...profile, fps: effAll.fps };
+  const base = scaleFilter(profEff).replace(`fps=${effAll.fps}`, `fps=${effAll.rate}`);
+  const upload = be.uploadFilter(profEff);
 
   // Subtitles must be burned between scale and pad — on the padded frame,
   // positioned subs for narrow content drift toward the bars.
@@ -801,7 +809,7 @@ export function buildChunkArgs({
       `scale=${rect.w}:${rect.h},setsar=1`,
       `${sub.filter}:alpha=0`,
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
-      `fps=${profile.fps}`,
+      `fps=${effAll.rate}`,
       upload,
     ]
     : [base, upload];
