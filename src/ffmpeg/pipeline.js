@@ -604,6 +604,10 @@ export function buildHoldArgs({
 
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
+    // -re here even though pacing lives on the publisher: black frames are so
+    // small that unpaced output lets MINUTES of hold-card fit in the pipe
+    // buffers, and on resume all of it plays out before the episode returns.
+    '-re',
     '-f', 'lavfi', '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps}`,
     '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
     '-vf', `drawtext=fontfile=${HOLD_FONT}:text='${text}':fontcolor=white:`

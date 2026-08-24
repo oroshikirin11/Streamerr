@@ -23,7 +23,9 @@ import {
   PipelinePlayout, buildSourceArgs, buildChunkArgs,
 } from './ffmpeg/pipeline.js';
 import { extractSubtitle, extractFonts } from './ffmpeg/subcache.js';
-import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
+import {
+  probeTracks, listSubtitles, selectTracks, escapeFilterPath,
+} from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
 
@@ -261,6 +263,52 @@ async function cmdSelftest() {
 
 
 
+
+/** Alias for the strict process runner — cmdBenchmark shadows `run` locally. */
+const runProc = (bin, argv) => run(bin, argv);
+
+/** Run ffmpeg and capture stdout bytes (for pixel sampling). */
+function run3(argv) {
+  return new Promise((res) => {
+    const c = spawn('ffmpeg', argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const bufs = [];
+    c.stdout.on('data', (d) => bufs.push(d));
+    c.on('error', () => res(null));
+    c.on('close', (code) => res(code === 0 ? Buffer.concat(bufs) : null));
+  });
+}
+
+/**
+ * Does overlay_vaapi honour per-pixel alpha on THIS driver?
+ *
+ * Composite a fully transparent overlay onto a green base and sample the
+ * result. Green back means alpha is respected; dark means the driver drew
+ * the overlay opaque (AMD radeonsi does this; Intel iHD is what Jellyfin
+ * ships on). Everything about the GPU subtitle path hinges on this.
+ */
+async function vaapiAlphaHonored(dev) {
+  const out = join(tmpdir(), `jsr-alpha-${process.pid}.mp4`);
+  const ok = await run('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    '-init_hw_device', `vaapi=va:${dev}`, '-filter_hw_device', 'va',
+    '-f', 'lavfi', '-i', 'color=c=green:s=320x240:r=30,format=nv12',
+    '-f', 'lavfi', '-i', 'color=c=black@0.0:s=320x240:r=30,format=rgba',
+    '-filter_complex', '[0:v]hwupload[b];[1:v]hwupload[o];[b][o]overlay_vaapi[out]',
+    '-map', '[out]', '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '1M', out,
+  ]).then(() => true).catch(() => false);
+  if (!ok || !existsSync(out)) return { supported: false };
+
+  const px = await run3([
+    '-hide_banner', '-loglevel', 'error', '-i', out,
+    '-vf', 'scale=1:1', '-frames:v', '1',
+    '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+  ]);
+  try { rmSync(out); } catch { /* gone */ }
+  if (!px || px.length < 3) return { supported: false };
+  const [r, g, b] = px;
+  return { supported: true, honored: g > 100 && r < 90 && b < 90, rgb: [r, g, b] };
+}
+
 // ── benchmark ──────────────────────────────────────────────────────────
 
 /**
@@ -369,8 +417,53 @@ async function cmdBenchmark() {
       + (parallel < 1.2 ? '   ← still too slow' : ''));
   }
 
+  // The Jellyfin configuration: decode, scale, composite and encode all on
+  // the GPU, leaving the CPU to do libass and nothing else. Only meaningful
+  // if the driver honours per-pixel alpha in overlay_vaapi.
+  let gpuPath = null;
+  if (chosen.subtitle && profile.backend === 'vaapi') {
+    const dev = config.encoder.device;
+    const alpha = await vaapiAlphaHonored(dev);
+    if (!alpha.supported) {
+      console.log('  GPU composite: overlay_vaapi not usable on this driver');
+    } else if (!alpha.honored) {
+      console.log(`  GPU composite: driver IGNORES alpha (got rgb ${alpha.rgb}) — path unusable`);
+    } else {
+      console.log('  GPU composite: driver honours alpha ✓');
+      const subFilter = chosen.subtitle.external
+        ? `subtitles=filename='${escapeFilterPath(chosen.subtitle.path)}':alpha=1`
+        : `subtitles=filename='${escapeFilterPath(src)}':si=${chosen.subtitle.typeIndex}:alpha=1`;
+      const a = [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-init_hw_device', `vaapi=va:${dev}`, '-filter_hw_device', 'va',
+        '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+        '-i', src,
+        '-f', 'lavfi',
+        '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${profile.fps},format=rgba`,
+        '-filter_complex',
+        `[1:v]${subFilter},format=rgba,hwupload[ov];`
+        + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}[b];`
+        + `[b][ov]overlay_vaapi[out]`,
+        '-map', '[out]', '-c:v', 'h264_vaapi', '-b:v', profile.videoBitrate,
+        '-an', '-t', String(SECONDS), '-f', 'null', '-',
+      ];
+      const t0 = Date.now();
+      const err = await runProc('ffmpeg', a).then(() => null).catch((e) => e.message);
+      if (err) {
+        console.log(`  full-GPU pipeline + subs   FAILED: ${err.split('\n')[0]}`);
+      } else {
+        gpuPath = SECONDS / ((Date.now() - t0) / 1000);
+        console.log(`  full-GPU pipeline + subs   ${gpuPath.toFixed(2)}x realtime`
+          + (gpuPath < 1.2 ? '   ← too slow' : '   ← the Jellyfin approach'));
+      }
+    }
+  }
+
   console.log('');
 
+  if (gpuPath != null && with_) {
+    console.log(`  Full-GPU pipeline is ${(gpuPath / with_).toFixed(1)}x faster than CPU burn-in.`);
+  }
   if (parallel != null && with_) {
     console.log(`  Encoding in parallel chunks is ${(parallel / with_).toFixed(1)}x faster.`);
     if (parallel > 1.3) {
@@ -393,7 +486,7 @@ async function cmdBenchmark() {
     console.log(`  GPU decode is ${(withHw / without).toFixed(1)}x faster — enable it in Settings.`);
   }
   const streamable = chosen.subtitle
-    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0, parallel ?? 0)
+    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0, parallel ?? 0, gpuPath ?? 0)
     : Math.max(without, withHw);
   if (streamable < 1.2) {
     console.log('');
