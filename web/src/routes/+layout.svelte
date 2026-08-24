@@ -109,6 +109,11 @@
   $effect(() => {
     if (authed) api.config().then((c) => { devMode = Boolean(c.devMode); }).catch(() => {});
   });
+  $effect(() => {
+    const h = (e) => { devMode = Boolean(e.detail); };
+    window.addEventListener('jsr-devmode', h);
+    return () => window.removeEventListener('jsr-devmode', h);
+  });
 
   const nav = $derived([
     { href: '/', label: 'Library', icon: 'M4 5h16v11H4zM2 19h20' },

@@ -402,8 +402,16 @@
     <h3>Developer</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
       <input type="checkbox" bind:checked={cfg.devMode} style="width:auto"
-             onchange={() => api.saveConfig({ devMode: cfg.devMode })} />
+             onchange={async () => {
+               await api.saveConfig({ devMode: cfg.devMode });
+               // Tell the layout so the Console nav entry appears without a
+               // page reload.
+               window.dispatchEvent(new CustomEvent('jsr-devmode', { detail: cfg.devMode }));
+               saved = 'dev';
+               setTimeout(() => { if (saved === 'dev') saved = ''; }, 2500);
+             }} />
       Developer mode — show the read-only Console page
+      {#if saved === 'dev'}<span class="ok small">Saved</span>{/if}
     </label>
     <p class="muted small">
       Live server and ffmpeg logs in the panel, with stream keys redacted.
