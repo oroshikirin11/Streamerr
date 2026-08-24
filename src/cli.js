@@ -338,6 +338,9 @@ async function cmdBenchmark() {
 
   const SECONDS = 20;
   const run = async (label, selection, hwDecode = false, extra = {}) => {
+    // Announce before measuring: a 20s sample of a heavy file at 0.5x takes
+    // 40s+, and silence between result lines reads as a hang.
+    console.log(`  measuring: ${label} …`);
     const a = buildSourceArgs({
       srcPath: src, offset: 0, profile, selection, tsOffset: 0, hwDecode, ...extra,
     })
@@ -422,6 +425,7 @@ async function cmdBenchmark() {
   // if the driver honours per-pixel alpha in overlay_vaapi.
   let gpuPath = null;
   if (!chosen.subtitle && profile.backend === 'vaapi') {
+    console.log('  measuring: full-GPU, no subs …');
     const v = tracks.video[0] ?? {};
     const hdr = ['smpte2084', 'arib-std-b67'].includes(v.color_transfer) || v.hdr;
     const sp = hdr
@@ -455,6 +459,7 @@ async function cmdBenchmark() {
       console.log(`  GPU composite: driver IGNORES alpha (got rgb ${alpha.rgb}) — path unusable`);
     } else {
       console.log('  GPU composite: driver honours alpha ✓');
+      console.log('  measuring: full-GPU pipeline + subs …');
       const subFilter = chosen.subtitle.external
         ? `subtitles=filename=${escapeFilterPath(chosen.subtitle.path)}:alpha=1`
         : `subtitles=filename=${escapeFilterPath(src)}:si=${chosen.subtitle.typeIndex}:alpha=1`;
@@ -493,6 +498,7 @@ async function cmdBenchmark() {
     if (!q.ok) {
       console.log(`  QSV: not usable (${q.error})`);
     } else {
+      console.log('  measuring: QSV pipeline …');
       const v = tracks.video[0] ?? {};
       const dec = { hevc: 'hevc_qsv', h264: 'h264_qsv', av1: 'av1_qsv' }[v.codec];
       const subF = !chosen.subtitle ? '' : chosen.subtitle.external
@@ -591,9 +597,12 @@ function run2(bin, argv) {
   return new Promise((res, rej) => {
     const c = spawn(bin, argv, { stdio: ['ignore', 'ignore', 'pipe'] });
     let e = '';
+    // A benchmark step may be slow, but it must never be silently infinite —
+    // a 20s measurement at even 0.1x is done inside 200s.
+    const t = setTimeout(() => c.kill('SIGKILL'), 240_000);
     c.stderr.on('data', (d) => { e += d.toString(); });
-    c.on('error', rej);
-    c.on('close', () => res(e));
+    c.on('error', (err) => { clearTimeout(t); rej(err); });
+    c.on('close', () => { clearTimeout(t); res(e); });
   });
 }
 
