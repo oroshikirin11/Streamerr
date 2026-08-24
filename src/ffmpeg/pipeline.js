@@ -659,7 +659,11 @@ export function buildSourceArgs({
     const shift = Number(offset).toFixed(3);
     const subChain = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
-      + `[0:v]scale_vaapi=w=${rect.w}:h=${rect.h}[b];[b][ov]overlay_vaapi`;
+      // format=nv12 is load-bearing: 10-bit sources decode to P010
+      // surfaces, and h264_vaapi accepts only NV12 — without the GPU-side
+      // conversion the encoder dies with -22 (Invalid argument) on every
+      // 10-bit file while 8-bit ones work, which looks like a mystery.
+      + `[0:v]scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12[b];[b][ov]overlay_vaapi`;
     const graph = rect.bars
       ? `${subChain}[vs];[2:v]hwupload[bg];[bg][vs]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`
       : `${subChain}[v]`;
