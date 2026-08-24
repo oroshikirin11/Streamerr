@@ -431,8 +431,8 @@ async function cmdBenchmark() {
     } else {
       console.log('  GPU composite: driver honours alpha ✓');
       const subFilter = chosen.subtitle.external
-        ? `subtitles=filename='${escapeFilterPath(chosen.subtitle.path)}':alpha=1`
-        : `subtitles=filename='${escapeFilterPath(src)}':si=${chosen.subtitle.typeIndex}:alpha=1`;
+        ? `subtitles=filename=${escapeFilterPath(chosen.subtitle.path)}:alpha=1`
+        : `subtitles=filename=${escapeFilterPath(src)}:si=${chosen.subtitle.typeIndex}:alpha=1`;
       const a = [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
         '-init_hw_device', `vaapi=va:${dev}`, '-filter_hw_device', 'va',

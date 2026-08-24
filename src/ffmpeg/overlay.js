@@ -183,8 +183,8 @@ export class OverlayRenderer extends EventEmitter {
 
   _one(srcPath, subtitle, profile, start, dur, out) {
     const filter = subtitle.external
-      ? `subtitles=filename='${escapeFilterPath(subtitle.path)}':alpha=1`
-      : `subtitles=filename='${escapeFilterPath(srcPath)}':si=${subtitle.typeIndex}:alpha=1`;
+      ? `subtitles=filename=${escapeFilterPath(subtitle.path)}:alpha=1`
+      : `subtitles=filename=${escapeFilterPath(srcPath)}:si=${subtitle.typeIndex}:alpha=1`;
 
     return this._run([
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',

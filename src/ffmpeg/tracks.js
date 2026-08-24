@@ -319,13 +319,20 @@ function describeChoice(audio, subtitle, mode, skipped) {
  * broken graph. Windows drive letters and anime filenames both hit this.
  */
 export function escapeFilterPath(p) {
-  return p
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/:/g, '\\:')
-    .replace(/\[/g, '\\[')
-    .replace(/\]/g, '\\]')
-    .replace(/,/g, '\\,');
+  // Returns a FULLY QUOTED token. Inside ffmpeg filter single-quotes,
+  // everything is literal until the next quote — backslash escapes are NOT
+  // interpreted there, so the old approach of writing \' inside the quotes
+  // terminated the string early and broke the whole graph on any filename
+  // containing an apostrophe ("A Shinigami's Work"). The working idiom is
+  // close-quote, escaped literal quote, reopen: '  ->  '\''
+  // Filtergraphs are parsed TWICE. The graph parser strips one level of
+  // quotes and escapes before the option parser runs, so single-level
+  // quoting leaves a bare apostrophe that the option parser treats as an
+  // opening quote — it then swallows the following options into the
+  // filename. So: level 1 quotes for the option parser, level 2
+  // backslash-escapes that result for the graph parser.
+  const level1 = "'" + String(p).split("'").join("'\\''") + "'";
+  return level1.replace(/([\\'\[\],;])/g, '\\$1');
 }
 
 /**
@@ -341,7 +348,7 @@ export function escapeFilterPath(p) {
 export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   if (!subtitle) return { filter: null, overlayInput: null, needsComplex: false };
   const { extractedPath = null, fontsDir = null } = opts;
-  const fonts = fontsDir ? `:fontsdir='${escapeFilterPath(fontsDir)}'` : '';
+  const fonts = fontsDir ? `:fontsdir=${escapeFilterPath(fontsDir)}` : '';
 
   if (subtitle.bitmap) {
     // Bitmap subs cannot be handled by a simple -vf chain; the caller must
@@ -355,7 +362,7 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
 
   if (subtitle.external) {
     return {
-      filter: `subtitles=filename='${escapeFilterPath(subtitle.path)}'${fonts}`,
+      filter: `subtitles=filename=${escapeFilterPath(subtitle.path)}${fonts}`,
       overlayInput: null,
       needsComplex: false,
     };
@@ -366,7 +373,7 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   // decode — barely visible locally, ruinous over a network mount.
   if (extractedPath) {
     return {
-      filter: `subtitles=filename='${escapeFilterPath(extractedPath)}'${fonts}`,
+      filter: `subtitles=filename=${escapeFilterPath(extractedPath)}${fonts}`,
       overlayInput: null,
       needsComplex: false,
     };
@@ -375,7 +382,7 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   // `si` selects among the file's subtitle streams and is a subtitle-relative
   // index, not the absolute stream index.
   return {
-    filter: `subtitles=filename='${escapeFilterPath(mediaPath)}':si=${subtitle.typeIndex}${fonts}`,
+    filter: `subtitles=filename=${escapeFilterPath(mediaPath)}:si=${subtitle.typeIndex}${fonts}`,
     overlayInput: null,
     needsComplex: false,
   };
