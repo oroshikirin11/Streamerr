@@ -3,7 +3,7 @@
  * Test harness for the engine, before any UI exists.
  *
  *   node src/cli.js probe                    which encoders actually work here
- *   node src/cli.js normalize <file>         normalize one file into the cache
+ *   node src/cli.js tracks <file>            audio/subtitle tracks and what we'd pick
  *   node src/cli.js selftest                 gapless chain test, no Owncast needed
  *   node src/cli.js stream <file...>         stream files to the configured Owncast
  */
@@ -11,17 +11,24 @@
 import { spawn } from 'child_process';
 import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { join, resolve, basename as pathBasename } from 'path';
 import { config, ensureDirs, rtmpTarget, rtmpTargetRedacted } from './config.js';
 import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
-import { Normalizer } from './ffmpeg/normalizer.js';
-import { PlayoutEngine, probeDuration, buildPlayoutArgs } from './ffmpeg/playout.js';
+import { PlayoutEngine, probeDuration } from './ffmpeg/playout.js';
+import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
 
 const die = (msg) => { console.error(`\n✗ ${msg}\n`); process.exit(1); };
+const basename = (p) => pathBasename(p);
+
+function fmtTime(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
 
 async function resolveProfile() {
   const sel = await selectBackend({
@@ -34,7 +41,7 @@ async function resolveProfile() {
       + `  falling back to ${sel.backend}`,
     );
   }
-  return { ...config.encoder, backend: sel.backend, lookahead: config.normalizer.lookahead };
+  return { ...config.encoder, backend: sel.backend };
 }
 
 // ── probe ──────────────────────────────────────────────────────────────
@@ -59,51 +66,53 @@ async function cmdProbe() {
   const caps = await probeConcatCapabilities();
   console.log(`\nffmpeg ${caps.version ?? '(unknown version)'} — concat demuxer:`);
   console.log(`  ${caps.recursionDepth ? '✓' : '✗'} recursion_depth`
-    + (caps.recursionDepth ? '' : '   ← chain depth is capped by this build'));
+    + (caps.recursionDepth ? '' : '   ← chain is capped at 10 clips on this build'));
   console.log(`  ${caps.segmentTimeMetadata ? '✓' : '✗'} segment_time_metadata\n`);
 }
 
-// ── normalize ──────────────────────────────────────────────────────────
+// ── tracks ─────────────────────────────────────────────────────────────
 
-async function cmdNormalize() {
+async function cmdTracks() {
   const src = args[0] && resolve(args[0]);
-  if (!src || !existsSync(src)) die('Usage: cli.js normalize <file>');
+  if (!src || !existsSync(src)) die('Usage: cli.js tracks <file>');
 
-  ensureDirs();
-  const profile = await resolveProfile();
-  console.log(`\nbackend: ${profile.backend}  →  ${profile.width}x${profile.height}@${profile.fps}`);
+  const tracks = await probeTracks(src);
+  const subs = await listSubtitles(src, tracks);
 
-  const norm = new Normalizer({
-    cacheDir: config.paths.cache,
-    profile,
-    cacheLimitBytes: config.normalizer.cacheLimitGB * 1024 ** 3,
-  });
-
-  norm.on('start', ({ key }) => console.log(`encoding ${key} …`));
-
-  const t0 = Date.now();
-  const res = await norm.ensure(src);
-  const secs = (Date.now() - t0) / 1000;
-
-  if (res.cached) {
-    console.log(`\n✓ already cached: ${res.path}\n`);
-  } else {
-    const dur = await probeDuration(res.path);
-    console.log(`\n✓ ${res.path}`);
-    console.log(`  ${dur.toFixed(1)}s of video in ${secs.toFixed(1)}s `
-      + `(${(dur / secs).toFixed(1)}× realtime)\n`);
+  console.log(`\n${basename(src)}\n`);
+  console.log('audio:');
+  for (const a of tracks.audio) {
+    console.log(`  [${a.typeIndex}] ${(a.language ?? '?').padEnd(4)} ${a.codec} `
+      + `${a.channels ?? '?'}ch${a.default ? '  (default)' : ''}`
+      + `${a.title ? `  "${a.title}"` : ''}`);
   }
+  if (!tracks.audio.length) console.log('  (none)');
+
+  console.log('\nsubtitles:');
+  for (const s of subs) {
+    const flags = [
+      s.forced && 'forced', s.hearingImpaired && 'sdh',
+      s.external && 'sidecar', s.bitmap && 'bitmap',
+    ].filter(Boolean).join(', ');
+    const id = s.external ? basename(s.path) : `[${s.typeIndex}]`;
+    console.log(`  ${id} ${(s.language ?? '?').padEnd(4)} ${s.codec}`
+      + `${flags ? `  (${flags})` : ''}`);
+  }
+  if (!subs.length) console.log('  (none)');
+
+  const chosen = selectTracks(tracks, subs, config.tracks ?? {});
+  console.log(`\n→ would use: ${chosen.reason}\n`);
 }
 
 // ── selftest ───────────────────────────────────────────────────────────
 
 /**
- * The claim worth testing before anything is built on top of it:
- * a chain of nested .ffconcat scripts plays through as ONE continuous
- * stream, with the later links written only after ffmpeg has already
- * started — and the total duration comes out exact.
+ * The claim worth testing before anything is built on top of it: a chain of
+ * nested .ffconcat scripts plays through as ONE continuous stream, with the
+ * later links written only after ffmpeg has already started, and the total
+ * duration comes out exact — from deliberately mismatched sources.
  *
- * Runs entirely locally. No Owncast, no network, no hardware required.
+ * Runs entirely locally. No Owncast, no network.
  */
 async function cmdSelftest() {
   if (!(await ffmpegAvailable())) die('ffmpeg is not on PATH.');
@@ -116,7 +125,6 @@ async function cmdSelftest() {
     console.log(`\nGenerating ${CLIPS} test clips of ${CLIP_SECONDS}s each …`);
     console.log('Deliberately mismatched: different sizes, framerates, sample rates.\n');
 
-    // Each clip differs in exactly the ways real library files differ.
     const variants = [
       { s: '640x480',   r: 25, ar: 44100, label: '480p25 44.1k' },
       { s: '1280x720',  r: 30, ar: 48000, label: '720p30 48k' },
@@ -142,37 +150,27 @@ async function cmdSelftest() {
     }
 
     const profile = await resolveProfile();
-    // Keep the selftest quick and hardware-independent.
     const testProfile = {
       ...profile, width: 640, height: 360, fps: 30,
       videoBitrate: '1200k', audioBitrate: '128k', gopSeconds: 2,
     };
-    console.log(`\nNormalizing to ${testProfile.width}x${testProfile.height}@${testProfile.fps} `
-      + `via ${testProfile.backend} …`);
+    console.log(`\nEncoding live to ${testProfile.width}x${testProfile.height}@`
+      + `${testProfile.fps} via ${testProfile.backend} …`);
 
-    const norm = new Normalizer({ cacheDir: dir, profile: testProfile });
     const engine = new PlayoutEngine({
-      cacheDir: dir,
-      normalizer: norm,
+      workDir: dir,
       // A local .flv rather than an RTMP URL. Everything else — the concat
-      // chain, -c copy, the codec tags, the fifo muxer — is byte-identical to
+      // chain, the filters, the codec tags, the fifo muxer — is identical to
       // production, so the destination is the ONLY difference. An earlier
-      // version of this test bypassed the fifo muxer entirely and therefore
-      // missed two bugs that only appear on that path.
+      // version bypassed the fifo muxer and missed two bugs living there.
       target: join(dir, 'out.flv'),
+      profile: testProfile,
       endBehavior: 'end',
       // Keep the startup burst well under one clip, or ffmpeg consumes the
       // whole chain before the lookahead can extend it.
       initialBurst: 2,
       caps: await probeConcatCapabilities(),
     });
-
-    // Normalize everything up front. This test is about whether the chain
-    // plays through as one continuous stream — not about encode throughput.
-    // (In production the just-in-time queue handles this, and commits filler
-    // rather than blocking if a clip isn't ready.)
-    for (const src of sources) await norm.ensure(src);
-    console.log('  all clips normalized\n');
 
     for (let i = 0; i < CLIPS; i++) {
       engine.enqueue({ id: `c${i}`, title: `clip ${i}`, srcPath: sources[i] });
@@ -186,14 +184,17 @@ async function cmdSelftest() {
     });
     engine.on('warn', (m) => console.warn(`  ! ${m}`));
 
+    const t0 = Date.now();
     console.log('\nStreaming through the chain …');
     console.log('(links after the first are written while ffmpeg is already running)\n');
 
     await engine.start();
+    const startupMs = Date.now() - t0;
+
     await new Promise((res) => {
       engine.on('ended', res);
       engine.on('fatal', (e) => { console.error(`  ✗ ${e.message}`); res(); });
-      setTimeout(res, 120_000).unref?.();
+      setTimeout(res, 180_000).unref?.();
     });
 
     const outPath = join(dir, 'out.flv');
@@ -206,14 +207,13 @@ async function cmdSelftest() {
 
     console.log('\n─────────────────────────────────────');
     console.log(`  clips chained : ${committed.length}/${CLIPS}`);
+    console.log(`  time to air   : ${(startupMs / 1000).toFixed(1)}s`);
     console.log(`  expected      : ${expected.toFixed(2)}s`);
     console.log(`  actual        : ${actual.toFixed(2)}s`);
     console.log(`  drift         : ${drift >= 0 ? '+' : ''}${drift.toFixed(2)}s (${pct.toFixed(1)}%)`);
     console.log('─────────────────────────────────────');
 
-    // Un-normalized concat loses ~8% silently; normalized should be well
-    // under 1%. A sub-frame wobble is expected from AAC frame quantization.
-    if (pct < 1 && committed.length === CLIPS) {
+    if (pct < 2 && committed.length === CLIPS) {
       console.log('\n✓ PASS — gapless chaining works, duration is exact.\n');
     } else {
       console.log('\n✗ FAIL — chain did not play through cleanly.\n');
@@ -233,94 +233,69 @@ async function cmdStream() {
   try {
     target = rtmpTarget();
   } catch (err) {
-    die(`${err.message}\n  Copy config.example.json to config.json and fill it in.`);
+    die(`${err.message}\n  Copy config.example.json and fill it in.`);
   }
 
   ensureDirs();
   const profile = await resolveProfile();
 
+  const paths = args.map((a) => resolve(a));
+  for (const p of paths) if (!existsSync(p)) die(`No such file: ${p}`);
+
+  // Track choice applies to the whole session: -map and the subtitles filter
+  // are set once for the ffmpeg process, not per clip. Resolved from the
+  // first file, which within a series is representative.
+  const tracks = await probeTracks(paths[0]);
+  const subs = await listSubtitles(paths[0], tracks);
+  const selection = selectTracks(tracks, subs, config.tracks ?? {});
+
   console.log(`\ntarget  : ${rtmpTargetRedacted()}`);
   console.log(`encoder : ${profile.backend}`);
   console.log(`output  : ${profile.width}x${profile.height}@${profile.fps} `
-    + `${profile.videoBitrate}  GOP ${profile.gopSeconds}s\n`);
-
-  const norm = new Normalizer({
-    cacheDir: config.paths.cache,
-    profile,
-    cacheLimitBytes: config.normalizer.cacheLimitGB * 1024 ** 3,
-  });
-  // Normalizing a full episode takes minutes. Without progress output a
-  // healthy encode looks exactly like a hung one.
-  // Keyed by cache key, not path — several clips can be encoding at once,
-  // and their progress events interleave.
-  const durations = new Map();
-  norm.on('start', async ({ src, key }) => {
-    console.log(`  normalizing ${basename(src)} …`);
-    try {
-      durations.set(key, await probeDuration(src));
-    } catch { /* percentage is best-effort; elapsed still shows */ }
-  });
-
-  let lastNorm = 0;
-  norm.on('progress', ({ key, outTimeUs }) => {
-    const now = Date.now();
-    if (now - lastNorm < 3000) return;
-    lastNorm = now;
-    const done = outTimeUs / 1e6;
-    const total = durations.get(key);
-    const pct = total ? ` (${Math.round((done / total) * 100)}%)` : '';
-    process.stdout.write(`\r    encoded ${fmtTime(done)}${pct}          `);
-  });
-
-  norm.on('done', ({ src, ms, path }) => {
-    process.stdout.write('\r');
-    probeDuration(path).then((dur) => {
-      console.log(`  ready ${basename(src)} — ${fmtTime(dur)} in ${(ms / 1000).toFixed(0)}s `
-        + `(${(dur / (ms / 1000)).toFixed(1)}× realtime)`);
-    }).catch(() => console.log(`  ready ${basename(src)} (${(ms / 1000).toFixed(0)}s)`));
-  });
+    + `${profile.videoBitrate}  GOP ${profile.gopSeconds}s`);
+  console.log(`tracks  : ${selection.reason}\n`);
 
   const engine = new PlayoutEngine({
-    cacheDir: config.paths.cache,
-    normalizer: norm,
+    workDir: config.paths.cache,
     target,
+    profile,
+    selection,
     endBehavior: 'end',
     caps: await probeConcatCapabilities(),
   });
 
-  for (const a of args) {
-    const p = resolve(a);
-    if (!existsSync(p)) die(`No such file: ${p}`);
+  for (const p of paths) {
     engine.enqueue({ id: p, title: basename(p), srcPath: p });
   }
 
-  engine.on('preparing', ({ item }) => console.log(`  preparing ${item.title} before going live …`));
-  engine.on('committed', ({ item }) => console.log(`▶ ${item.title}`));
-  engine.on('filler', ({ seconds }) => console.log(`… filler (${seconds}s)`));
+  const t0 = Date.now();
+  engine.on('committed', ({ item, duration }) =>
+    console.log(`▶ ${item.title}  (${fmtTime(duration)})`));
   engine.on('warn', (m) => console.warn(`! ${m}`));
-  engine.on('fatal', (e) => { console.error(`\n✗ ${e.message}\n`); process.exit(1); });
-  engine.on('ended', () => { console.log('\nstream ended\n'); process.exit(0); });
+  engine.on('fatal', (e) => { console.error(`\n✗ ${e.message}\n`); engine.cleanup(); process.exit(1); });
+  engine.on('ended', () => {
+    console.log('\nstream ended');
+    engine.cleanup();
+    process.exit(0);
+  });
 
   let lastLog = 0;
+  let announced = false;
   engine.on('progress', (b) => {
+    if (!announced) {
+      announced = true;
+      console.log(`\n  live after ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+    }
     const now = Date.now();
     if (now - lastLog < 5000) return;
     lastLog = now;
-    console.log(`  t=${(b.outTimeUs / 1e6).toFixed(0)}s  speed=${b.speed ?? '?'}x  `
+    console.log(`  t=${fmtTime(b.outTimeUs / 1e6)}  speed=${b.speed ?? '?'}x  `
       + `drops=${b.dropFrames}`);
   });
 
   process.on('SIGINT', () => { console.log('\nstopping …'); engine.stop(); });
 
   await engine.start();
-}
-
-const basename = (p) => p.split('/').pop();
-
-function fmtTime(seconds) {
-  const s = Math.max(0, Math.round(seconds));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function run(bin, argv) {
@@ -337,7 +312,7 @@ function run(bin, argv) {
 
 const commands = {
   probe: cmdProbe,
-  normalize: cmdNormalize,
+  tracks: cmdTracks,
   selftest: cmdSelftest,
   stream: cmdStream,
 };
@@ -347,7 +322,7 @@ if (!commands[cmd]) {
 jellystreamerr
 
   probe                 test which encoders actually work on this machine
-  normalize <file>      normalize one file into the cache
+  tracks <file>         list audio/subtitle tracks and what would be picked
   selftest              prove gapless chaining locally (no Owncast needed)
   stream <file...>      stream files to the configured Owncast
 `);

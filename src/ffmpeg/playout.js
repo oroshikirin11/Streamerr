@@ -1,42 +1,54 @@
 /**
  * The playout engine: one ffmpeg process that outlives every clip.
  *
- * Owncast accepts a single publisher and drops the stream after 10 seconds of
- * socket silence — a hardcoded deadline that a maintainer declined to make
- * configurable. So restarting ffmpeg per episode is not an option: Owncast
- * would see stream-stop / stream-start at every boundary, ending the
- * broadcast and dropping viewers.
+ * Source files are streamed DIRECTLY and encoded live, the way OBS does it —
+ * playback starts in about a second rather than after a full pre-encode.
  *
- * The mechanism that avoids it: ffmpeg's concat demuxer opens a NESTED
- * .ffconcat reference lazily, at the moment playback reaches it. A flat list
- * is parsed once and never re-read, but a chain of one-clip scripts each
- * pointing at the next lets a single process run indefinitely while
- * everything past the playhead stays editable.
+ * An earlier design normalized every clip to disk first, on the belief that
+ * the concat demuxer silently corrupts mixed-format input. Measured, that
+ * turned out to be false when re-encoding: joining 480p25/44.1kHz,
+ * 720p30/48kHz and 1080p24/48kHz sources through concat with normalizing
+ * filters produced 15.088s against 15.00 expected. The filters conform
+ * everything on the way through, so the pre-pass bought nothing but latency.
+ *
+ * Gaplessness comes from ffmpeg's concat demuxer opening a NESTED .ffconcat
+ * reference lazily, at the moment playback reaches it. A flat list is parsed
+ * once and never re-read, but a chain of one-clip scripts each pointing at
+ * the next lets a single process run indefinitely while everything past the
+ * playhead stays editable.
  *
  *     p000000.ffconcat          <- playing now
  *       ffconcat version 1.0
- *       file 3f2a....ts
+ *       file 3f2a....mkv        <- symlink to the real file
  *       file p000001.ffconcat   <- need not exist yet
  *
- * Chain scripts live in the cache directory alongside the .ts files they
- * reference, because nested scripts do NOT inherit -safe 0 and resolve
- * relative paths against their own directory. Bare sibling filenames are the
- * only form guaranteed to work.
+ * This matters because Owncast accepts a single publisher and drops the
+ * stream after 10 seconds of socket silence — a hardcoded deadline. One
+ * ffmpeg per episode would mean a reconnect at every boundary, which Owncast
+ * sees as stream-stop / stream-start.
+ *
+ * Why symlinks: nested scripts do NOT inherit -safe 0 and resolve relative
+ * paths against their own directory, so entries must be bare sibling names.
+ * The media lives elsewhere (and read-only), so each queued clip gets a
+ * symlink in the work directory and the chain references that.
  */
 
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 import { EventEmitter } from 'events';
-import { writeFileSync, renameSync, existsSync } from 'fs';
-import { join } from 'path';
+import {
+  writeFileSync, renameSync, existsSync, symlinkSync, unlinkSync, statSync,
+} from 'fs';
+import { extname, join } from 'path';
 import { ProgressParser, ProgressWatchdog } from './progress.js';
+import { BACKENDS, audioArgs, scaleFilter } from './encoders.js';
+import { buildSubtitleFilter } from './tracks.js';
 
 /**
  * How many links to keep written beyond the one currently playing.
  *
  * Counting links rather than seconds is what makes this correct for both a
- * 3-second bumper and a 45-minute episode: with a seconds-based margin, a
- * long clip leaves the next normalization starting far too late, and a short
- * one leaves no time at all.
+ * 3-second bumper and a 45-minute episode.
  */
 const LOOKAHEAD_LINKS = 2;
 /** An exit this fast means the encoder/config is broken, not flaky. */
@@ -47,37 +59,30 @@ const linkName = (i) => `p${String(i).padStart(6, '0')}.ffconcat`;
 export class PlayoutEngine extends EventEmitter {
   /**
    * @param {object} opts
-   * @param {string} opts.cacheDir      holds both .ts clips and chain scripts
-   * @param {import('./normalizer.js').Normalizer} opts.normalizer
-   * @param {string} opts.target        full rtmp:// URL including stream key
-   * @param {string} [opts.progressPath]
-   * @param {number} [opts.statsPeriodMs]
+   * @param {string} opts.workDir     holds chain scripts and clip symlinks
+   * @param {string} opts.target      full rtmp:// URL, or a local file
+   * @param {object} opts.profile     encoder profile incl. resolved `backend`
+   * @param {object} [opts.selection] track selection from selectTracks()
    */
   constructor({
-    cacheDir, normalizer, target, statsPeriodMs = 500,
-    endBehavior = 'end', initialBurst = 10, caps = null, waitForFirst = true,
+    workDir, target, profile, selection = null,
+    statsPeriodMs = 500, endBehavior = 'end', initialBurst = 10,
+    caps = null,
   }) {
     super();
-    this.cacheDir = cacheDir;
-    this.normalizer = normalizer;
+    this.workDir = workDir;
     this.target = target;
+    this.profile = profile;
+    this.selection = selection;
     this.statsPeriodMs = statsPeriodMs;
-    this.initialBurst = initialBurst;
-    /** Block until the first clip is encoded rather than opening on filler. */
-    this.waitForFirst = waitForFirst;
-    /** Feature-detected concat demuxer options; see probeConcatCapabilities. */
-    this.caps = caps ?? { recursionDepth: true, segmentTimeMetadata: true };
-    /**
-     * What to do when the queue runs dry:
-     *   'end'    — terminate the chain so playback stops cleanly
-     *   'filler' — keep the channel alive with black+silence
-     */
     this.endBehavior = endBehavior;
-    this.terminated = false;
+    this.initialBurst = initialBurst;
+    this.caps = caps ?? { recursionDepth: true, segmentTimeMetadata: true };
 
     this.status = 'stopped'; // stopped | starting | running | stopping
     this.proc = null;
     this.watchdog = null;
+    this.terminated = false;
 
     /** Upcoming items: { id, title, srcPath }. Mutable while live. */
     this.queue = [];
@@ -85,12 +90,10 @@ export class PlayoutEngine extends EventEmitter {
     this.committed = [];
 
     this.linkIndex = 0;
-    this.committedDuration = 0; // seconds of chain written so far
-    this.outTimeSec = 0;        // playhead, from -progress
-    this.currentIndex = -1;     // index into `committed` believed to be playing
+    this.committedDuration = 0;
+    this.outTimeSec = 0;
+    this.currentIndex = -1;
 
-    this._restarts = [];
-    this._fillerKey = null;
     this._advancing = false;
   }
 
@@ -99,8 +102,6 @@ export class PlayoutEngine extends EventEmitter {
   enqueue(item) {
     this.queue.push(item);
     this.emit('queue', this.snapshot());
-    // Warm the cache for whatever we just added, best-effort.
-    this._prefetch();
     return this;
   }
 
@@ -108,7 +109,6 @@ export class PlayoutEngine extends EventEmitter {
   setQueue(items) {
     this.queue = [...items];
     this.emit('queue', this.snapshot());
-    this._prefetch();
   }
 
   snapshot() {
@@ -121,15 +121,6 @@ export class PlayoutEngine extends EventEmitter {
     };
   }
 
-  async _prefetch() {
-    const lookahead = this.normalizer.profile.lookahead ?? 2;
-    for (const item of this.queue.slice(0, lookahead)) {
-      this.normalizer.ensure(item.srcPath, item.trackOverride ?? null).catch((err) => {
-        this.emit('warn', `prefetch failed for ${item.srcPath}: ${err.message}`);
-      });
-    }
-  }
-
   // ── lifecycle ────────────────────────────────────────────────────────
 
   async start() {
@@ -139,22 +130,10 @@ export class PlayoutEngine extends EventEmitter {
     this.status = 'starting';
     this.emit('status', this.status);
 
-    // Wait for the first clip before going live. The filler path exists to
-    // cover a clip that isn't ready mid-stream — using it at startup would
-    // put the channel on air showing black while the opening episode is
-    // still encoding, which reads as a broken stream.
-    if (this.waitForFirst && this.queue.length) {
-      const first = this.queue[0];
-      this.emit('preparing', { item: first });
-      await this.normalizer.ensure(first.srcPath, first.trackOverride ?? null);
-    }
-
-    // Fill the chain before ffmpeg opens it. The head link must exist, and
-    // having the lookahead already written means a slow first normalization
-    // can't strand us the moment playback starts.
+    // Nothing to pre-encode — just link the first clips and go.
     await this._topUp();
 
-    this._spawn(join(this.cacheDir, linkName(0)));
+    this._spawn(join(this.workDir, linkName(0)));
   }
 
   stop() {
@@ -178,6 +157,8 @@ export class PlayoutEngine extends EventEmitter {
     const args = buildPlayoutArgs({
       head: headPath,
       target: this.target,
+      profile: this.profile,
+      selection: this.selection,
       statsPeriodMs: this.statsPeriodMs,
       initialBurst: this.initialBurst,
       caps: this.caps,
@@ -235,8 +216,6 @@ export class PlayoutEngine extends EventEmitter {
         this.emit('ended', { code });
         return;
       }
-      // An exit this fast is a configuration or encoder problem; restarting
-      // identical args would just loop. Surface it instead.
       if (ranMs < HARD_FAIL_MS) {
         this.emit('fatal', new Error(
           `ffmpeg exited after ${ranMs}ms (code ${code}) — likely a config or `
@@ -251,23 +230,6 @@ export class PlayoutEngine extends EventEmitter {
     this.emit('status', this.status);
   }
 
-  /**
-   * Strip the stream key from anything that might be logged.
-   *
-   * ffmpeg prints the full output URL in its own diagnostics, so an otherwise
-   * ordinary error message leaks the key into logs, terminals and bug reports.
-   * Everything emitted from this class goes through here.
-   */
-  _redact(text) {
-    if (!text) return text;
-    // Only meaningful for a network target; a local file path has no secret
-    // and blanking part of it would just corrupt the message.
-    if (!/^rtmps?:\/\//i.test(String(this.target))) return text;
-    const key = String(this.target).split('/').pop();
-    if (!key || key.length < 4) return text;
-    return text.split(key).join('*'.repeat(8));
-  }
-
   _teardown() {
     this.proc = null;
     this.watchdog?.stop();
@@ -278,19 +240,25 @@ export class PlayoutEngine extends EventEmitter {
     }
   }
 
+  /**
+   * Strip the stream key from anything that might be logged. ffmpeg prints
+   * the full output URL in its own diagnostics, so an ordinary error would
+   * otherwise leak the key into terminals, logs and bug reports.
+   */
+  _redact(text) {
+    if (!text) return text;
+    if (!/^rtmps?:\/\//i.test(String(this.target))) return text;
+    const key = String(this.target).split('/').pop();
+    if (!key || key.length < 4) return text;
+    return text.split(key).join('*'.repeat(8));
+  }
+
   // ── chain writing ────────────────────────────────────────────────────
 
-  /** How far the playhead is from the end of everything written so far. */
   get remainingSeconds() {
     return this.committedDuration - this.outTimeSec;
   }
 
-  /**
-   * Which committed link the playhead is inside, derived from cumulative
-   * durations. `-segment_time_metadata` exposes this per packet too, but
-   * summing what we wrote is simpler and does not depend on parsing metadata
-   * out of the packet stream.
-   */
   _playingIndex() {
     let acc = 0;
     for (let i = 0; i < this.committed.length; i++) {
@@ -321,114 +289,80 @@ export class PlayoutEngine extends EventEmitter {
       const ahead = this.committed.length - Math.max(0, this.currentIndex);
       if (this.committed.length && ahead > LOOKAHEAD_LINKS) break;
 
-      // With 'end', a queue that is merely *waiting* on normalization must
-      // not be mistaken for a finished one.
       if (!this.queue.length) {
         if (this.endBehavior === 'end') {
           this.terminated = true;
           break;
         }
-        await this._commitFiller();
-        continue;
+        // 'filler' would go here; with live encoding there is nothing to
+        // wait for, so an empty queue simply means the run is over.
+        this.terminated = true;
+        break;
       }
 
       try {
         await this._commitNext();
       } catch (err) {
-        // A single bad file must not take the channel down; skip it and
-        // keep the chain moving.
+        // A single bad file must not take the channel down.
         this.emit('warn', `skipping unplayable item: ${err.message}`);
-        if (!this.queue.length && this.endBehavior !== 'end') {
-          await this._commitFiller();
-        }
       }
     }
   }
 
   /**
-   * Append the head of the queue as the next chain link — but only if it is
-   * ALREADY normalized.
-   *
-   * This is the rule that keeps the channel alive. Awaiting an encode here
-   * would mean racing the playhead: if normalization takes longer than the
-   * remaining committed runtime, ffmpeg reaches a nested script that does not
-   * exist yet and exits. Committing filler instead costs a few seconds of
-   * black and keeps the RTMP socket fed, which is always the better trade.
+   * Link the head of the queue into the work directory and append it as the
+   * next chain link. No encoding happens here — that is the streaming
+   * process's job, which is why playback can start immediately.
    */
   async _commitNext() {
-    const item = this.queue[0];
+    const item = this.queue.shift();
     if (!item) return;
 
-    let key;
-    try {
-      key = await this.normalizer.keyFor(item.srcPath, item.trackOverride ?? null);
-    } catch (err) {
-      this.queue.shift(); // unreadable source — drop it
-      throw new Error(`${item.srcPath}: ${err.message}`);
+    if (!existsSync(item.srcPath)) {
+      throw new Error(`file not found: ${item.srcPath}`);
     }
 
-    if (!this.normalizer.has(key)) {
-      // Not ready. Keep it queued, make sure it's encoding, and buy time.
-      this.normalizer.ensure(item.srcPath, item.trackOverride ?? null).catch((err) => {
-        this.emit('warn', `normalize failed for ${item.title ?? item.srcPath}: ${err.message}`);
-        // Drop it so the queue can't wedge on one bad file.
-        const i = this.queue.indexOf(item);
-        if (i !== -1) this.queue.splice(i, 1);
-      });
-      this.emit('waiting', { item });
-      await this._commitFiller();
-      return;
-    }
+    const name = this._link(item.srcPath);
+    const duration = await probeDuration(item.srcPath);
 
-    this.queue.shift();
-    const path = this.normalizer.pathFor(key);
-    const duration = await probeDuration(path);
-
-    this.normalizer.pin(key);
-    // If this was the last item and we're not keeping the channel alive with
-    // filler, write it as a terminal link — no successor reference. A link
-    // pointing at a script that never gets written is a hard error; a link
-    // with no pointer at all ends playback cleanly with exit 0.
     const isLast = !this.queue.length && this.endBehavior === 'end';
-    this._writeLink(key, { terminal: isLast });
+    this._writeLink(name, { terminal: isLast });
 
-    this.committed.push({ ...item, key, duration });
+    this.committed.push({ ...item, linkName: name, duration });
     this.committedDuration += duration;
     if (this.currentIndex < 0) this.currentIndex = 0;
 
-    this.emit('committed', { item, key, duration });
+    this.emit('committed', { item, duration });
     this.emit('queue', this.snapshot());
-    this._prefetch();
   }
 
   /**
-   * Black + silence, generated once and reused. Buys time when the next clip
-   * isn't normalized yet — far better than letting the socket go quiet.
-   */
-  async _commitFiller() {
-    this._fillerKey ??= await makeFiller(this.cacheDir, this.normalizer.profile);
-    const duration = await probeDuration(join(this.cacheDir, `${this._fillerKey}.ts`));
-
-    this.normalizer.pin(this._fillerKey);
-    this._writeLink(this._fillerKey);
-
-    this.committed.push({ id: null, title: 'filler', key: this._fillerKey, duration });
-    this.committedDuration += duration;
-    this.emit('filler', { seconds: duration });
-  }
-
-  /**
-   * Write chain link N: one clip, then a reference to link N+1.
+   * Create a stable-named symlink to a source file inside the work directory.
    *
-   * Written to a temp name and renamed, because ffmpeg may open this file at
-   * any moment and a partially-written script is a parse error that kills the
-   * process. Rename is atomic within a directory.
+   * Nested .ffconcat scripts resolve paths against their own directory and do
+   * not inherit -safe 0, so entries have to be bare sibling filenames. The
+   * media itself lives on a read-only mount elsewhere.
    */
-  _writeLink(clipKey, { terminal = false } = {}) {
+  _link(srcPath) {
+    const hash = createHash('sha1').update(srcPath).digest('hex').slice(0, 16);
+    const name = `${hash}${extname(srcPath) || '.mkv'}`;
+    const dest = join(this.workDir, name);
+
+    try {
+      const st = statSync(dest, { throwIfNoEntry: false });
+      if (st) return name; // already linked
+      symlinkSync(srcPath, dest);
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    return name;
+  }
+
+  _writeLink(clipName, { terminal = false } = {}) {
     const i = this.linkIndex++;
     const body = [
       'ffconcat version 1.0',
-      `file ${clipKey}.ts`,
+      `file ${clipName}`,
       ...(terminal ? [] : [`file ${linkName(i + 1)}`]),
       '',
     ].join('\n');
@@ -443,56 +377,85 @@ export class PlayoutEngine extends EventEmitter {
    * a directory, so the file only ever appears complete.
    */
   _atomicWrite(name, body) {
-    const finalPath = join(this.cacheDir, name);
+    const finalPath = join(this.workDir, name);
     const tmpPath = `${finalPath}.tmp`;
     writeFileSync(tmpPath, body);
     renameSync(tmpPath, finalPath);
   }
+
+  /** Remove symlinks and chain scripts left behind by a finished run. */
+  cleanup() {
+    for (const c of this.committed) {
+      try { unlinkSync(join(this.workDir, c.linkName)); } catch { /* gone */ }
+    }
+    for (let i = 0; i < this.linkIndex; i++) {
+      try { unlinkSync(join(this.workDir, linkName(i))); } catch { /* gone */ }
+    }
+  }
 }
 
 /**
- * Playout is `-c copy` — every clip was already encoded to the house profile
- * during normalization, so there is nothing to encode while live.
+ * Live encode: decode → software scale/pad/subtitles → hardware encode → RTMP.
+ *
+ * Everything before hwupload must be software. Software filters cannot
+ * operate on hardware frames, and there is no hardware equivalent of subtitle
+ * rendering.
  */
 export function buildPlayoutArgs({
-  head, target, statsPeriodMs = 500, initialBurst = 10,
+  head, target, profile, selection = null,
+  statsPeriodMs = 500, initialBurst = 10,
   caps = { recursionDepth: true, segmentTimeMetadata: true },
 }) {
+  const be = BACKENDS[profile.backend];
+  if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
+
+  // The subtitles filter accepts the concat script itself as its source and
+  // follows the chain, so each clip renders its OWN embedded subtitles —
+  // verified with two files carrying different tracks.
+  const sub = buildSubtitleFilter(selection?.subtitle ?? null, head);
+  const audioIdx = selection?.audio?.typeIndex ?? 0;
+
+  const base = scaleFilter(profile);
+  const upload = be.uploadFilter(profile);
+
+  const filterArgs = sub.needsComplex
+    ? [
+      '-filter_complex',
+      `[0:v:0]${base}[base];[base][${sub.overlayInput}]overlay[ov];[ov]${upload}[vout]`,
+      '-map', '[vout]',
+    ]
+    : [
+      '-vf', [base, sub.filter, upload].filter(Boolean).join(','),
+      '-map', '0:v:0',
+    ];
+
   return [
     '-hide_banner', '-nostdin',
-    // Pace by timestamps. The initial burst fills Owncast's buffer quickly so
-    // the first HLS segment appears without a long wait — but note it makes
-    // out_time race ahead of wallclock at startup, consuming that many
-    // seconds of chain immediately. It must stay well under one clip.
+    ...be.deviceArgs(profile),
+    // Pace by timestamps. The initial burst fills Owncast's buffer so the
+    // first HLS segment appears quickly — but it makes out_time race ahead of
+    // wallclock at startup, consuming that much chain immediately, so it must
+    // stay well under one clip.
     '-re', '-readrate_initial_burst', String(initialBurst),
     '-f', 'concat', '-safe', '0',
-    // Default is 10. Without this the channel dies on the 11th clip with
-    // "Too deep recursion". Depth costs no memory; a 400-link chain peaked
-    // under 2 MB RSS.
-    //
-    // Not present on every ffmpeg build, and an unrecognised option is fatal
-    // rather than ignored — so it is feature-detected, never assumed.
+    // Default is 10, and depth accumulates down a chain — without this the
+    // channel dies on the 11th clip with "Too deep recursion". Not present on
+    // every build, and an unrecognised option is fatal, so it is
+    // feature-detected rather than assumed.
     ...(caps.recursionDepth ? ['-recursion_depth', '2147483647'] : []),
-    // Attaches lavf.concat.start_time to each packet — the only way to know
-    // playlist position from inside a single long-running process.
     ...(caps.segmentTimeMetadata ? ['-segment_time_metadata', '1'] : []),
     '-i', head,
-    // The fifo muxer does NOT perform automatic stream selection — without
-    // explicit maps it reports "Output file does not contain any stream" and
-    // exits, even though the input plainly has both.
-    '-map', '0:v:0', '-map', '0:a:0',
-    '-c', 'copy',
-    // FLV codec ids: 7 = AVC, 10 = AAC. Copying from MPEG-TS carries the TS
-    // stream types (27 and 15) across, and the fifo muxer does not sanitise
-    // them for the muxer it wraps — the inner flv muxer then rejects every
-    // packet with "Tag [27][0][0][0] incompatible with output codec id".
-    // Writing flv directly works without this; only the fifo path needs it.
-    '-tag:v', '7', '-tag:a', '10',
+    ...filterArgs,
+    // The `?` makes the audio map optional, so a clip without an audio track
+    // at that index doesn't abort the whole channel.
+    '-map', `0:a:${audioIdx}?`,
+    ...be.encoderArgs(profile),
+    ...audioArgs(profile),
     '-muxdelay', '0', '-muxpreload', '0',
-    // Without this the muxer will stall video up to 10s waiting on lagging
-    // audio, which reads as a freeze.
+    // Without this the muxer stalls video up to 10s waiting on lagging audio,
+    // which reads as a freeze.
     '-max_interleave_delta', '0',
-    // Reconnects a dropped RTMP push without killing the process. The only
+    // Reconnects a dropped RTMP push without killing the process — the only
     // in-ffmpeg mechanism that survives a blip, and Owncast's 10s deadline
     // leaves no room to restart the whole pipeline.
     '-f', 'fifo', '-fifo_format', 'flv',
@@ -528,43 +491,6 @@ export function probeDuration(path) {
         return reject(new Error(`ffprobe failed for ${path}: ${err.trim() || `exit ${code}`}`));
       }
       resolve(n);
-    });
-  });
-}
-
-/** Generate a black+silence clip matching the house profile exactly. */
-export function makeFiller(cacheDir, profile, seconds = 30) {
-  const key = `filler-${profile.width}x${profile.height}-${profile.fps}-${seconds}s`;
-  const out = join(cacheDir, `${key}.ts`);
-  if (existsSync(out)) return Promise.resolve(key);
-
-  const tmp = `${out}.partial`;
-  return new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-      '-f', 'lavfi', '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps}`,
-      '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-      '-t', String(seconds),
-      // Software x264 deliberately: filler must exist even when the hardware
-      // encoder is the thing that's broken.
-      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
-      '-b:v', profile.videoBitrate, '-maxrate', profile.videoBitrate,
-      '-g', String(profile.gopSeconds * profile.fps),
-      '-keyint_min', String(profile.gopSeconds * profile.fps),
-      '-sc_threshold', '0', '-bf', '0',
-      '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
-      '-fps_mode', 'cfr', '-video_track_timescale', '90000',
-      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
-      '-f', 'mpegts', tmp,
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-
-    let err = '';
-    child.stderr.on('data', (d) => { err += d.toString(); });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`filler generation failed: ${lastLines(err, 4)}`));
-      renameSync(tmp, out);
-      resolve(key);
     });
   });
 }
