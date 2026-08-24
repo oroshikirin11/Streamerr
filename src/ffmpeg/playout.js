@@ -547,6 +547,42 @@ export function testRtmpConnection(target, {
   });
 }
 
+/**
+ * Stream a static card, so a pause doesn't take the broadcast off air.
+ *
+ * Owncast drops the stream after 10 seconds of socket silence, so "pause"
+ * cannot mean "stop sending" — viewers would be disconnected and the
+ * broadcast ended. Something has to keep feeding the socket, and a held card
+ * is the least surprising thing to show.
+ */
+export function startHoldPattern(target, profile, { label = 'Paused' } = {}) {
+  const gop = String((profile.gopSeconds ?? 2) * (profile.fps ?? 30));
+  const text = String(label).replace(/[\\':]/g, '');
+
+  // Software x264 deliberately: the hold must work even when the hardware
+  // encoder is the thing that failed.
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-re',
+    '-f', 'lavfi', '-i',
+    `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps}`,
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    '-vf', `drawtext=fontfile=${HOLD_FONT}:text='${text}':fontcolor=white:`
+      + 'fontsize=h/18:x=(w-text_w)/2:y=(h-text_h)/2',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+    '-b:v', profile.videoBitrate, '-maxrate', profile.videoBitrate,
+    '-bufsize', profile.videoBitrate,
+    '-g', gop, '-keyint_min', gop, '-sc_threshold', '0', '-bf', '0',
+    '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
+    '-tag:v', '7', '-tag:a', '10',
+    '-f', 'flv', '-flvflags', 'no_duration_filesize+no_sequence_end',
+    target,
+  ];
+  return spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+}
+
+/** DejaVu is installed in the image; drawtext needs an explicit path. */
+const HOLD_FONT = '/usr/share/fonts/TTF/DejaVuSans.ttf';
+
 /** Duration in seconds, via ffprobe. */
 export function probeDuration(path) {
   return new Promise((resolve, reject) => {

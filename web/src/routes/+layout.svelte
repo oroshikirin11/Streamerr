@@ -17,8 +17,13 @@
   let position = $state(0);
   let speed = $state(null);
   let toast = $state(null);
+  let tracks = $state(null);
+  let busyCtl = $state(false);
 
-  const live = $derived(stream.status === 'running' || stream.status === 'starting');
+  const live = $derived(
+    stream.status === 'running' || stream.status === 'starting'
+    || stream.status === 'paused');
+  const paused = $derived(stream.status === 'paused');
 
   onMount(async () => {
     await refreshAuth();
@@ -71,8 +76,33 @@
     }
   }
 
-  async function stopStream() {
-    try { await api.stop(); } catch (err) { toast = { kind: 'error', message: err.message }; }
+  async function ctl(fn) {
+    busyCtl = true;
+    try { await fn(); stream = await api.streamStatus(); }
+    catch (err) { toast = { kind: 'error', message: err.message }; }
+    finally { busyCtl = false; }
+  }
+
+  const stopStream = () => ctl(() => api.stop());
+  const togglePause = () => ctl(() => (paused ? api.resume() : api.pause()));
+  const skip = (delta) => ctl(() => api.seek({ delta }));
+
+  async function openTracks() {
+    if (tracks) { tracks = null; return; }
+    try { tracks = await api.liveTracks(); }
+    catch (err) { toast = { kind: 'error', message: err.message }; }
+  }
+
+  async function applyTrack(audioIndex, subtitleKey, subtitleMode) {
+    busyCtl = true;
+    try {
+      const r = await api.setTracks({ audioIndex, subtitleKey, subtitleMode });
+      toast = { kind: 'info', message: r.tracks };
+      setTimeout(() => { toast = null; }, 6000);
+      tracks = await api.liveTracks();
+      stream = await api.streamStatus();
+    } catch (err) { toast = { kind: 'error', message: err.message }; }
+    finally { busyCtl = false; }
   }
 
   const nav = [
@@ -142,20 +172,71 @@
     {#if stream.playing}
       <footer>
         <div class="np">
-          <p class="title">{stream.playing.title}</p>
+          <p class="title">{stream.playing.title}{paused ? ' — paused' : ''}</p>
           <p class="muted small">
             {fmtTime(position)}
             {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
             {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
           </p>
         </div>
+
         <div class="bar">
           <div class="fill" style:width="{stream.playing.duration
             ? Math.min(100, (position / stream.playing.duration) * 100)
             : 0}%"></div>
         </div>
-        <button class="danger" onclick={stopStream}>Stop</button>
+
+        <div class="ctl">
+          <button onclick={() => skip(-30)} disabled={busyCtl} title="Back 30 seconds">-30s</button>
+          <button onclick={togglePause} disabled={busyCtl} title={paused ? 'Resume' : 'Pause'}>
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+          <button onclick={() => skip(30)} disabled={busyCtl} title="Forward 30 seconds">+30s</button>
+          <button onclick={openTracks} disabled={busyCtl}>Audio &amp; subs</button>
+          <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
+        </div>
       </footer>
+
+      {#if tracks}
+        <div class="panel">
+          <div class="phead">
+            <strong>{tracks.title}</strong>
+            <span class="muted small">{tracks.chosen.reason}</span>
+            <div style="flex:1"></div>
+            <button onclick={() => (tracks = null)}>Close</button>
+          </div>
+          <p class="muted small">
+            Switching restarts the encoder and resumes at the same point, so
+            viewers see a few seconds of interruption.
+          </p>
+
+          <div class="cols">
+            <div>
+              <p class="muted small">Audio</p>
+              {#each tracks.audio as a}
+                <button class="tr" class:pick={a.typeIndex === tracks.chosen.audioIndex}
+                        disabled={busyCtl}
+                        onclick={() => applyTrack(a.typeIndex, tracks.chosen.subtitleKey, undefined)}>
+                  {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch{a.title ? ` — ${a.title}` : ''}
+                </button>
+              {/each}
+            </div>
+            <div>
+              <p class="muted small">Subtitles</p>
+              <button class="tr" class:pick={tracks.chosen.subtitleKey === null}
+                      disabled={busyCtl}
+                      onclick={() => applyTrack(tracks.chosen.audioIndex, null, 'off')}>None</button>
+              {#each tracks.subtitles as sub}
+                <button class="tr" class:pick={String(sub.key) === String(tracks.chosen.subtitleKey)}
+                        disabled={busyCtl}
+                        onclick={() => applyTrack(tracks.chosen.audioIndex, sub.key, 'always')}>
+                  {sub.language ?? '?'} · {sub.codec}{sub.forced ? ' · forced' : ''}{sub.external ? ' · sidecar' : ''}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -269,6 +350,19 @@
   .bar { flex: 1.2; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width .4s linear; }
 
+  .ctl { display: flex; gap: 6px; flex-shrink: 0; }
+  .ctl button { padding: 6px 10px; font-size: 13px; }
+  .panel {
+    grid-column: 2; border-top: 1px solid var(--border);
+    background: var(--surface); padding: 12px 20px 16px;
+  }
+  .phead { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 8px; }
+  .tr {
+    display: block; width: 100%; text-align: left; margin: 3px 0;
+    background: transparent; border-color: var(--border); font-size: 13px;
+  }
+  .tr.pick { border-color: var(--accent); color: var(--accent); }
   .toast {
     position: fixed; bottom: 18px; right: 18px; max-width: 420px;
     background: var(--surface); border: 1px solid var(--border);

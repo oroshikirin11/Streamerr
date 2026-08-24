@@ -11,6 +11,9 @@ RUN pacman -Syu --noconfirm \
       nodejs \
       npm \
       libva-utils \
+      # drawtext needs a real font file on disk; used for the pause card and
+      # any burned-in text.
+      ttf-dejavu \
       # Every VAAPI driver, not just Intel's. Which one is correct depends on
       # the host GPU, and an image that ships only iHD fails on AMD with
       # "unsupported drm device by media driver: amdg".

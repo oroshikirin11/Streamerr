@@ -22,7 +22,9 @@ import {
 } from './auth.js';
 import { probeAll, selectBackend, probeConcatCapabilities } from './ffmpeg/probe.js';
 import { normalizeBitrate } from './ffmpeg/encoders.js';
-import { PlayoutEngine, testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
+import {
+  PlayoutEngine, testRtmpConnection, probeDuration, startHoldPattern,
+} from './ffmpeg/playout.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { makeLibrary } from './library/index.js';
 import { suggestRules } from './library/pathmap.js';
@@ -38,6 +40,11 @@ app.use(express.json({ limit: '1mb' }));
 
 /** The single active broadcast. One publisher is all Owncast accepts. */
 let engine = null;
+/**
+ * While paused, a held card keeps the socket fed. Owncast ends the broadcast
+ * after 10s of silence, so pausing cannot mean simply stopping.
+ */
+let hold = null;   // { proc, items, offset, profile, caps, selection }
 let library = makeLibrary(config);
 
 /** Rebuild the library client whenever its settings change. */
@@ -54,6 +61,16 @@ function broadcast(type, payload) {
 }
 
 function streamStatus() {
+  if (hold) {
+    return {
+      status: 'paused',
+      playing: hold.items[0]
+        ? { title: hold.items[0].title, duration: hold.duration ?? null }
+        : null,
+      queue: hold.items.slice(1).map((q) => ({ id: q.id, title: q.title })),
+      position: hold.offset,
+    };
+  }
   if (!engine) return { status: 'stopped', playing: null, queue: [] };
   const s = engine.snapshot();
   return {
@@ -421,6 +438,115 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   res.json({ ok: true, tracks: selection.reason, ...streamStatus() });
 }));
 
+
+/**
+ * Swap the live engine for a replacement carrying on from `offset`.
+ *
+ * Track selection, and the input seek that resumes it, are both fixed for the
+ * life of an ffmpeg process, so every one of these operations is the same
+ * move: capture where we are, stop, start again differently.
+ */
+async function restartAt({ items, offset, selection, profile, caps }) {
+  const old = engine;
+  engine = null;   // so the old engine's 'ended' does not clear the new one
+  if (old) {
+    await new Promise((resolve) => {
+      old.once('ended', resolve);
+      old.stop();
+      setTimeout(resolve, 8000).unref?.();
+    });
+    old.cleanup();
+  }
+
+  engine = buildEngine({ profile, selection, caps, startOffset: offset });
+  for (const it of items) engine.enqueue(it);
+  await engine.start();
+  broadcast('stream', streamStatus());
+  return engine;
+}
+
+app.post('/api/stream/pause', wrap(async (req, res) => {
+  if (hold) return res.json({ ok: true, alreadyPaused: true });
+  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+
+  const { items, offset } = engine.resumeState();
+  const state = {
+    items,
+    offset,
+    profile: engine.profile,
+    caps: engine.caps,
+    selection: engine.selection,
+    duration: engine.snapshot().playing?.duration ?? null,
+  };
+
+  const old = engine;
+  engine = null;
+  await new Promise((resolve) => {
+    old.once('ended', resolve);
+    old.stop();
+    setTimeout(resolve, 8000).unref?.();
+  });
+  old.cleanup();
+
+  // Take over the socket immediately so Owncast never sees a gap.
+  hold = { ...state, proc: startHoldPattern(rtmpTarget(), state.profile) };
+  hold.proc.on('close', () => { /* resume clears this deliberately */ });
+
+  broadcast('stream', streamStatus());
+  res.json({ ok: true, pausedAt: offset });
+}));
+
+app.post('/api/stream/resume', wrap(async (req, res) => {
+  if (!hold) return res.status(409).json({ error: 'Not paused' });
+
+  const state = hold;
+  hold = null;
+  state.proc.kill('SIGTERM');
+  // Give the hold time to close its RTMP session, or Owncast refuses the new
+  // publisher — it accepts exactly one at a time.
+  await new Promise((r) => setTimeout(r, 1200));
+
+  await restartAt(state);
+  res.json({ ok: true, resumedAt: state.offset });
+}));
+
+/**
+ * Skip within the current clip. `delta` is relative seconds; `position` is
+ * absolute. Seeking restarts the encoder, so viewers see a brief break.
+ */
+app.post('/api/stream/seek', wrap(async (req, res) => {
+  const target = engine ?? null;
+  if (!target && !hold) return res.status(409).json({ error: 'Not streaming' });
+
+  const base = hold ? { items: hold.items, offset: hold.offset } : engine.resumeState();
+  const duration = hold
+    ? hold.duration
+    : engine.snapshot().playing?.duration ?? null;
+
+  let next = req.body?.position != null
+    ? Number(req.body.position)
+    : base.offset + Number(req.body?.delta ?? 0);
+
+  next = Math.max(0, next);
+  // Seeking past the end would start the next clip at a nonsense offset.
+  if (duration) next = Math.min(next, Math.max(0, duration - 5));
+
+  if (hold) {
+    hold.offset = next;
+    broadcast('stream', streamStatus());
+    return res.json({ ok: true, position: next, paused: true });
+  }
+
+  await restartAt({
+    items: base.items,
+    offset: next,
+    selection: engine.selection,
+    profile: engine.profile,
+    caps: engine.caps,
+  });
+  res.json({ ok: true, position: next });
+}));
+
 /** Tracks available on the clip currently on air, and which are in use. */
 app.get('/api/stream/tracks', wrap(async (req, res) => {
   if (!engine) return res.status(409).json({ error: 'Not streaming' });
@@ -496,6 +622,12 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
 }));
 
 app.post('/api/stream/stop', (req, res) => {
+  if (hold) {
+    hold.proc.kill('SIGTERM');
+    hold = null;
+    broadcast('stream', streamStatus());
+    return res.json({ ok: true });
+  }
   if (!engine) return res.status(409).json({ error: 'Not streaming' });
   engine.stop();
   res.json({ ok: true });

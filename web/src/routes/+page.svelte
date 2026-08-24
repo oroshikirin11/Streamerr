@@ -18,6 +18,8 @@
   let selected = $state(new Set());
   let starting = $state(false);
   let tracksFor = $state(null);
+  // Per-broadcast track choice, picked before starting.
+  let trackOverride = $state(null);
 
   onMount(load);
 
@@ -96,14 +98,36 @@
     }
   }
 
+  const chosenAudio = (t) =>
+    trackOverride?.audioIndex ?? t.data.chosen.audioIndex;
+  const chosenSub = (t) =>
+    trackOverride && 'subtitleId' in trackOverride
+      ? trackOverride.subtitleId
+      : t.data.chosen.subtitleKey;
+
+  function pickAudio(i) {
+    trackOverride = { ...(trackOverride ?? {}), audioIndex: i };
+  }
+  function pickSub(key) {
+    trackOverride = {
+      ...(trackOverride ?? {}),
+      subtitleId: key,
+      subtitleMode: key === null ? 'off' : 'always',
+    };
+  }
+
   async function stream() {
     if (!selected.size) return;
     starting = true;
     error = '';
     try {
       const ordered = episodes.filter((e) => selected.has(e.id)).map((e) => e.id);
-      await api.start(ordered);
+      await api.start(ordered, trackOverride);
       selected = new Set();
+      trackOverride = null;
+      // Back to the grid: once it is playing, the transport bar is where you
+      // control it, and the season list has served its purpose.
+      series = null;
     } catch (err) {
       error = err.detail ? `${err.message}: ${err.detail}` : err.message;
     } finally {
@@ -207,24 +231,33 @@
         <p class="muted small">Audio</p>
         <ul class="tracks">
           {#each tracksFor.data.audio as a}
-            <li class:pick={a.typeIndex === tracksFor.data.chosen.audioIndex}>
-              {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch
-              {#if a.title}<span class="muted"> — {a.title}</span>{/if}
+            <li>
+              <button class="tr" class:pick={a.typeIndex === chosenAudio(tracksFor)}
+                      onclick={() => pickAudio(a.typeIndex)}>
+                {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch{a.title ? ` — ${a.title}` : ''}
+              </button>
             </li>
           {/each}
         </ul>
         <p class="muted small">Subtitles</p>
         <ul class="tracks">
+          <li>
+            <button class="tr" class:pick={chosenSub(tracksFor) === null}
+                    onclick={() => pickSub(null)}>None</button>
+          </li>
           {#each tracksFor.data.subtitles as s}
-            <li class:pick={String(s.key) === String(tracksFor.data.chosen.subtitleKey)}>
-              {s.language ?? '?'} · {s.codec}
-              {#if s.forced} · forced{/if}{#if s.external} · sidecar{/if}
+            <li>
+              <button class="tr" class:pick={String(s.key) === String(chosenSub(tracksFor))}
+                      onclick={() => pickSub(s.key)}>
+                {s.language ?? '?'} · {s.codec}{s.forced ? ' · forced' : ''}{s.external ? ' · sidecar' : ''}
+              </button>
             </li>
-          {:else}
-            <li class="muted">none</li>
           {/each}
         </ul>
         <p class="small">→ {tracksFor.data.chosen.reason}</p>
+        <p class="muted small">
+          Click a track to use it for this broadcast instead.
+        </p>
       {/if}
       <button onclick={() => (tracksFor = null)}>Close</button>
     </div>
@@ -270,6 +303,10 @@
   }
   .modal { width: min(460px, 100%); max-height: 80vh; overflow: auto; }
   .tracks { list-style: none; padding: 0; margin: 4px 0 14px; font-size: 13px; }
-  .tracks li { padding: 4px 8px; border-radius: 6px; }
-  .tracks li.pick { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  .tracks li { padding: 0; }
+  .tr {
+    display: block; width: 100%; text-align: left; margin: 3px 0;
+    background: transparent; border-color: var(--border); font-size: 13px;
+  }
+  .tr.pick { border-color: var(--accent); color: var(--accent); }
 </style>

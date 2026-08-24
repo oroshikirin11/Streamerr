@@ -71,6 +71,9 @@ export const api = {
   stop: () => request('POST', '/api/stream/stop'),
   setQueue: (itemIds) => request('POST', '/api/stream/queue', { itemIds }),
   liveTracks: () => request('GET', '/api/stream/tracks'),
+  pause: () => request('POST', '/api/stream/pause'),
+  resume: () => request('POST', '/api/stream/resume'),
+  seek: (body) => request('POST', '/api/stream/seek', body),
   setTracks: (body) => request('POST', '/api/stream/tracks', body),
 };
 
