@@ -182,6 +182,9 @@
 
     {#if stream.playing}
       <footer>
+        {#if stream.playing.image}
+          <img class="cover" src={stream.playing.image} alt="" />
+        {/if}
         <div class="np">
           <p class="title">{stream.playing.title}{paused ? ' — paused' : ''}</p>
           <p class="muted small">
@@ -375,10 +378,14 @@
     background: var(--surface); padding: 10px 20px;
     display: flex; align-items: center; gap: 16px;
   }
-  .np { min-width: 0; flex: 1; }
+  .cover {
+    width: 38px; height: 54px; object-fit: cover; border-radius: 4px;
+    border: 1px solid var(--border); flex-shrink: 0;
+  }
+  .np { min-width: 0; flex: 0 1 300px; }
   .np .title { margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .np p { margin: 2px 0 0; }
-  .bar { flex: 1.2; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+  .bar { flex: 3; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
   .fill { height: 100%; background: var(--accent); transition: width .4s linear; }
 
   .ctl { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }

@@ -65,7 +65,7 @@ function streamStatus() {
   return {
     status: s.status,
     playing: s.playing
-      ? { title: s.playing.title, duration: s.playing.duration }
+      ? { title: s.playing.title, duration: s.playing.duration, image: s.playing.image ?? null }
       : null,
     queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
     position: s.position,
@@ -408,6 +408,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
         : item.title,
       srcPath: library.resolvePath(item),
       duration: item.duration ?? null,
+      image: item.image ?? null,
     });
   }
 

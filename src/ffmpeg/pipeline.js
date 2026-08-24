@@ -665,8 +665,13 @@ export function buildSourceArgs({
 
   const filterArgs = sub.needsComplex
     ? [
+      // Bitmap subtitles (DVD/PGS subpictures) carry pixel positions in the
+      // SOURCE frame's coordinate space. Compositing after scale+pad placed
+      // them at source coordinates on the padded 1080p frame — upper-left,
+      // wrong size. Overlay at native size first; scaling then carries the
+      // subtitles along with the picture.
       '-filter_complex',
-      `[0:v:0]${base}[b];[b][${sub.overlayInput}]overlay[o];[o]${upload}[v]`,
+      `[0:v:0][${sub.overlayInput}]overlay[s];[s]${base}[o];[o]${upload}[v]`,
       '-map', '[v]',
     ]
     : [
@@ -737,8 +742,13 @@ export function buildChunkArgs({
 
   const filterArgs = sub.needsComplex
     ? [
+      // Bitmap subtitles (DVD/PGS subpictures) carry pixel positions in the
+      // SOURCE frame's coordinate space. Compositing after scale+pad placed
+      // them at source coordinates on the padded 1080p frame — upper-left,
+      // wrong size. Overlay at native size first; scaling then carries the
+      // subtitles along with the picture.
       '-filter_complex',
-      `[0:v:0]${base}[b];[b][${sub.overlayInput}]overlay[o];[o]${upload}[v]`,
+      `[0:v:0][${sub.overlayInput}]overlay[s];[s]${base}[o];[o]${upload}[v]`,
       '-map', '[v]',
     ]
     : [
