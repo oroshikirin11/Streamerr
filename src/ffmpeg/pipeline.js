@@ -659,6 +659,38 @@ export function buildSourceArgs({
   const base = scaleFilter(profEff).replace(`fps=${effAll.fps}`, `fps=${effAll.rate}`);
   const upload = be.uploadFilter(profEff);
 
+  // Fixed-function chain for clips WITHOUT burned subtitles. This used to
+  // exist only when subtitles forced it, which left subtitle-free 4K films
+  // software-decoding on the CPU at 0.6x while the GPU sat idle.
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex) {
+    const rect = contentRect(selection?.video, profile);
+    const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
+    const scalePart = selection?.video?.hdr
+      ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
+        + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
+      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
+      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      '-extra_hw_frames', '8',
+      ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
+      '-i', srcPath,
+      '-vf', rect.bars
+        ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}`
+        : scalePart,
+      '-map', '0:v:0', '-map', `0:a:${audioIdx}?`,
+      ...be.encoderArgs(profEff),
+      '-async_depth', '4',
+      ...audioArgs(profile),
+      '-r', effAll.rate, '-fps_mode', 'cfr',
+      '-output_ts_offset', Number(tsOffset).toFixed(3),
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+      '-f', 'mpegts', 'pipe:1',
+    ];
+  }
+
   // Full-GPU path: decode, scale, composite and encode all stay on the GPU,
   // and the CPU renders subtitle alpha frames and nothing else. Measured on
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.

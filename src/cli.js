@@ -421,6 +421,31 @@ async function cmdBenchmark() {
   // the GPU, leaving the CPU to do libass and nothing else. Only meaningful
   // if the driver honours per-pixel alpha in overlay_vaapi.
   let gpuPath = null;
+  if (!chosen.subtitle && profile.backend === 'vaapi') {
+    const v = tracks.video[0] ?? {};
+    const hdr = ['smpte2084', 'arib-std-b67'].includes(v.color_transfer) || v.hdr;
+    const sp = hdr
+      ? `scale_vaapi=w=${profile.width}:h=${profile.height}:mode=fast,tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709`
+      : `scale_vaapi=w=${profile.width}:h=${profile.height}:format=nv12:mode=fast`;
+    const a = [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-init_hw_device', `vaapi=va:${config.encoder.device}`, '-filter_hw_device', 'va',
+      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      '-extra_hw_frames', '8', '-i', src,
+      '-vf', sp, '-c:v', 'h264_vaapi', '-b:v', profile.videoBitrate,
+      '-g', '60', '-bf', '0', '-async_depth', '4',
+      '-an', '-t', String(SECONDS), '-f', 'null', '-',
+    ];
+    const t0 = Date.now();
+    const err = await runProc('ffmpeg', a).then(() => null).catch((e) => e.message);
+    if (err) {
+      console.log(`  full-GPU, no subs          FAILED: ${err.split('\n').filter(Boolean).slice(-1)[0]}`);
+    } else {
+      gpuPath = SECONDS / ((Date.now() - t0) / 1000);
+      console.log(`  full-GPU, no subs          ${gpuPath.toFixed(2)}x realtime`
+        + (gpuPath < 1.2 ? '   ← too slow' : '   ← now the production path'));
+    }
+  }
   if (chosen.subtitle && profile.backend === 'vaapi') {
     const dev = config.encoder.device;
     const alpha = await vaapiAlphaHonored(dev);
@@ -463,20 +488,26 @@ async function cmdBenchmark() {
   // driver stack — Jellyfin ships this path in production on identical
   // hardware. The number decides whether it beats VAAPI here, not theory.
   let qsvPath = null;
-  if (chosen.subtitle) {
+  {
     const q = await probeBackend('qsv', config.encoder.device);
     if (!q.ok) {
       console.log(`  QSV: not usable (${q.error})`);
     } else {
       const v = tracks.video[0] ?? {};
       const dec = { hevc: 'hevc_qsv', h264: 'h264_qsv', av1: 'av1_qsv' }[v.codec];
-      const subF = chosen.subtitle.external
+      const subF = !chosen.subtitle ? '' : chosen.subtitle.external
         ? `subtitles=filename=${escapeFilterPath(chosen.subtitle.path)}:alpha=1`
         : `subtitles=filename=${escapeFilterPath(src)}:si=${chosen.subtitle.typeIndex}:alpha=1`;
       const hdr = ['smpte2084', 'arib-std-b67'].includes(v.colorTransfer) || v.hdr;
       const vpp = hdr
         ? `vpp_qsv=w=${profile.width}:h=${profile.height}:format=nv12:tonemap=1`
         : `vpp_qsv=w=${profile.width}:h=${profile.height}:format=nv12`;
+      const graph = chosen.subtitle
+        ? `[1:v]${subF},format=rgba,hwupload=extra_hw_frames=16[ov];[0:v]${vpp}[b];[b][ov]overlay_qsv[v]`
+        : `[0:v]${vpp}[v]`;
+      const canvas = chosen.subtitle
+        ? ['-f', 'lavfi', '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=30,format=rgba`]
+        : [];
       const a = [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
         '-init_hw_device', `vaapi=va:${config.encoder.device}`,
@@ -484,11 +515,8 @@ async function cmdBenchmark() {
         '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv',
         ...(dec ? ['-c:v', dec] : []),
         '-i', src,
-        '-f', 'lavfi',
-        '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=30,format=rgba`,
-        '-filter_complex',
-        `[1:v]${subF},format=rgba,hwupload=extra_hw_frames=16[ov];`
-        + `[0:v]${vpp}[b];[b][ov]overlay_qsv[v]`,
+        ...canvas,
+        '-filter_complex', graph,
         '-map', '[v]', '-c:v', 'h264_qsv',
         '-b:v', profile.videoBitrate, '-g', '60', '-bf', '0',
         '-an', '-t', String(SECONDS), '-f', 'null', '-',

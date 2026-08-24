@@ -26,6 +26,25 @@
 
   let fsRoots = $state('');
 
+  // Common output sizes; Custom reveals the manual fields.
+  const RES_PRESETS = [
+    { key: '2160p', label: '2160p (4K)', w: 3840, h: 2160 },
+    { key: '1440p', label: '1440p', w: 2560, h: 1440 },
+    { key: '1080p', label: '1080p', w: 1920, h: 1080 },
+    { key: '720p', label: '720p', w: 1280, h: 720 },
+    { key: '480p', label: '480p', w: 854, h: 480 },
+  ];
+  let resPreset = $state('1080p');
+
+  function syncPresetFromCfg() {
+    const hit = RES_PRESETS.find((r) => r.w === +cfg.encoder.width && r.h === +cfg.encoder.height);
+    resPreset = hit ? hit.key : 'custom';
+  }
+  function applyPreset() {
+    const r = RES_PRESETS.find((x) => x.key === resPreset);
+    if (r) { cfg.encoder.width = r.w; cfg.encoder.height = r.h; }
+  }
+
   onMount(load);
 
   async function load() {
@@ -41,6 +60,7 @@
       cfg.tracks.audioMode ??= 'original';
       cfg.tracks.subtitleMode ??= 'auto';
       fsRoots = (cfg.library.filesystem?.roots || []).join('\n');
+      syncPresetFromCfg();
     } catch (err) { error = err.message; }
   }
 
@@ -196,8 +216,20 @@
   <section class="card">
     <h3>Output</h3>
     <div class="g3">
-      <div><label>Width</label><input type="number" bind:value={cfg.encoder.width} /></div>
-      <div><label>Height</label><input type="number" bind:value={cfg.encoder.height} /></div>
+      <div>
+        <label>Resolution</label>
+        <select bind:value={resPreset} onchange={applyPreset}>
+          {#each RES_PRESETS as r}<option value={r.key}>{r.label}</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      {#if resPreset === 'custom'}
+        <div><label>Width</label><input type="number" bind:value={cfg.encoder.width} /></div>
+        <div><label>Height</label><input type="number" bind:value={cfg.encoder.height} /></div>
+      {:else}
+        <div><label>Size</label>
+          <input value={`${cfg.encoder.width} × ${cfg.encoder.height}`} disabled /></div>
+      {/if}
       <div>
         <label>Framerate</label>
         <select bind:value={cfg.encoder.fpsMode}>

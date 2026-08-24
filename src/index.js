@@ -423,14 +423,19 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // positioned subs smeared toward the 16:9 edges.
   selection.video = tracks.video[0] ?? null;
 
-  // Subtitles go through the full-GPU path when the driver supports it —
-  // the difference between unstreamable and comfortable on weak CPUs.
-  if (selection.subtitle && profile.backend === 'vaapi') {
-    if (globalThis.__alphaOk === undefined) {
-      globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
-        { width: profile.width, height: profile.height });
+  // The full-GPU chain is the default whenever VAAPI is the backend —
+  // subtitle-free 4K films were software-decoding at 0.6x while the GPU
+  // idled, because this used to be gated on subtitles existing. The overlay
+  // (subtitled) variant additionally needs the driver to honour alpha.
+  if (profile.backend === 'vaapi' && config.encoder.gpuSubs !== false) {
+    profile.gpuFull = true;
+    if (selection.subtitle) {
+      if (globalThis.__alphaOk === undefined) {
+        globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
+          { width: profile.width, height: profile.height });
+      }
+      profile.gpuSubs = globalThis.__alphaOk;
     }
-    profile.gpuSubs = globalThis.__alphaOk && config.encoder.gpuSubs !== false;
   }
 
   const conn = await testRtmpConnection(rtmpTarget());
