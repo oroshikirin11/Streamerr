@@ -87,10 +87,38 @@ export function ensureDirs() {
   }
 }
 
-export function saveConfig(next) {
-  const clean = merge(config, next);
-  writeFileSync(CONFIG_PATH, JSON.stringify(clean, null, 2) + '\n');
-  return clean;
+/**
+ * Persist a partial config update and apply it to the live object.
+ *
+ * The exported `config` is mutated in place rather than replaced, because
+ * modules that imported it hold a reference — returning a new object would
+ * leave every one of them on stale settings.
+ */
+export function saveConfig(patch) {
+  const merged = merge(config, patch);
+  writeFileSync(CONFIG_PATH, JSON.stringify(stripComments(merged), null, 2) + '\n');
+
+  for (const key of Object.keys(config)) delete config[key];
+  Object.assign(config, merged);
+
+  // Runtime dirs may have changed with it.
+  for (const key of Object.keys(config.paths ?? {})) {
+    const p = config.paths[key];
+    config.paths[key] = isAbsolute(p) ? p : resolve(ROOT, p);
+  }
+  return config;
+}
+
+function stripComments(obj) {
+  if (Array.isArray(obj)) return obj.map(stripComments);
+  if (obj && typeof obj === 'object') {
+    return Object.fromEntries(
+      Object.entries(obj)
+        .filter(([k]) => !k.startsWith('_'))
+        .map(([k, v]) => [k, stripComments(v)]),
+    );
+  }
+  return obj;
 }
 
 /**

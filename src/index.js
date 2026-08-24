@@ -1,0 +1,398 @@
+/**
+ * The panel: REST API, WebSocket status feed, and the built UI.
+ *
+ * Everything configurable lives behind this — the goal is that nothing ever
+ * requires hand-editing config.json.
+ */
+
+import express from 'express';
+import http from 'http';
+import { WebSocketServer } from 'ws';
+import { existsSync, createReadStream } from 'fs';
+import { resolve, dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+import {
+  config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, ROOT,
+} from './config.js';
+import {
+  hashPassword, verifyPassword, createSession, destroySession,
+  validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
+} from './auth.js';
+import { probeAll, selectBackend, probeConcatCapabilities } from './ffmpeg/probe.js';
+import { PlayoutEngine, testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
+import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
+import { makeLibrary } from './library/index.js';
+import { suggestRules } from './library/pathmap.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WEB_DIR = resolve(__dirname, '../web/build');
+
+const app = express();
+const server = http.createServer(app);
+app.use(express.json({ limit: '1mb' }));
+
+// ── state ──────────────────────────────────────────────────────────────
+
+/** The single active broadcast. One publisher is all Owncast accepts. */
+let engine = null;
+let library = makeLibrary(config);
+
+/** Rebuild the library client whenever its settings change. */
+function refreshLibrary() {
+  library = makeLibrary(config);
+}
+
+const clients = new Set();
+function broadcast(type, payload) {
+  const msg = JSON.stringify({ type, payload, ts: Date.now() });
+  for (const ws of clients) {
+    if (ws.readyState === 1) ws.send(msg);
+  }
+}
+
+function streamStatus() {
+  if (!engine) return { status: 'stopped', playing: null, queue: [] };
+  const s = engine.snapshot();
+  return {
+    status: s.status,
+    playing: s.playing ? { title: s.playing.title, duration: s.playing.duration } : null,
+    queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
+    position: s.outTimeSec,
+    total: s.committedDuration,
+  };
+}
+
+// ── auth ───────────────────────────────────────────────────────────────
+
+const passwordHash = () => config.auth?.passwordHash || null;
+const auth = requireAuth(passwordHash);
+
+app.get('/api/auth/status', (req, res) => {
+  res.json({
+    configured: Boolean(passwordHash()),
+    authenticated: !passwordHash() || validSession(tokenFromRequest(req)),
+    onboarded: Boolean(config.onboarded),
+  });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const ok = await verifyPassword(req.body?.password ?? '', passwordHash());
+  if (!ok) return res.status(401).json({ error: 'Wrong password' });
+
+  const token = createSession();
+  res.setHeader('Set-Cookie', sessionCookie(token));
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  destroySession(tokenFromRequest(req));
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0`);
+  res.json({ ok: true });
+});
+
+/** First-run only: refuses once a password exists, so it can't be reset anonymously. */
+app.post('/api/auth/setup', async (req, res) => {
+  if (passwordHash()) return res.status(409).json({ error: 'Already configured' });
+  try {
+    const hash = await hashPassword(req.body?.password ?? '');
+    saveConfig({ auth: { passwordHash: hash } });
+    const token = createSession();
+    res.setHeader('Set-Cookie', sessionCookie(token));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Everything below requires a session once a password is set.
+app.use('/api', auth);
+
+// ── config ─────────────────────────────────────────────────────────────
+
+/** Secrets never leave the server; the UI shows whether one is set, not what. */
+function redactedConfig() {
+  return {
+    ...config,
+    auth: { configured: Boolean(passwordHash()) },
+    owncast: {
+      ...config.owncast,
+      streamKey: config.owncast.streamKey ? '__SET__' : '',
+      accessToken: config.owncast.accessToken ? '__SET__' : '',
+    },
+    library: {
+      ...config.library,
+      jellyfin: {
+        ...config.library.jellyfin,
+        apiKey: config.library.jellyfin?.apiKey ? '__SET__' : '',
+      },
+    },
+  };
+}
+
+app.get('/api/config', (req, res) => res.json(redactedConfig()));
+
+app.put('/api/config', (req, res) => {
+  const patch = { ...req.body };
+  // A field the UI didn't touch comes back as the placeholder; drop it so the
+  // stored secret survives instead of being overwritten with a sentinel.
+  for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken']]) {
+    if (patch[section]?.[field] === '__SET__') delete patch[section][field];
+  }
+  if (patch.library?.jellyfin?.apiKey === '__SET__') delete patch.library.jellyfin.apiKey;
+  delete patch.auth; // password changes go through their own endpoint
+
+  try {
+    saveConfig(patch);
+    refreshLibrary();
+    res.json(redactedConfig());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── setup checks ───────────────────────────────────────────────────────
+
+app.post('/api/check/owncast', async (req, res) => {
+  const url = req.body?.rtmpUrl ?? config.owncast.rtmpUrl;
+  const key = req.body?.streamKey === '__SET__' || !req.body?.streamKey
+    ? config.owncast.streamKey
+    : req.body.streamKey;
+
+  if (!url || !key) return res.status(400).json({ error: 'Address and stream key are required' });
+  if (engine) return res.status(409).json({ error: 'Stop the current broadcast first' });
+
+  const target = `${String(url).replace(/\/+$/, '')}/${key}`;
+  const t0 = Date.now();
+  const result = await testRtmpConnection(target);
+  res.json(result.ok
+    ? { ok: true, ms: Date.now() - t0 }
+    : { ok: false, error: redact(result.error) });
+});
+
+app.get('/api/check/encoders', async (req, res) => {
+  const results = await probeAll(config.encoder.device);
+  const caps = await probeConcatCapabilities();
+  res.json({
+    encoders: results.map(({ backend, ok, label, error }) => ({ backend, ok, label, error })),
+    ffmpeg: caps.version,
+    recursionDepth: caps.recursionDepth,
+  });
+});
+
+app.post('/api/check/library', async (req, res) => {
+  try {
+    // Test against submitted values so the wizard can validate before saving.
+    const probe = req.body?.provider ? makeLibrary({ library: req.body }) : library;
+    if (!probe.configured) return res.status(400).json({ error: 'Not configured' });
+    res.json(await probe.test());
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Pair library roots against local directories to seed path mapping. */
+app.post('/api/check/pathmap', async (req, res) => {
+  try {
+    const probe = req.body?.provider ? makeLibrary({ library: req.body }) : library;
+    const libs = await probe.libraries();
+    const reported = libs.flatMap((l) => l.locations ?? []);
+    const local = (req.body?.localRoots ?? ['/extHdd', '/media', '/mnt', '/data'])
+      .filter((p) => existsSync(p));
+    res.json({ reported, local, suggested: suggestRules(reported, local) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── library ────────────────────────────────────────────────────────────
+
+const wrap = (fn) => async (req, res) => {
+  try {
+    await fn(req, res);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+app.get('/api/library/libraries', wrap(async (req, res) =>
+  res.json(await library.libraries())));
+
+app.get('/api/library/items', wrap(async (req, res) =>
+  res.json(await library.items(req.query.libraryId, {
+    startIndex: Number(req.query.startIndex) || 0,
+    limit: Math.min(Number(req.query.limit) || 60, 200),
+    search: req.query.search,
+  }))));
+
+app.get('/api/library/seasons', wrap(async (req, res) =>
+  res.json(await library.seasons(req.query.seriesId))));
+
+app.get('/api/library/episodes', wrap(async (req, res) =>
+  res.json(await library.episodes(req.query.seriesId, { seasonId: req.query.seasonId }))));
+
+/** Local artwork for the filesystem provider; Jellyfin serves its own. */
+app.get('/api/library/image/:id', (req, res) => {
+  const p = library.imagePath?.(req.params.id);
+  if (!p || !existsSync(p)) return res.status(404).end();
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  createReadStream(p).pipe(res);
+});
+
+/** Tracks for one episode, plus which we'd pick — drives the track picker. */
+app.get('/api/library/tracks', wrap(async (req, res) => {
+  const item = await library.item(req.query.id);
+  const path = library.resolvePath(item);
+  const tracks = await probeTracks(path);
+  const subtitles = await listSubtitles(path, tracks);
+  const chosen = selectTracks(tracks, subtitles, config.tracks ?? {});
+  res.json({
+    audio: tracks.audio,
+    subtitles: subtitles.map((s) => ({ ...s, path: undefined, key: s.external ? s.path : s.typeIndex })),
+    chosen: {
+      audioIndex: chosen.audio?.typeIndex ?? null,
+      subtitleKey: chosen.subtitle ? (chosen.subtitle.external ? chosen.subtitle.path : chosen.subtitle.typeIndex) : null,
+      reason: chosen.reason,
+    },
+  });
+}));
+
+// ── playout ────────────────────────────────────────────────────────────
+
+app.get('/api/stream/status', (req, res) => res.json(streamStatus()));
+
+app.post('/api/stream/start', wrap(async (req, res) => {
+  if (engine) return res.status(409).json({ error: 'Already streaming' });
+
+  const ids = req.body?.itemIds ?? [];
+  if (!ids.length) return res.status(400).json({ error: 'Nothing selected' });
+
+  ensureDirs();
+  const sel = await selectBackend({
+    backend: config.encoder.backend,
+    device: config.encoder.device,
+  });
+  const profile = { ...config.encoder, backend: sel.backend };
+
+  // Resolve every item up front so a bad path fails before we go on air.
+  const items = [];
+  for (const id of ids) {
+    const item = await library.item(id);
+    items.push({
+      id: item.id,
+      title: item.seriesName
+        ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
+        : item.title,
+      srcPath: library.resolvePath(item),
+    });
+  }
+
+  const tracks = await probeTracks(items[0].srcPath);
+  const subs = await listSubtitles(items[0].srcPath, tracks);
+  const selection = selectTracks(tracks, subs, {
+    ...(config.tracks ?? {}),
+    ...(req.body?.trackOverride ?? {}),
+  });
+
+  const conn = await testRtmpConnection(rtmpTarget());
+  if (!conn.ok) {
+    return res.status(502).json({
+      error: 'Owncast would not accept the stream',
+      detail: redact(conn.error),
+    });
+  }
+
+  engine = new PlayoutEngine({
+    workDir: config.paths.cache,
+    target: rtmpTarget(),
+    profile,
+    selection,
+    endBehavior: 'end',
+    caps: await probeConcatCapabilities(),
+  });
+
+  for (const it of items) engine.enqueue(it);
+
+  engine.on('status', () => broadcast('stream', streamStatus()));
+  engine.on('committed', () => broadcast('stream', streamStatus()));
+  engine.on('nowplaying', () => broadcast('stream', streamStatus()));
+  engine.on('progress', (b) => broadcast('progress', {
+    position: b.outTimeUs / 1e6, speed: b.speed, drops: b.dropFrames,
+  }));
+  engine.on('warn', (m) => broadcast('warn', { message: redact(String(m)) }));
+  engine.on('fatal', (e) => {
+    broadcast('error', { message: redact(e.message) });
+    engine?.cleanup();
+    engine = null;
+    broadcast('stream', streamStatus());
+  });
+  engine.on('ended', () => {
+    engine?.cleanup();
+    engine = null;
+    broadcast('stream', streamStatus());
+  });
+
+  await engine.start();
+  res.json({ ok: true, tracks: selection.reason, ...streamStatus() });
+}));
+
+app.post('/api/stream/stop', (req, res) => {
+  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+  engine.stop();
+  res.json({ ok: true });
+});
+
+app.post('/api/stream/queue', wrap(async (req, res) => {
+  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+  const items = [];
+  for (const id of req.body?.itemIds ?? []) {
+    const item = await library.item(id);
+    items.push({
+      id: item.id,
+      title: item.seriesName
+        ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
+        : item.title,
+      srcPath: library.resolvePath(item),
+    });
+  }
+  engine.setQueue(items);
+  res.json(streamStatus());
+}));
+
+// ── static UI ──────────────────────────────────────────────────────────
+
+if (existsSync(WEB_DIR)) {
+  app.use(express.static(WEB_DIR));
+  // SPA fallback: any non-API path serves the app shell so client routing works.
+  app.get(/^(?!\/api).*/, (req, res) => res.sendFile(join(WEB_DIR, 'index.html')));
+} else {
+  app.get('/', (req, res) => res.status(503).type('text/plain').send(
+    'UI not built yet.\n\nRun: cd web && npm install && npm run build\n'
+    + 'The API is available under /api.\n',
+  ));
+}
+
+// ── websocket ──────────────────────────────────────────────────────────
+
+const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('connection', (ws, req) => {
+  if (passwordHash() && !validSession(tokenFromRequest(req))) {
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+  clients.add(ws);
+  ws.send(JSON.stringify({ type: 'stream', payload: streamStatus(), ts: Date.now() }));
+  ws.on('close', () => clients.delete(ws));
+  ws.on('error', () => clients.delete(ws));
+});
+
+// ── start ──────────────────────────────────────────────────────────────
+
+ensureDirs();
+const { port, host } = config.server;
+server.listen(port, host, () => {
+  console.log(`jellystreamerr listening on http://${host}:${port}`);
+  console.log(`  target : ${rtmpTargetRedacted()}`);
+  console.log(`  library: ${config.library.provider}`);
+  if (!passwordHash()) console.log('  no password set — open the panel to run setup');
+});
