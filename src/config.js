@@ -43,6 +43,13 @@ const DEFAULTS = {
     // is off by default — the second demux it avoids is not the bottleneck.
     // Worth trying if `cli.js benchmark` says otherwise on your storage.
     extractSubtitles: false,
+    // Encode this many chunks of a clip at once when burning subtitles.
+    // libass is single-threaded, so one process cannot use the rest of the
+    // CPU; several can. 1 disables it. Only engages when subtitles are on,
+    // since that is the only thing that pins the pipeline to one core.
+    parallelChunks: 1,
+    // Longer chunks mean fewer seams but more latency before playback starts.
+    chunkSeconds: 20,
   },
   // Chain scripts live inside `cache` alongside the .ts files they reference —
   // nested .ffconcat scripts resolve relative paths against their own

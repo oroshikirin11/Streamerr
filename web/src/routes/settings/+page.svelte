@@ -79,6 +79,8 @@
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           hwDecode: Boolean(cfg.encoder.hwDecode),
           extractSubtitles: Boolean(cfg.encoder.extractSubtitles),
+          parallelChunks: +cfg.encoder.parallelChunks || 1,
+          chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
       }
       if (section === 'library') patch.library = libraryPayload();
@@ -243,6 +245,25 @@
       win for 10-bit HEVC on a weak CPU, a loss for 8-bit H.264 on a strong
       one. Measure it with <code>cli.js benchmark &lt;file&gt;</code> rather
       than guessing.
+    </p>
+
+    <div class="g3" style="margin-top:6px">
+      <div>
+        <label>Parallel chunks</label>
+        <input type="number" min="1" max="8" bind:value={cfg.encoder.parallelChunks} />
+      </div>
+      <div>
+        <label>Chunk length (s)</label>
+        <input type="number" min="4" max="120" bind:value={cfg.encoder.chunkSeconds} />
+      </div>
+    </div>
+    <p class="muted small">
+      Burning subtitles runs on one core, because libass is single-threaded —
+      so a machine can be fast enough overall and still fail on subtitled
+      1080p. Encoding several chunks at once uses the rest of the CPU;
+      measured 3.5&times; with four workers. Costs one chunk-length of delay
+      before playback starts. 1 disables it. Run
+      <code>cli.js benchmark &lt;file&gt;</code> to see what it buys you.
     </p>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">

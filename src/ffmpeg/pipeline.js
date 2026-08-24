@@ -30,11 +30,13 @@
 
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
+import { join } from 'path';
 import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { extractSubtitle, extractFonts } from './subcache.js';
+import { ChunkScheduler } from './chunker.js';
 
 /** Treat a source that dies this fast as broken rather than finished. */
 const SOURCE_FAIL_MS = 2_000;
@@ -57,6 +59,9 @@ export class PipelinePlayout extends EventEmitter {
     /** Where extracted subtitle tracks and fonts are kept. */
     this.cacheDir = cacheDir;
     this._subCache = new Map();   // `${srcPath}:${typeIndex}` -> {path, fontsDir}
+    /** Set when a clip is encoded in parallel chunks instead of streamed. */
+    this.scheduler = null;
+    this._clipBase = 0;
 
     this.status = 'stopped';   // stopped | running | paused
     this.publisher = null;
@@ -172,8 +177,10 @@ export class PipelinePlayout extends EventEmitter {
   _spawnPublisher() {
     const args = [
       '-hide_banner', '-nostdin',
-      // Read the source's already-encoded MPEG-TS. No -re here: the source
-      // paces in realtime, and pacing twice would starve the output.
+      // The publisher sets the pace for everything. Sources run as fast as
+      // they can and are throttled by pipe backpressure — chunk workers must,
+      // since the whole point is finishing ahead of the playhead.
+      '-re',
       '-f', 'mpegts', '-i', 'pipe:0',
       '-c', 'copy',
       // FLV's codec ids for AVC and AAC. Copying from MPEG-TS carries the TS
@@ -223,6 +230,10 @@ export class PipelinePlayout extends EventEmitter {
   // ── source ───────────────────────────────────────────────────────────
 
   _killSource() {
+    if (this.scheduler) {
+      this.scheduler.stop();
+      this.scheduler = null;
+    }
     const s = this.source;
     this.source = null;
     if (!s) return;
@@ -239,6 +250,18 @@ export class PipelinePlayout extends EventEmitter {
     this.position = offset;
 
     const cached = this._cachedSubs(item.srcPath);
+
+    // Several encodes at once when one process cannot keep up. Only worth it
+    // when subtitles are being burned — that is what pins the pipeline to a
+    // single core.
+    const workers = Number(this.profile?.parallelChunks ?? 1);
+    if (workers > 1 && this.selection?.subtitle) {
+      this._playChunked(item, offset, cached, workers);
+      this.emit('nowplaying', this.snapshot());
+      this._fillDuration(item);
+      return;
+    }
+
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       offset,
@@ -253,19 +276,68 @@ export class PipelinePlayout extends EventEmitter {
     this._spawnSource(args, { kind: 'clip' });
     this.emit('nowplaying', this.snapshot());
 
-    // Duration drives seek clamping and the progress bar. The filesystem
-    // provider cannot supply it without probing every file during browsing,
-    // so fill it in here for whatever is actually playing.
-    if (this.current.duration == null) {
-      probeDuration(item.srcPath)
-        .then((d) => {
-          if (this.current?.item === item) {
-            this.current.duration = d;
-            this.emit('nowplaying', this.snapshot());
-          }
-        })
-        .catch(() => { /* seek simply stays unclamped */ });
-    }
+    this._fillDuration(item);
+  }
+
+  /**
+   * Duration drives seek clamping and the progress bar. The filesystem
+   * provider cannot supply it without probing every file during browsing, so
+   * fill it in for whatever is actually playing.
+   */
+  _fillDuration(item) {
+    if (this.current?.duration != null) return;
+    probeDuration(item.srcPath)
+      .then((d) => {
+        if (this.current?.item === item) {
+          this.current.duration = d;
+          if (this.scheduler) this.scheduler.duration = d;
+          this.emit('nowplaying', this.snapshot());
+        }
+      })
+      .catch(() => { /* seek simply stays unclamped */ });
+  }
+
+  /** Encode this clip as parallel chunks fed to the publisher in order. */
+  _playChunked(item, offset, cached, workers) {
+    this._clipBase = this.timeline;
+    const chunkSeconds = Number(this.profile?.chunkSeconds ?? 20);
+
+    const sched = new ChunkScheduler({
+      srcPath: item.srcPath,
+      startOffset: offset,
+      duration: this.current.duration,
+      chunkSeconds,
+      workers,
+      workDir: join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`),
+      buildArgs: ({ start, dur, out }) => buildChunkArgs({
+        srcPath: item.srcPath,
+        start,
+        dur,
+        out,
+        profile: this.profile,
+        selection: this.selection,
+        // Absolute placement, so chunks finishing out of order still land in
+        // the right place on the timeline.
+        tsOffset: this._clipBase + (start - offset),
+        extractedPath: cached?.path ?? null,
+        fontsDir: cached?.fontsDir ?? null,
+      }),
+    });
+
+    sched.on('warn', (m) => this.emit('warn', m));
+    sched.on('chunk', ({ start }) => {
+      // Position is where the newest delivered chunk begins; the publisher is
+      // still paying it out, so this leads the viewer by up to one chunk.
+      this.position = start;
+      this.timeline = this._clipBase + (start - offset) + chunkSeconds;
+      this.emit('progress', { position: this.position, speed: null, drops: 0 });
+    });
+    sched.on('complete', () => {
+      if (this.scheduler === sched) this._advance();
+    });
+
+    this.scheduler = sched;
+    if (this.publisher?.stdin.writable) sched.start(this.publisher.stdin);
   }
 
   _subKey(srcPath) {
@@ -459,7 +531,6 @@ export function buildSourceArgs({
     ...decodeArgs,
     // Input-side seek: fast, and the only form that skips decoding work.
     ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
-    '-re',
     '-i', srcPath,
     ...filterArgs,
     '-map', `0:a:${audioIdx}?`,
@@ -475,6 +546,55 @@ export function buildSourceArgs({
   ];
 }
 
+/**
+ * One chunk of a clip, encoded to a file. Same filters as the streaming
+ * source; the difference is a bounded range and a file output, so several can
+ * run at once.
+ */
+export function buildChunkArgs({
+  srcPath, start, dur, out, profile, selection = null, tsOffset = 0,
+  extractedPath = null, fontsDir = null,
+}) {
+  const be = BACKENDS[profile.backend];
+  if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
+
+  const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
+    { extractedPath, fontsDir });
+  const audioIdx = selection?.audio?.typeIndex ?? 0;
+  const base = scaleFilter(profile);
+  const upload = be.uploadFilter(profile);
+
+  const filterArgs = sub.needsComplex
+    ? [
+      '-filter_complex',
+      `[0:v:0]${base}[b];[b][${sub.overlayInput}]overlay[o];[o]${upload}[v]`,
+      '-map', '[v]',
+    ]
+    : [
+      '-vf', [base, sub.filter, upload].filter(Boolean).join(','),
+      '-map', '0:v:0',
+    ];
+
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    ...be.deviceArgs(profile),
+    '-ss', Number(start).toFixed(3),
+    '-i', srcPath,
+    '-t', Number(dur).toFixed(3),
+    ...filterArgs,
+    '-map', `0:a:${audioIdx}?`,
+    ...be.encoderArgs(profile),
+    ...audioArgs(profile),
+    // Absolute placement on the output timeline. This is what lets chunks be
+    // produced out of order and still join exactly.
+    '-output_ts_offset', Number(tsOffset).toFixed(3),
+    '-fps_mode', 'cfr',
+    '-muxdelay', '0', '-muxpreload', '0',
+    '-mpegts_flags', '+resend_headers',
+    '-f', 'mpegts', out,
+  ];
+}
+
 /** Hold card, matching the output profile so the publisher sees no change. */
 export function buildHoldArgs({
   profile, tsOffset = 0, statsPeriodMs = 500, label = 'Paused',
@@ -483,7 +603,7 @@ export function buildHoldArgs({
   const text = String(label).replace(/[\\':]/g, '');
 
   return [
-    '-hide_banner', '-loglevel', 'error', '-nostdin', '-re',
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-f', 'lavfi', '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps}`,
     '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
     '-vf', `drawtext=fontfile=${HOLD_FONT}:text='${text}':fontcolor=white:`

@@ -10,7 +10,7 @@
 
 import { spawn } from 'child_process';
 import { mkdtempSync, rmSync, existsSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, cpus } from 'os';
 import { join, resolve, basename as pathBasename } from 'path';
 import {
   config, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact,
@@ -19,7 +19,9 @@ import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
 import { PlayoutEngine, probeDuration, testRtmpConnection } from './ffmpeg/playout.js';
-import { PipelinePlayout, buildSourceArgs } from './ffmpeg/pipeline.js';
+import {
+  PipelinePlayout, buildSourceArgs, buildChunkArgs,
+} from './ffmpeg/pipeline.js';
 import { extractSubtitle, extractFonts } from './ffmpeg/subcache.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
@@ -344,8 +346,37 @@ async function cmdBenchmark() {
       + (lower < 1.2 ? '   ← still too slow' : ''));
   }
 
+  // libass is single-threaded, so the fix for slow subtitle burning is more
+  // processes rather than less work.
+  let parallel = null;
+  if (chosen.subtitle && with_ != null && with_ < 2.5) {
+    const workers = Math.max(2, Math.min(4, cpus().length - 1));
+    const CH = 6;
+    const jobs = Array.from({ length: workers }, (_, i) => {
+      const out = join(tmpdir(), `jsr-bench-${process.pid}-${i}.ts`);
+      return buildChunkArgs({
+        srcPath: src, start: i * CH, dur: CH, out, profile, selection: chosen,
+        tsOffset: i * CH,
+      });
+    });
+    const t0 = Date.now();
+    await Promise.all(jobs.map((a) => run2('ffmpeg', a)));
+    parallel = (workers * CH) / ((Date.now() - t0) / 1000);
+    for (let i = 0; i < workers; i++) {
+      try { rmSync(join(tmpdir(), `jsr-bench-${process.pid}-${i}.ts`)); } catch { /* gone */ }
+    }
+    console.log(`  ${workers} parallel chunks + subs   ${parallel.toFixed(2)}x realtime`
+      + (parallel < 1.2 ? '   ← still too slow' : ''));
+  }
+
   console.log('');
 
+  if (parallel != null && with_) {
+    console.log(`  Encoding in parallel chunks is ${(parallel / with_).toFixed(1)}x faster.`);
+    if (parallel > 1.3) {
+      console.log('  Set Settings → Output → parallel chunks to enable it.');
+    }
+  }
   if (with_ != null) {
     console.log(`  Subtitles cost ${(without / with_).toFixed(1)}x when read from the mkv.`);
   }
@@ -362,7 +393,7 @@ async function cmdBenchmark() {
     console.log(`  GPU decode is ${(withHw / without).toFixed(1)}x faster — enable it in Settings.`);
   }
   const streamable = chosen.subtitle
-    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0)
+    ? Math.max(with_ ?? 0, withExtracted ?? 0, lower ?? 0, parallel ?? 0)
     : Math.max(without, withHw);
   if (streamable < 1.2) {
     console.log('');
