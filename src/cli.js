@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { tmpdir, cpus } from 'os';
 import { join, resolve, basename as pathBasename } from 'path';
 import {
-  config, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact,
+  config, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, CONFIG_PATH,
 } from './config.js';
 import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
@@ -509,6 +509,71 @@ function run2(bin, argv) {
   });
 }
 
+
+// ── gputest ────────────────────────────────────────────────────────────
+
+/**
+ * Render the same seeked frame three ways — no subs, CPU burn, GPU overlay —
+ * and measure how much each subtitle path actually changed the picture.
+ * Writes PNGs next to config.json so they can be eyeballed from the host.
+ */
+async function cmdGputest() {
+  const src = args[0] && resolve(args[0]);
+  if (!src || !existsSync(src)) die('Usage: cli.js gputest <file>');
+  const { dirname } = await import('path');
+  const outDir = dirname(CONFIG_PATH);
+
+  const profile = { ...(await resolveProfile()) };
+  const tracks = await probeTracks(src);
+  const subs = await listSubtitles(src, tracks);
+  const sel = selectTracks(tracks, subs, { ...config.tracks, subtitleMode: 'always' });
+  if (!sel.subtitle) die('No subtitle track found');
+  console.log(`\ntrack: ${sel.reason}`);
+
+  const dur = await probeDuration(src).catch(() => null);
+  const OFF = Math.min(90, Math.max(0, (dur ?? 95) - 5));
+  const make = async (name, gpuSubs, selection) => {
+    const a = buildSourceArgs({
+      srcPath: src, offset: OFF, profile: { ...profile, gpuSubs }, selection, tsOffset: 0,
+    }).map((x) => (x === 'pipe:1' ? join(outDir, `${name}.ts`) : x));
+    const i = a.indexOf('-progress'); a.splice(i, 4);
+    a.splice(a.lastIndexOf('-f'), 0, '-t', '2');
+    a.splice(1, 0, '-y');
+    await run('ffmpeg', a);
+    await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y',
+      '-ss', '1', '-i', join(outDir, `${name}.ts`), '-frames:v', '1',
+      join(outDir, `${name}.png`)]);
+    return join(outDir, `${name}.png`);
+  };
+
+  const plain = await make('gputest-nosub', false, { audio: sel.audio, subtitle: null });
+  const cpu = await make('gputest-cpu', false, sel);
+  const gpu = await make('gputest-gpu', true, sel);
+
+  const diff = (a, b) => new Promise((res) => {
+    const c = spawn('ffmpeg', ['-hide_banner', '-i', a, '-i', b,
+      '-filter_complex', 'blend=difference,signalstats', '-f', 'null', '-'],
+    { stdio: ['ignore', 'ignore', 'pipe'] });
+    let e = '';
+    c.stderr.on('data', (d) => { e += d.toString(); });
+    c.on('close', () => {
+      const m = /YAVG:([0-9.]+)/.exec(e);
+      res(m ? parseFloat(m[1]) : -1);
+    });
+  });
+
+  const cpuDiff = await diff(plain, cpu);
+  const gpuDiff = await diff(plain, gpu);
+  console.log(`\n  CPU burn changed the frame by  YAVG ${cpuDiff}`);
+  console.log(`  GPU path changed the frame by  YAVG ${gpuDiff}`);
+  console.log(`\n  PNGs written next to config.json — look at them.`);
+  if (cpuDiff > 0.5 && gpuDiff < 0.1) {
+    console.log('  → GPU overlay contributes NOTHING: driver drops it silently.');
+  } else if (gpuDiff > 0.5) {
+    console.log('  → GPU overlay IS rendering; compare the PNGs for correctness.');
+  }
+}
+
 // ── pipetest ───────────────────────────────────────────────────────────
 
 /**
@@ -734,6 +799,7 @@ const commands = {
   testconnect: cmdTestConnect,
   selftest: cmdSelftest,
   pipetest: cmdPipetest,
+  gputest: cmdGputest,
   benchmark: cmdBenchmark,
   stream: cmdStream,
 };
