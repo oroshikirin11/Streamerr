@@ -284,6 +284,11 @@ export class PipelinePlayout extends EventEmitter {
     const parser = new ProgressParser();
     const startOffset = kind === 'clip' ? (this.current?.offset ?? 0) : 0;
     let lastOut = 0;
+    // Encoding slower than realtime starves the pipe. Owncast ends the
+    // broadcast after ten seconds of silence, so this is fatal if sustained —
+    // and dying without saying why is the worst version of it.
+    let slowSince = null;
+    let warnedSlow = false;
 
     parser.on('block', (b) => {
       if (b.outTimeUs == null) return;
@@ -293,6 +298,24 @@ export class PipelinePlayout extends EventEmitter {
       this.timeline += Math.max(0, out - lastOut);
       lastOut = out;
       if (kind === 'clip') this.position = startOffset + out;
+
+      if (kind === 'clip' && b.speed != null) {
+        if (b.speed < 0.95) {
+          slowSince ??= Date.now();
+          if (!warnedSlow && Date.now() - slowSince > 8000) {
+            warnedSlow = true;
+            this.emit('tooslow', { speed: b.speed });
+            this.emit('warn',
+              `Encoding at ${b.speed}x — slower than realtime, so the stream `
+              + 'will stall. Burning subtitles is usually the cause; try a '
+              + 'lighter subtitle track, a lower output resolution, or turn '
+              + 'subtitles off for this title.');
+          }
+        } else {
+          slowSince = null;
+        }
+      }
+
       this.emit('progress', {
         position: this.position, speed: b.speed, drops: b.dropFrames,
       });

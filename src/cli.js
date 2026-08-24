@@ -19,7 +19,7 @@ import {
   probeAll, selectBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
 import { PlayoutEngine, probeDuration, testRtmpConnection } from './ffmpeg/playout.js';
-import { PipelinePlayout } from './ffmpeg/pipeline.js';
+import { PipelinePlayout, buildSourceArgs } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
@@ -257,6 +257,81 @@ async function cmdSelftest() {
 }
 
 
+
+// ── benchmark ──────────────────────────────────────────────────────────
+
+/**
+ * Measure encode speed on a REAL file, with and without subtitles.
+ *
+ * Synthetic clips do not reproduce what heavy typesetting costs: anime ASS
+ * with embedded fonts, blur and per-sign positioning is far more expensive to
+ * render than plain dialogue, and a 10-bit source forces an extra full-frame
+ * conversion because libass only works in 8-bit.
+ *
+ * Anything below 1.0x cannot sustain a live stream.
+ */
+async function cmdBenchmark() {
+  const src = args[0] && resolve(args[0]);
+  if (!src || !existsSync(src)) die('Usage: cli.js benchmark <file>');
+
+  const profile = await resolveProfile();
+  const tracks = await probeTracks(src);
+  const subs = await listSubtitles(src, tracks);
+  const chosen = selectTracks(tracks, subs, config.tracks ?? {});
+
+  const v = tracks.video[0];
+  console.log(`\n${basename(src)}`);
+  console.log(`  video   : ${v?.codec ?? '?'} ${v?.width ?? '?'}x${v?.height ?? '?'}`);
+  console.log(`  output  : ${profile.width}x${profile.height}@${profile.fps} via ${profile.backend}`);
+  console.log(`  tracks  : ${chosen.reason}\n`);
+
+  const SECONDS = 20;
+  const run = async (label, selection) => {
+    const a = buildSourceArgs({
+      srcPath: src, offset: 0, profile, selection, tsOffset: 0,
+    })
+      // Measure encoding throughput, not realtime pacing.
+      .filter((x) => x !== '-re')
+      .map((x) => (x === 'pipe:1' ? '-' : x));
+    const idx = a.lastIndexOf('-f');
+    a.splice(idx, 2, '-t', String(SECONDS), '-f', 'null');
+
+    const t0 = Date.now();
+    await run2('ffmpeg', a);
+    const secs = (Date.now() - t0) / 1000;
+    const speed = SECONDS / secs;
+    console.log(`  ${label.padEnd(26)} ${speed.toFixed(2)}x realtime`
+      + (speed < 1.2 ? '   ← too slow to stream' : ''));
+    return speed;
+  };
+
+  const without = await run('without subtitles', { audio: chosen.audio, subtitle: null });
+  const with_ = chosen.subtitle
+    ? await run('with subtitles', chosen)
+    : null;
+
+  console.log('');
+  if (with_ == null) {
+    console.log('  No subtitle would be burned in for this file.\n');
+  } else if (with_ < 1.2) {
+    console.log(`  Burning these subtitles costs ${(without / with_).toFixed(1)}x.`);
+    console.log('  Options: pick a lighter subtitle track, lower the output');
+    console.log('  resolution, or turn subtitles off for this title.\n');
+  } else {
+    console.log('  Fast enough to stream with subtitles burned in.\n');
+  }
+}
+
+function run2(bin, argv) {
+  return new Promise((res, rej) => {
+    const c = spawn(bin, argv, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let e = '';
+    c.stderr.on('data', (d) => { e += d.toString(); });
+    c.on('error', rej);
+    c.on('close', () => res(e));
+  });
+}
+
 // ── pipetest ───────────────────────────────────────────────────────────
 
 /**
@@ -482,6 +557,7 @@ const commands = {
   testconnect: cmdTestConnect,
   selftest: cmdSelftest,
   pipetest: cmdPipetest,
+  benchmark: cmdBenchmark,
   stream: cmdStream,
 };
 
@@ -494,6 +570,7 @@ jellystreamerr
   testconnect           check Owncast accepts our stream key
   selftest              prove gapless chaining locally (no Owncast needed)
   pipetest              prove seek/pause keep the connection alive
+  benchmark <file>      measure encode speed with and without subtitles
   stream <file...>      stream files to the configured Owncast
 `);
   process.exit(cmd ? 1 : 0);

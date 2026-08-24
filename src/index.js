@@ -85,6 +85,11 @@ function buildEngine({ profile, selection }) {
     position: b.position, speed: b.speed, drops: b.drops,
   }));
   e.on('warn', (m) => broadcast('warn', { message: redact(String(m)) }));
+  // Distinct from a generic warning: this one predicts the stream failing.
+  e.on('tooslow', (d) => broadcast('error', {
+    message: `Cannot encode fast enough (${d.speed}x). The stream will stall — `
+      + 'try turning subtitles off or lowering the resolution.',
+  }));
   e.on('fatal', (err) => {
     broadcast('error', { message: redact(err.message) });
     if (engine === e) engine = null;
