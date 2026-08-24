@@ -98,10 +98,19 @@ export class ProgressWatchdog extends EventEmitter {
     stallFactor = 3,
     driftWindowMs = 10_000,
     driftFloor = 0.95,
+    graceMs = 20_000,
   } = {}) {
     super();
     this.statsPeriodMs = statsPeriodMs;
     this.stallMs = statsPeriodMs * stallFactor;
+    /**
+     * How long to wait for the FIRST progress block before the stall rule
+     * applies. Startup is not instant — an input seek on a concat chain reads
+     * and discards until it reaches the offset, which can take seconds on a
+     * large file. Arming immediately kills a stream that is merely starting.
+     */
+    this.graceMs = graceMs;
+    this.sawFirstBlock = false;
     this.driftWindowMs = driftWindowMs;
     this.driftFloor = driftFloor;
 
@@ -129,6 +138,7 @@ export class ProgressWatchdog extends EventEmitter {
   onBlock(block) {
     this.lastBlockAt = Date.now();
     this._stalled = false;
+    this.sawFirstBlock = true;
 
     if (block.dropFrames > this.lastDrops) {
       this.emit('drops', {
@@ -152,7 +162,9 @@ export class ProgressWatchdog extends EventEmitter {
   _check() {
     if (this.lastBlockAt == null || this._stalled) return;
     const silentMs = Date.now() - this.lastBlockAt;
-    if (silentMs >= this.stallMs) {
+    // Before the first block, only the (much longer) grace period applies.
+    const limit = this.sawFirstBlock ? this.stallMs : this.graceMs;
+    if (silentMs >= limit) {
       this._stalled = true;
       this.emit('stall', { silentMs });
     }
