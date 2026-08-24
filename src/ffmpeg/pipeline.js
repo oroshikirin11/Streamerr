@@ -581,7 +581,12 @@ export function buildSourceArgs({
       '-f', 'lavfi',
       '-i', `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${profile.fps},format=rgba`,
       '-filter_complex',
-      `[1:v]setpts=PTS+${shift}/TB,${sub.filter},setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
+      // :alpha=1 is load-bearing. Without it libass writes glyph COLOURS
+      // but leaves the canvas alpha plane untouched — all zero — so the
+      // overlay composites full transparency: CPU cost paid, nothing
+      // visible. This is why every GPU-path stream had invisible subtitles
+      // while CPU burn-in (no alpha involved) rendered fine.
+      `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
       + `[0:v]scale_vaapi=w=${profile.width}:h=${profile.height}[b];`
       + `[b][ov]overlay_vaapi[v]`,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`,
