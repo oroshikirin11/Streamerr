@@ -165,7 +165,7 @@ export const BACKENDS = {
       // Only libx264 has these. Scene detection would otherwise insert
       // unscheduled keyframes and desynchronise HLS segment boundaries.
       '-g', String(Math.round(p.gopSeconds * p.fps)),
-      '-keyint_min', String(p.gopSeconds * p.fps),
+      '-keyint_min', String(Math.round(p.gopSeconds * p.fps)),
       '-sc_threshold', '0',
       '-bf', '0',
     ],
