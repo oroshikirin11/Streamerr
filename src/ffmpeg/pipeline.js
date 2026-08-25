@@ -597,7 +597,14 @@ export class PipelinePlayout extends EventEmitter {
       if (c.pos !== this.aired) this._lastAiredAt = Date.now();
       this.aired = c.pos;
       this.airedTimeline = c.tl;
-      this.airedItem = c.item;
+      // The clip viewers are watching just changed. Nothing else announces
+      // this: status/queue/seek events all fire at the moment the ENCODER
+      // moves on, which is a buffer earlier, so without this the panel kept
+      // showing the previous episode's title for the whole of the next one.
+      if (c.item !== this.airedItem) {
+        this.airedItem = c.item;
+        this.emit('nowplaying', this.snapshot());
+      }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
       if (!ok) {
