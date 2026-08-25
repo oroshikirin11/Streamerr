@@ -36,7 +36,7 @@ import { EventEmitter } from 'events';
 import { join } from 'path';
 import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
-import { BACKENDS, audioArgs, scaleFilter } from './encoders.js';
+import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 
 /**
@@ -801,6 +801,14 @@ export class PipelinePlayout extends EventEmitter {
       }
       this.emit('crashed', { code, stderr: lastLines(stderr, 6) });
     });
+
+    // Whatever the bank holds is for THIS publisher — drain it now. The
+    // drain otherwise only runs on the next feed, and when the bank filled
+    // before the publisher existed (the ramp burst at go-live does exactly
+    // this), the feeder is parked on backpressure waiting for the drain:
+    // a deadlock where the publisher sits at 0 KB until an unrelated chunk
+    // completion kicks the pipeline, if one ever comes.
+    this._bankDrain();
   }
 
   // ── source ───────────────────────────────────────────────────────────
@@ -931,6 +939,7 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _bankResume() {
+    if (process.env.JSR_TRACE && this._bankRoom) this.emit('log', `[trace] sink resumed bank=${this._bankBytes}\n`);
     // A chunk writer parked because the bank was full.
     if (this._bankRoom && (this._bankBytes ?? 0) < this._bankMax * 0.9) {
       const cb = this._bankRoom;
@@ -1269,6 +1278,7 @@ export class PipelinePlayout extends EventEmitter {
       workers,
       holdUntilReady: cover,
       workDir: join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`),
+      tsOffsetOf: (start) => this._clipBase + (start - offset),
       buildArgs: ({ start, dur, out }) => buildChunkArgs({
         srcPath: item.srcPath,
         start,
@@ -1292,8 +1302,34 @@ export class PipelinePlayout extends EventEmitter {
     // delay or a byte threshold: the condition is that the content
     // actually exists.
     sched.on('ready', () => {
-      if (this.publisher || this._stopping || this.scheduler !== sched) return;
-      this.emit('log', '[chunks] two chunks encoded — connecting\n');
+      if (this._stopping || this.scheduler !== sched) return;
+      // Mid-broadcast recovery: the card has covered the encode window and
+      // real content is about to flow. Kill it BEFORE the first delivery
+      // and shift every chunk to land just past it — the chunks were baked
+      // before the card ran, and splicing them at their baked positions
+      // steps the stream backwards by the card's whole duration, which the
+      // publisher's -re pacer answers by sleeping exactly that long. The
+      // margin covers the card's progress-report cadence (500ms, so its
+      // true content end can exceed the timeline by up to that much),
+      // rounded onto the audio grid; the seam becomes a small FORWARD gap,
+      // which the pacer reads straight through.
+      if (this.holding && this.source) {
+        const h = this.source;
+        this.source = null;
+        this.holding = false;
+        this._srcGen = (this._srcGen ?? 0) + 1;
+        h.stdout?.removeAllListeners?.('data');
+        try { h.stdout?.resume?.(); } catch { /* gone */ }
+        try { h.kill('SIGKILL'); } catch { /* gone */ }
+        sched.setShift(onAudioGrid(
+          Math.max(0, this.timeline - this._clipBase) + 0.576,
+        ));
+        this.emit('discontinuity');
+        this.emit('log', '[cover] card released — content shifted '
+          + `${sched.shift.toFixed(3)}s to follow it\n`);
+      }
+      if (this.publisher) return;
+      this.emit('log', '[chunks] cushion encoded — connecting\n');
       this._spawnPublisher();
     });
     // Chunk workers that keep failing must end the broadcast rather than
@@ -1305,10 +1341,12 @@ export class PipelinePlayout extends EventEmitter {
       this.stop();
     });
     sched.on('chunk', ({ start }) => {
+      if (this.scheduler !== sched) return;   // superseded mid-delivery
       // Position is where the newest delivered chunk begins; the publisher is
       // still paying it out, so this leads the viewer by up to one chunk.
       this.position = start;
-      this.timeline = this._clipBase + (start - offset) + chunkSeconds;
+      this.timeline = this._clipBase + (start - offset) + chunkSeconds
+        + (sched.shift || 0);
       this.emit('progress', {
         position: this.position, speed: sched.speed(), drops: 0,
       });
@@ -1364,6 +1402,10 @@ export class PipelinePlayout extends EventEmitter {
           h.stdout?.removeAllListeners?.('data');
           try { h.stdout?.resume?.(); } catch { /* gone */ }
           try { h.kill('SIGKILL'); } catch { /* gone */ }
+          // Safety net: ready normally releases the card first (and sets
+          // the placement shift); this catches a card that somehow
+          // survived to the first delivery.
+          this.emit('discontinuity');
         }
         if (this.status === 'starting') {
           // Same moment the streaming path claims 'running': the first
@@ -1375,6 +1417,7 @@ export class PipelinePlayout extends EventEmitter {
         }
         this._sawBlock = true;
         if (this._bankFeed(chunk)) return cb();
+        if (process.env.JSR_TRACE) this.emit('log', `[trace] sink parked bank=${this._bankBytes}\n`);
         this._bankRoom = cb;      // released by _bankResume
         return undefined;
       },

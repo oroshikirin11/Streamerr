@@ -188,9 +188,16 @@
     );
     player.attachMediaElement(video);
     player.on(mpegts.Events.ERROR, () => retry(2000));
+    // The stream parsed — this connection reached real data, so the next
+    // resync is not a failure to back off from. onplaying alone cannot be
+    // the reset: autoplay policy can hold playback while data flows, and a
+    // splice storm (pause spam, seeks) then ratchets the backoff to 30s
+    // with no successful play to clear it — the preview lagging the actual
+    // Owncast stream by an entire minute was this counter, stuck high.
+    player.on(mpegts.Events.MEDIA_INFO, () => { attempts = 0; });
     // A clean close is the server resyncing us across a stream splice
     // (seek, track change, episode boundary) — come back quickly.
-    player.on(mpegts.Events.LOADING_COMPLETE, () => retry(700));
+    player.on(mpegts.Events.LOADING_COMPLETE, () => retry(300));
     player.load();
     tryPlay();
     wdFrames = 0;

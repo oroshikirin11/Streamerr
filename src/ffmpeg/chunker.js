@@ -25,7 +25,7 @@
  * playback runs one chunk-length behind. Seeking discards the buffer.
  */
 
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import { EventEmitter } from 'events';
 import { createReadStream, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -55,7 +55,7 @@ export class ChunkScheduler extends EventEmitter {
   constructor({
     srcPath, startOffset = 0, duration = null,
     chunkSeconds = 20, workers = 3, workDir, buildArgs,
-    holdUntilReady = false,
+    holdUntilReady = false, tsOffsetOf = null,
   }) {
     super();
     // Deliver nothing until two chunks are in hand ('ready'). Mid-broadcast
@@ -65,6 +65,13 @@ export class ChunkScheduler extends EventEmitter {
     // whole of chunk 1's encode. One to send and one in hand is the same
     // rule going on air uses, for the same reason.
     this.holdUntilReady = holdUntilReady;
+    /**
+     * Placement correction applied at delivery, in seconds — see setShift.
+     * Zero means chunks are streamed exactly as encoded.
+     */
+    this.shift = 0;
+    /** Baked absolute placement of a chunk, from the pipeline. */
+    this.tsOffsetOf = tsOffsetOf;
     this.srcPath = srcPath;
     this.startOffset = startOffset;
     this.duration = duration;
@@ -87,30 +94,38 @@ export class ChunkScheduler extends EventEmitter {
     this._done = [];
   }
 
-  /** The short opening chunk, on the same audio-frame grid as the rest. */
+  /** The short ramp chunk, on the same audio-frame grid as the rest. */
   _firstSize() {
     return Math.min(this.chunkSeconds, onAudioGrid(FIRST_CHUNK_SECONDS));
   }
 
+  /**
+   * How many opening chunks are short.
+   *
+   * Going live — and coming back after a seek or resume — is gated on one
+   * full chunkSeconds of encoded content. A single 20s chunk cannot finish
+   * faster than one worker can encode 20 seconds, no matter how many other
+   * cores sit idle; on an N100 that put minutes of card on screen after
+   * every seek. The same cushion cut as SHORT chunks spreads across the
+   * whole worker pool and finishes in a fraction of the wall time. After
+   * the ramp, chunks return to full size for fewer seams.
+   */
+  _rampCount() {
+    const first = this._firstSize();
+    return first >= this.chunkSeconds ? 1 : Math.ceil(this.chunkSeconds / first);
+  }
+
   /** Absolute position in the clip where chunk `i` starts. */
   _startOf(i) {
-    // Offsets follow the sizes above: chunk 0 is short, the rest full.
-    if (i === 0) return this.startOffset;
-    return this.startOffset + this._firstSize() + (i - 1) * this.chunkSeconds;
+    const first = this._firstSize();
+    const ramp = Math.min(i, this._rampCount());
+    return this.startOffset + ramp * first
+      + Math.max(0, i - this._rampCount()) * this.chunkSeconds;
   }
 
   /** How long chunk `i` should be, clipped to the end of the file. */
-  /**
-   * The first chunk is deliberately short.
-   *
-   * Nothing reaches the publisher until a whole chunk has finished
-   * encoding, so a 20s chunk means 20s+ of silence on a connection
-   * Owncast drops after 10. Getting the first few seconds out quickly
-   * puts the stream on air, and the bank covers the gap while the
-   * full-size chunks behind it catch up.
-   */
   _durOf(i) {
-    const size = i === 0 ? this._firstSize() : this.chunkSeconds;
+    const size = i < this._rampCount() ? this._firstSize() : this.chunkSeconds;
     if (this.duration == null) return size;
     const remaining = this.duration - this._startOf(i);
     return Math.min(size, Math.max(0, remaining));
@@ -192,9 +207,15 @@ export class ChunkScheduler extends EventEmitter {
         // handed a chunk without the next one already encoded. Two
         // finished chunks means one to send and one in hand.
         this._encoded = (this._encoded ?? 0) + 1;
+        this._encodedSeconds = (this._encodedSeconds ?? 0) + this._durOf(index);
         this._done.push({ at: Date.now(), content: this._durOf(index) });
         if (this._done.length > 64) this._done.shift();
-        if (!this._announcedReady && (this._encoded >= 2 || this.finished)) {
+        // Ready means a full chunkSeconds of CONTENT is in hand — however
+        // many chunks that took. The old two-chunk rule measured the same
+        // cushion, but through one full-size chunk whose encode time no
+        // amount of parallelism could shorten.
+        if (!this._announcedReady
+            && (this._encodedSeconds >= this.chunkSeconds || this.finished)) {
           this._announcedReady = true;
           this.emit('ready');
         }
@@ -204,6 +225,49 @@ export class ChunkScheduler extends EventEmitter {
       }
       this._fill();
       this._drain();
+    });
+  }
+
+  /**
+   * Chunks are placed on the output timeline AT ENCODE TIME, but while a
+   * cover card is on air the timeline moves on without them. Splicing them
+   * in at their baked positions then steps BACKWARDS by the card's whole
+   * duration — and the publisher's -re pacer, reading timestamps from the
+   * past, concludes it is ahead of schedule and sleeps for exactly that
+   * long. Measured directly: a 7.5s card produced a 7.1s hole in the
+   * bytes reaching the server; on slow hardware the card runs minutes,
+   * and so did the stall.
+   *
+   * The shift moves every remaining chunk forward to land just past the
+   * card instead: a copy-only remux per chunk, no re-encode, ~50ms. The
+   * seam becomes a small FORWARD gap, which the pacer treats as lag and
+   * reads through at once.
+   */
+  setShift(seconds) {
+    this.shift = Math.max(0, Number(seconds) || 0);
+  }
+
+  /** Deliverable path for a chunk: re-stamped when a shift is set. */
+  _deliverable(record, cb) {
+    if (!this.shift || typeof this.tsOffsetOf !== 'function') return cb(record.out);
+    const base = this.tsOffsetOf(this._startOf(record.index));
+    const shifted = record.out.replace(/\.ts$/, '.shift.ts');
+    execFile('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      '-i', record.out,
+      '-c', 'copy', '-muxdelay', '0', '-muxpreload', '0',
+      '-output_ts_offset', (base + this.shift).toFixed(3),
+      '-mpegts_flags', '+resend_headers+initial_discontinuity',
+      '-f', 'mpegts', shifted,
+    ], (err) => {
+      if (err) {
+        // Deliver unshifted rather than not at all: a backwards seam
+        // stalls the pacer for the card period, but silence kills the
+        // broadcast outright.
+        this.emit('warn', `restamp of chunk ${record.index} failed — delivering as baked`);
+        return cb(record.out);
+      }
+      cb(shifted);
     });
   }
 
@@ -251,6 +315,7 @@ export class ChunkScheduler extends EventEmitter {
   _drain() {
     if (this._writing || !this.running) return;
     if (this.holdUntilReady && !this._announcedReady) return;
+    if (process.env.JSR_TRACE) this.emit('warn', `[trace] drain: next=${this.nextToWrite} done=${this.chunks.get(this.nextToWrite)?.done ?? 'none'}`);
 
     const next = this.chunks.get(this.nextToWrite);
     if (!next || !next.done) {
@@ -284,17 +349,26 @@ export class ChunkScheduler extends EventEmitter {
     this._failStreak = 0;
 
     this._writing = true;
-    const rs = createReadStream(next.out);
-    rs.on('error', () => { this._writing = false; safeUnlink(next.out); this._drain(); });
-    rs.on('end', () => {
-      this._writing = false;
-      safeUnlink(next.out);
-      this.emit('chunk', { index: next.index, start: this._startOf(next.index) });
-      this._fill();
-      this._drain();
+    this._deliverable(next, (path) => {
+      if (!this.running) { this._writing = false; return; }
+      const rs = createReadStream(path);
+      const cleanup = () => { safeUnlink(path); if (path !== next.out) safeUnlink(next.out); };
+      rs.on('error', () => { this._writing = false; cleanup(); this._drain(); });
+      rs.on('end', () => {
+        this._writing = false;
+        cleanup();
+        // A stopped scheduler's in-flight stream still ends — but its
+        // 'chunk' must not fire: the pipeline computes the live timeline
+        // from these, and a stale one lands with the NEXT scheduler's
+        // base, inflating the timeline by roughly the seek distance.
+        if (!this.running) return;
+        this.emit('chunk', { index: next.index, start: this._startOf(next.index) });
+        this._fill();
+        this._drain();
+      });
+      // end:false — the publisher must outlive every chunk.
+      rs.pipe(this._sink, { end: false });
     });
-    // end:false — the publisher must outlive every chunk.
-    rs.pipe(this._sink, { end: false });
   }
 }
 
