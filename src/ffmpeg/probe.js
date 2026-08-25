@@ -256,7 +256,23 @@ export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width 
  */
 export async function pickPillarboxGraph({
   device = '/dev/dri/renderD128', width = 1920, height = 1080, rect,
+  profile = null,
 } = {}) {
+  // The probe must encode the way production encodes. Measured on the N100:
+  // the pad-overlay shape passed a one-frame probe with default encoder
+  // settings, then failed instantly in production with -22 — the difference
+  // was the encoder configuration (CBR, bufsize, -bf 0). Same args, same
+  // verdict, or the probe answers a different question than the one asked.
+  let encArgs = ['-c:v', 'h264_vaapi', '-b:v', '2M'];
+  if (profile) {
+    try {
+      encArgs = [...BACKENDS.vaapi.encoderArgs({
+        ...profile,
+        fps: Number(profile.fps) || 30,
+        gopSeconds: Number(profile.gopSeconds) || 2,
+      }), '-async_depth', '4'];
+    } catch { /* fall back to the generic encode */ }
+  }
   const { tmpdir } = await import('os');
   const { join } = await import('path');
   const { existsSync, rmSync } = await import('fs');
@@ -343,7 +359,7 @@ export async function pickPillarboxGraph({
         '-hwaccel_device', 'va', '-i', src,
         ...cand.inputs,
         '-filter_complex', cand.graph,
-        '-map', '[v]', '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '2M', out,
+        '-map', '[v]', '-frames:v', '1', ...encArgs, out,
       ], { stdio: 'ignore' });
       const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 30_000);
       c.on('error', () => { clearTimeout(t); res(false); });

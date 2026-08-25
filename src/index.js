@@ -470,6 +470,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
           globalThis.__barsGraph[key] = await pickPillarboxGraph({
             device: profile.device,
             width: profile.width, height: profile.height, rect,
+            profile,
           });
           console.log(`pillarbox+subtitle graph for ${key}: `
             + `${globalThis.__barsGraph[key] ?? 'none — burning on the CPU'}`);
