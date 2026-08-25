@@ -216,6 +216,15 @@ export class PipelinePlayout extends EventEmitter {
 
   _checkHealth() {
     if (this.status !== 'running' || !this.source) return;
+    // A source paused for backpressure is not stalled — it is doing exactly
+    // what it was told. ffmpeg reports no progress while its stdout is
+    // paused, so without this the watchdog kills every source that encodes
+    // faster than realtime (which is most of them) the moment the bank
+    // fills, and the broadcast churns through respawns forever.
+    if (this._srcPaused) {
+      this._lastBlockAt = Date.now();
+      return;
+    }
     const silent = Date.now() - (this._lastBlockAt ?? Date.now());
     // A source that has not produced its FIRST block yet is starting, not
     // stalled — huge files over SMB need many seconds to open, and the
@@ -286,7 +295,7 @@ export class PipelinePlayout extends EventEmitter {
         const tail = graceful ? (this._bank ?? []) : [];
         this._bank = [];
         this._bankBytes = 0;
-        for (const c of tail) p.stdin.write(c);
+        for (const c of tail) p.stdin.write(c.data);
         // Closing stdin lets the publisher flush and close the RTMP session
         // cleanly rather than being cut off mid-packet.
         p.stdin.end();
@@ -315,6 +324,10 @@ export class PipelinePlayout extends EventEmitter {
   seek({ delta = 0, position = null } = {}) {
     if (!this.current) throw new Error('Nothing playing');
 
+    // Flush first: it rewinds the playhead to what has aired, and a
+    // relative skip has to count from there or +30 lands a bankful further
+    // ahead than the viewer expects.
+    this._bankFlush();
     let next = position != null ? Number(position) : this.position + Number(delta);
     next = Math.max(0, next);
     if (this.current.duration) {
@@ -322,7 +335,6 @@ export class PipelinePlayout extends EventEmitter {
     }
 
     // Restart only the source; the publisher and its connection are untouched.
-    this._bankFlush();
     this._play(this.current.item, next, { duration: this.current.duration });
     this.emit('seeked', { position: next });
     return next;
@@ -361,9 +373,11 @@ export class PipelinePlayout extends EventEmitter {
       this._extract(item).finally(() => {
         if (this._stopping || this._selToken !== tok) return;
         if (this.current?.item !== item || this.status !== 'running') return;
-        const pos = this.position;   // captured now — playback moved on
+        // Flush first — it rewinds the playhead to the last aired moment —
+        // then read the position, so the new track picks up exactly where
+        // the picture is rather than where the encoder had run ahead to.
         this._bankFlush();
-        this._play(item, pos, { duration: dur });
+        this._play(item, this.position, { duration: dur });
       });
     }
     this.emit('selection', selection);
@@ -451,7 +465,11 @@ export class PipelinePlayout extends EventEmitter {
   _bankPush(src, chunk) {
     if (this.source !== src) return;   // superseded mid-flight
     this._bank ??= [];
-    this._bank.push(chunk);
+    // Each chunk carries the playhead it was encoded at, so we always know
+    // how far viewers have actually got — the encoder runs up to a bank
+    // ahead of them, and every restart has to resume from what they saw,
+    // not from what was encoded.
+    this._bank.push({ data: chunk, pos: this.position, tl: this.timeline });
     this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
     // Backpressure moves from the OS pipe to here: past the cap the source
     // pauses, and resumes once half the bank has aired.
@@ -469,9 +487,11 @@ export class PipelinePlayout extends EventEmitter {
     this._bankDraining = true;
     while (this._bank?.length) {
       const c = this._bank.shift();
-      this._bankBytes -= c.length;
+      this._bankBytes -= c.data.length;
+      this.aired = c.pos;
+      this.airedTimeline = c.tl;
       let ok = false;
-      try { ok = w.write(c); } catch { break; /* publisher died mid-write */ }
+      try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
       if (!ok) {
         w.once('drain', () => {
           this._bankDraining = false;
@@ -493,13 +513,33 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   /**
-   * Drop everything encoded but not yet aired. Called on every user-visible
-   * jump — seek, track change, skip, pause — so the action takes effect now
-   * rather than after the bank plays out.
+   * Drop everything encoded but not yet aired, and rewind the playhead to
+   * the last moment viewers actually saw.
+   *
+   * Called on every user-visible jump — seek, track change, pause — so the
+   * action takes effect now rather than after the bank plays out. The
+   * rewind is the half that is easy to forget: discarding the bank throws
+   * away real content, so without moving the playhead back to `aired` the
+   * next source resumes a bankful LATER than the picture, and viewers see
+   * the stream jump forward by however many seconds were buffered. That is
+   * the "changing subtitles skips a few seconds" cut.
    */
   _bankFlush() {
     this._bank = [];
     this._bankBytes = 0;
+    if (this.aired != null && this.aired < this.position) {
+      this.position = this.aired;
+    }
+    // The OUTPUT timeline has to rewind with it. `timeline` counts encoded
+    // seconds, and -output_ts_offset starts each source from it — so after
+    // discarding a bankful, a timeline left at the encoded value hands the
+    // publisher a stream whose timestamps jump forward by exactly the
+    // discarded amount. The content gap and the timestamp gap are two
+    // halves of the same mistake; the local-file playout test catches this
+    // one as an unreadable output.
+    if (this.airedTimeline != null && this.airedTimeline < this.timeline) {
+      this.timeline = this.airedTimeline;
+    }
     this._bankResume();
   }
 
@@ -739,6 +779,9 @@ export class PipelinePlayout extends EventEmitter {
 
   _spawnSource(args, { kind }) {
     this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
+    // Backpressure state is per-process: carrying a stale `paused` flag into
+    // a new source means the bank cap is never applied to it again.
+    this._srcPaused = false;
     this._sawBlock = false;
     this._lastBlockAt = Date.now();
     const startedAt = Date.now();
