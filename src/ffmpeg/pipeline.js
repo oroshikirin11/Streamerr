@@ -1276,6 +1276,14 @@ export class PipelinePlayout extends EventEmitter {
     const sink = new Writable({
       highWaterMark: 1 << 20,
       write: (chunk, _enc, cb) => {
+        // Superseded mid-flight. A skip flushes the bank and then starts
+        // the next clip, but this scheduler keeps writing until it is
+        // stopped — and those bytes would land AFTER the discard, in
+        // front of the new source, to be decoded against its timestamps.
+        // That is the "timestamp discontinuity" then h264 reference
+        // overflow then frozen picture seen when skipping mid-clip.
+        // _bankPush has always had this guard; the chunk sink had not.
+        if (this.scheduler !== sched || this._stopping) return cb();
         if (this.status === 'starting') {
           // Same moment the streaming path claims 'running': the first
           // bytes on their way out. Until this the watchdog stays off.
@@ -1745,6 +1753,20 @@ export class PipelinePlayout extends EventEmitter {
    * @returns {boolean} whether the skip happened
    */
   skip() {
+    // "Start now" while a pre-show or interval card is on air. Without
+    // clearing the pin, _advance sees the same future time and simply
+    // starts another card — the button appeared to do nothing. The
+    // off-air branch below already did this; the card path did not.
+    if (this.current?.item?.countdown) {
+      const first = this.queue[0];
+      if (first) {
+        delete first.startAt;
+        delete first.breakOffline;
+      }
+      this._bankFlush();
+      this._advance();
+      return true;
+    }
     if (this._break) {
       // "Go live now" means NOW: without clearing the pin, the resume
       // advances, sees the same future time, and dives straight back
