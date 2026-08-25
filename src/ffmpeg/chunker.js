@@ -26,6 +26,9 @@ import { EventEmitter } from 'events';
 import { createReadStream, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
+/** Seconds in the opening chunk — small enough to beat Owncast's deadline. */
+const FIRST_CHUNK_SECONDS = 5;
+
 export class ChunkScheduler extends EventEmitter {
   /**
    * @param {object} o
@@ -64,14 +67,28 @@ export class ChunkScheduler extends EventEmitter {
 
   /** Absolute position in the clip where chunk `i` starts. */
   _startOf(i) {
-    return this.startOffset + i * this.chunkSeconds;
+    // Offsets follow the sizes above: chunk 0 is short, the rest full.
+    if (i === 0) return this.startOffset;
+    const first = Math.min(this.chunkSeconds, FIRST_CHUNK_SECONDS);
+    return this.startOffset + first + (i - 1) * this.chunkSeconds;
   }
 
   /** How long chunk `i` should be, clipped to the end of the file. */
+  /**
+   * The first chunk is deliberately short.
+   *
+   * Nothing reaches the publisher until a whole chunk has finished
+   * encoding, so a 20s chunk means 20s+ of silence on a connection
+   * Owncast drops after 10. Getting the first few seconds out quickly
+   * puts the stream on air, and the bank covers the gap while the
+   * full-size chunks behind it catch up.
+   */
   _durOf(i) {
-    if (this.duration == null) return this.chunkSeconds;
+    const size = i === 0 ? Math.min(this.chunkSeconds, FIRST_CHUNK_SECONDS)
+      : this.chunkSeconds;
+    if (this.duration == null) return size;
     const remaining = this.duration - this._startOf(i);
-    return Math.min(this.chunkSeconds, Math.max(0, remaining));
+    return Math.min(size, Math.max(0, remaining));
   }
 
   _isLast(i) {

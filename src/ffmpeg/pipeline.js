@@ -838,7 +838,6 @@ export class PipelinePlayout extends EventEmitter {
     while (this._bank?.length) {
       const c = this._bank.shift();
       this._bankBytes -= c.data.length;
-      if (c.pos !== this.aired) this._lastAiredAt = Date.now();
       this.aired = c.pos;
       this.airedTimeline = c.tl;
       // The clip viewers are watching just changed. Nothing else announces
@@ -864,6 +863,15 @@ export class PipelinePlayout extends EventEmitter {
       }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
+      // Bytes the publisher accepted — THAT is the liveness signal the
+      // 20s guard wants. It used to key off the playhead moving instead,
+      // which holds on the streaming path (position advances with every
+      // progress block) but not on the chunked one, where position only
+      // moves once per chunk: twenty seconds into a twenty-second chunk
+      // the guard concluded nothing had aired and killed a healthy
+      // broadcast. A wedged publisher still trips it, because a publisher
+      // that has stopped draining stops accepting writes.
+      this._lastAiredAt = Date.now();
       this._published = (this._published ?? 0) + c.data.length;
       // Mirror of the publisher's input for preview windows: the exact bytes
       // going out, tapped after the write so a dead publisher mirrors
