@@ -740,6 +740,15 @@ export class PipelinePlayout extends EventEmitter {
       // they can and are throttled by pipe backpressure — chunk workers must,
       // since the whole point is finishing ahead of the playhead.
       '-re',
+      // Splice seams (skip, pause, chunk flush) deliberately pad the last
+      // partial packet with zeros, on the assumption the demuxer drops one
+      // bad packet. That drop only happens with this flag — by default
+      // ffmpeg FORWARDS packets it has flagged corrupt, and a zero-padded
+      // payload can parse as a PES header with a garbage timestamp. On air
+      // that produced a 158s offset applied to audio alone: from that seam
+      // on, A/V input offsets diverged, audio was discarded as late, and
+      // the server dropped the starved stream minutes later.
+      '-fflags', '+discardcorrupt',
       '-f', 'mpegts', '-i', 'pipe:0',
       '-c', 'copy',
       // FLV's codec ids for AVC and AAC. Copying from MPEG-TS carries the TS
