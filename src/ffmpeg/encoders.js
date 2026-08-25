@@ -173,9 +173,54 @@ export const BACKENDS = {
 };
 
 /** Audio is identical across backends — always software AAC. */
-export const audioArgs = (p) => [
+/**
+ * Chunk boundaries must land on a whole number of AAC frames.
+ *
+ * AAC codes 1024 samples at a time, so at 48 kHz a frame is 1024/48000s and
+ * the encoder can only end on a multiple of it. Ask for a round 20s chunk
+ * and it pads out to 20.035 while the next chunk is placed at exactly 20.0,
+ * so every seam steps 35ms BACKWARDS in audio — the non-monotonic DTS and
+ * `Packet corrupt` that showed up once per chunk, forever.
+ *
+ * Three AAC frames come to 0.064s exactly, so quantizing to that keeps the
+ * boundaries exact in the 3-decimal form the ffmpeg arguments use — at finer
+ * granularity the rounding in `-t` would reintroduce the very drift this
+ * removes.
+ */
+export const CHUNK_GRID = 0.064;
+
+/** Nearest chunk boundary that an AAC encoder can actually hit. */
+export const onAudioGrid = (seconds) => Number(
+  (Math.max(1, Math.round(seconds / CHUNK_GRID)) * CHUNK_GRID).toFixed(3),
+);
+
+/** One AAC frame at 48 kHz. */
+export const AAC_FRAME = 1024 / 48000;
+
+/**
+ * `trimTo` bounds a chunk's audio so it abuts its neighbours exactly.
+ *
+ * The trim is one frame SHORT of the window on purpose. An AAC encoder
+ * emits a priming frame ahead of the audio proper, so a chunk asked for
+ * exactly its window comes back one frame long and overlaps the chunk
+ * placed after it. Every chunk is primed identically, so giving the
+ * encoder one frame less input leaves the whole stream uniformly shifted
+ * by that frame — and uniform is the point: the seams line up.
+ *
+ * `head` is the exception that proves it. A chunk at offset zero is not
+ * seeked, so its priming frame is clamped up to zero rather than sitting
+ * one frame negative like every other chunk's. It is the one chunk NOT
+ * shifted, and it needs the extra frame taken off to match.
+ */
+export const audioArgs = (p, { trimTo = null, head = false } = {}) => [
   '-af', 'aresample=async=1:first_pts=0,'
-       + 'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+       + 'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo'
+       + (trimTo
+         ? `,atrim=end=${Math.max(
+           AAC_FRAME, Number(trimTo) - AAC_FRAME * (head ? 2 : 1),
+         ).toFixed(6)}`
+           + ',asetpts=N/SR/TB'
+         : ''),
   '-c:a', 'aac',
   '-b:a', p.audioBitrate ?? '160k',
   '-ar', '48000',

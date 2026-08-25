@@ -2124,13 +2124,19 @@ export function buildChunkArgs({
     ...filterArgs,
     '-map', `0:a:${audioIdx}?`,
     ...be.encoderArgs(profEff),
-    ...audioArgs(profile),
+    // Bounded to the chunk window so it cannot overlap its neighbours.
+    ...audioArgs(profile, { trimTo: dur, head: Number(start) <= 0 }),
     // Absolute placement on the output timeline. This is what lets chunks be
     // produced out of order and still join exactly.
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-fps_mode', 'cfr',
     '-muxdelay', '0', '-muxpreload', '0',
-    '-mpegts_flags', '+resend_headers',
+    // Each chunk is an independent TS file, so its continuity counters start
+    // over. Byte-joining them steps the counter at every seam and a demuxer
+    // reports the packet there as corrupt — which is what the `Packet
+    // corrupt` once per chunk actually was. The discontinuity indicator is
+    // the container's own way of saying the jump is intentional.
+    '-mpegts_flags', '+resend_headers+initial_discontinuity',
     '-f', 'mpegts', out,
   ];
 }
