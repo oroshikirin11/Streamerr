@@ -104,6 +104,10 @@ const PUBLISH_FAIL_MS = 5_000;
  * byte cap is derived from the configured bitrate to land at ~BANK_SECONDS
  * regardless of quality settings.
  */
+/** Window for the speed figure shown in the UI, and for the slow warning. */
+const SPEED_WINDOW_MS = 30_000;
+const SLOW_WINDOW_MS = 6_000;
+
 const BANK_SECONDS = 15;
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
 const BANK_MAX_BYTES = 48 * 1024 * 1024;
@@ -506,7 +510,14 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _bankResume() {
-    if (this._srcPaused && (this._bankBytes ?? 0) < this._bankMax / 2) {
+    // Resume as soon as there is meaningful room, not at half empty. Wide
+    // hysteresis made the encoder work in long bursts — idle while the bank
+    // drained to 50%, then a sprint to refill — and a burst cycle that
+    // large shows up in any speed reading as a swing between well under and
+    // well over realtime, depending on which phase you sampled. Keeping the
+    // bank near full couples the encoder to the publisher's actual
+    // consumption, which is what the figure should reflect.
+    if (this._srcPaused && (this._bankBytes ?? 0) < this._bankMax * 0.9) {
       this._srcPaused = false;
       try { this.source?.stdout?.resume(); } catch { /* gone */ }
     }
@@ -808,9 +819,19 @@ export class PipelinePlayout extends EventEmitter {
     // up as it is diluted. That reads as "the machine is warming up" when
     // nothing is warming up. Derive the instantaneous rate from consecutive
     // progress blocks instead, lightly smoothed so it is readable.
-    let prevOut = null;
-    let prevWall = null;
-    let ema = null;
+    // Samples of (wall clock, encoded position). A rolling average over a
+    // window is both steadier to read and still honest — unlike ffmpeg's
+    // own cumulative figure, a bad first minute stops counting once it
+    // leaves the window.
+    const samples = [];
+    /** Mean encode rate over roughly the last `ms`, or null if too new. */
+    const rateOver = (ms, wall, out) => {
+      let i = samples.length - 1;
+      while (i > 0 && wall - samples[i].wall < ms) i -= 1;
+      const span = wall - samples[i].wall;
+      if (span < 900) return null;
+      return (out - samples[i].out) / (span / 1000);
+    };
 
     parser.on('block', (b) => {
       if (b.outTimeUs == null) return;
@@ -833,29 +854,30 @@ export class PipelinePlayout extends EventEmitter {
       }
 
       const wall = Date.now();
-      if (prevOut != null && wall - prevWall > 200) {
-        const inst = (out - prevOut) / ((wall - prevWall) / 1000);
-        if (inst >= 0 && Number.isFinite(inst)) {
-          ema = ema == null ? inst : ema * 0.7 + inst * 0.3;
-        }
-        prevOut = out; prevWall = wall;
-      } else if (prevOut == null) {
-        prevOut = out; prevWall = wall;
+      samples.push({ wall, out });
+      while (samples.length > 2 && wall - samples[0].wall > SPEED_WINDOW_MS) {
+        samples.shift();
       }
+      // Shown to the user: a 30s mean. The instantaneous rate swings with
+      // every heavy subtitle scene, which is accurate and unreadable.
       // In steady state this sits at ~1.0x by design, not by luck: the
       // publisher paces the output at realtime, so once the pipe is full
       // backpressure throttles the source. Sustained BELOW 1.0 is the
       // problem case; above 1.0 only happens while buffers fill.
-      const speed = ema == null ? b.speed : Math.round(ema * 100) / 100;
+      const avg = rateOver(SPEED_WINDOW_MS, wall, out);
+      const speed = avg == null ? b.speed : Math.round(avg * 100) / 100;
+      // Judged on a shorter window: a 30s mean would take half a minute to
+      // notice the stream dying, which is most of Owncast's patience.
+      const recent = rateOver(SLOW_WINDOW_MS, wall, out) ?? speed;
 
-      if (kind === 'clip' && speed != null) {
-        if (speed < 0.95) {
+      if (kind === 'clip' && recent != null) {
+        if (recent < 0.95) {
           slowSince ??= Date.now();
           if (!warnedSlow && Date.now() - slowSince > 8000) {
             warnedSlow = true;
-            this.emit('tooslow', { speed });
+            this.emit('tooslow', { speed: Math.round(recent * 100) / 100 });
             this.emit('warn',
-              `Encoding at ${speed}x — slower than realtime, so the stream `
+              `Encoding at ${Math.round(recent * 100) / 100}x — slower than realtime, so the stream `
               + 'will stall. Burning subtitles is usually the cause; try a '
               + 'lighter subtitle track, a lower output resolution, or turn '
               + 'subtitles off for this title.');
