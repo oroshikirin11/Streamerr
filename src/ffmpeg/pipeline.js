@@ -649,6 +649,15 @@ export class PipelinePlayout extends EventEmitter {
     // and dying without saying why is the worst version of it.
     let slowSince = null;
     let warnedSlow = false;
+    // ffmpeg's own `speed=` is cumulative — encoded time over wall time since
+    // the process started — so every startup cost (opening a 50 GiB remux,
+    // filter and GPU init) is averaged in forever and the figure only creeps
+    // up as it is diluted. That reads as "the machine is warming up" when
+    // nothing is warming up. Derive the instantaneous rate from consecutive
+    // progress blocks instead, lightly smoothed so it is readable.
+    let prevOut = null;
+    let prevWall = null;
+    let ema = null;
 
     parser.on('block', (b) => {
       if (b.outTimeUs == null) return;
@@ -670,14 +679,30 @@ export class PipelinePlayout extends EventEmitter {
         }
       }
 
-      if (kind === 'clip' && b.speed != null) {
-        if (b.speed < 0.95) {
+      const wall = Date.now();
+      if (prevOut != null && wall - prevWall > 200) {
+        const inst = (out - prevOut) / ((wall - prevWall) / 1000);
+        if (inst >= 0 && Number.isFinite(inst)) {
+          ema = ema == null ? inst : ema * 0.7 + inst * 0.3;
+        }
+        prevOut = out; prevWall = wall;
+      } else if (prevOut == null) {
+        prevOut = out; prevWall = wall;
+      }
+      // In steady state this sits at ~1.0x by design, not by luck: the
+      // publisher paces the output at realtime, so once the pipe is full
+      // backpressure throttles the source. Sustained BELOW 1.0 is the
+      // problem case; above 1.0 only happens while buffers fill.
+      const speed = ema == null ? b.speed : Math.round(ema * 100) / 100;
+
+      if (kind === 'clip' && speed != null) {
+        if (speed < 0.95) {
           slowSince ??= Date.now();
           if (!warnedSlow && Date.now() - slowSince > 8000) {
             warnedSlow = true;
-            this.emit('tooslow', { speed: b.speed });
+            this.emit('tooslow', { speed });
             this.emit('warn',
-              `Encoding at ${b.speed}x — slower than realtime, so the stream `
+              `Encoding at ${speed}x — slower than realtime, so the stream `
               + 'will stall. Burning subtitles is usually the cause; try a '
               + 'lighter subtitle track, a lower output resolution, or turn '
               + 'subtitles off for this title.');
@@ -688,7 +713,7 @@ export class PipelinePlayout extends EventEmitter {
       }
 
       this.emit('progress', {
-        position: this.position, speed: b.speed, drops: b.dropFrames,
+        position: this.position, speed, drops: b.dropFrames,
       });
     });
     s.stdio[3]?.on('data', (d) => parser.push(d));
@@ -909,21 +934,63 @@ export function buildSourceArgs({
       // and h264_vaapi accepts only NV12 — without the GPU-side conversion
       // the encoder dies with -22 (Invalid argument) on every 10-bit file.
       : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
-    // overlay_vaapi must be the LAST filter before the encoder. Measured on
-    // the N100: scale→overlay→encode works, scale→pad→encode works, but
-    // routing overlay_vaapi's output through ANY further VPP stage — another
-    // overlay, or pad_vaapi — makes h264_vaapi reject every frame with -22,
-    // so 4:3 subtitled clips ran ~20s and died without producing output.
-    // Pillarboxing therefore happens on the video BEFORE the composite, and
-    // the subtitle canvas (still rendered at the content rectangle, so ASS
-    // positioning is unaffected) is overlaid at the rectangle's offset.
-    const base = rect.bars
-      ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
-      : scalePart;
+    // The subtitle canvas is always rendered at the video's content
+    // rectangle, so ASS positioning is authored-correct; only how that
+    // composite gets placed into a pillarboxed output frame varies.
+    //
+    // Without bars there is one proven shape: scale -> overlay -> encode.
+    // WITH bars, every arrangement of pad_vaapi and overlay_vaapi that
+    // seemed obviously correct failed on some driver — silently wrong
+    // pixels on Mesa (pad_vaapi leaving green bars), a hard
+    // `h264_vaapi -22` on Intel iHD. So the shape is not chosen here: the
+    // caller probes the actual device (pickPillarboxGraph) and passes the
+    // winner, or falls back to the CPU path when the driver can do none.
+    const pad = `pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`;
+    const at = `=x=${rect.x}:y=${rect.y}`;
+    // Padding the alpha canvas costs one RGBA frame of CPU memcpy and lets
+    // the composite land at 0,0 for drivers that dislike an offset overlay.
+    const widePad = `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`;
+
+    let canvasPad = '';
+    let bgInput = [];
+    let videoChain;
+    let composite;
+    if (!rect.bars) {
+      videoChain = scalePart;
+      composite = '[b][ov]overlay_vaapi[v]';
+    } else {
+      switch (profile.barsGraph) {
+        case 'wide-canvas':
+          canvasPad = widePad;
+          videoChain = `${scalePart},${pad}`;
+          composite = '[b][ov]overlay_vaapi[v]';
+          break;
+        case 'overlay-pad':
+          videoChain = scalePart;
+          composite = `[b][ov]overlay_vaapi,${pad}[v]`;
+          break;
+        case 'overlay-scale-pad':
+          videoChain = scalePart;
+          composite = `[b][ov]overlay_vaapi,${scalePart},${pad}[v]`;
+          break;
+        case 'bg-composite':
+          videoChain = scalePart;
+          composite = `[b][ov]overlay_vaapi[vs];[2:v]hwupload[bg];`
+            + `[bg][vs]overlay_vaapi${at}[v]`;
+          bgInput = ['-f', 'lavfi', ...canvasCap, '-i',
+            `color=c=black:s=${profile.width}x${profile.height}:r=${eff.rate},format=nv12`];
+          break;
+        case 'pad-overlay':
+        default:
+          videoChain = `${scalePart},${pad}`;
+          composite = `[b][ov]overlay_vaapi${at}[v]`;
+          break;
+      }
+    }
+
     const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
-      + `setpts=PTS-STARTPTS,format=rgba,hwupload[ov];`
-      + `[0:v]${base}[b];[b][ov]overlay_vaapi`
-      + (rect.bars ? `=x=${rect.x}:y=${rect.y}` : '') + '[v]';
+      + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
+      + `[0:v]${videoChain}[b];${composite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -935,6 +1002,7 @@ export function buildSourceArgs({
       '-i', srcPath,
       '-f', 'lavfi', ...canvasCap,
       '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`,
+      ...bgInput,
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),

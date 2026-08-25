@@ -227,3 +227,178 @@ export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width 
   const [r, g, b] = px;
   return g > 150 && r > 70 && r < 190 && b > 70 && b < 190;
 }
+
+/**
+ * Which filtergraph shape can composite subtitles onto pillarboxed video.
+ *
+ * Two graph shapes were shipped for this on reasoning alone and both failed
+ * on Intel's iHD driver with `h264_vaapi ... error code: -22`, after ~20s of
+ * running and without producing a frame. What is proven, from production
+ * logs on that machine:
+ *
+ *   scale_vaapi -> overlay_vaapi -> encode          works  (16:9 + subs)
+ *   scale_vaapi -> pad_vaapi     -> encode          works  (pillarbox, no subs)
+ *   scale_vaapi -> overlay_vaapi -> pad_vaapi       FAILS
+ *   scale_vaapi -> pad_vaapi     -> overlay_vaapi   FAILS
+ *   scale_vaapi -> overlay_vaapi -> overlay_vaapi   FAILS
+ *
+ * Each stage works alone; the combination does not, and which combination is
+ * at fault cannot be settled from a driver's documentation. So ask the
+ * driver: run each candidate for one frame and keep the ones that both
+ * encode AND put the right colours in the right places. The answer is cached
+ * for the life of the process.
+ *
+ * Returns the winning shape's id, or null when the driver can do none of
+ * them — the caller then burns subtitles on the CPU, which is slower but has
+ * no such constraint.
+ *
+ * @returns {Promise<'pad-overlay'|'wide-canvas'|'overlay-pad'|'bg-composite'|null>}
+ */
+export async function pickPillarboxGraph({
+  device = '/dev/dri/renderD128', width = 1920, height = 1080, rect,
+} = {}) {
+  const { tmpdir } = await import('os');
+  const { join } = await import('path');
+  const { existsSync, rmSync } = await import('fs');
+
+  const tag = `jsr-bars-${process.pid}`;
+  const src = join(tmpdir(), `${tag}-src.mp4`);
+  const out = join(tmpdir(), `${tag}-out.mp4`);
+  const clean = () => {
+    for (const p of [src, out]) { try { rmSync(p); } catch { /* gone */ } }
+  };
+
+  // A real decoded VAAPI surface, not an hwupload: the failure being chased
+  // lives in how VPP stages hand frames to the encoder, and decoder frames
+  // come from a different pool than uploaded ones.
+  const madeSrc = await new Promise((res) => {
+    const c = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      '-f', 'lavfi', '-i', `color=c=green:s=${rect.w}x${rect.h}:r=30`,
+      '-frames:v', '3', '-c:v', 'libx264', '-preset', 'ultrafast',
+      '-pix_fmt', 'yuv420p', src,
+    ], { stdio: 'ignore' });
+    c.on('error', () => res(false));
+    c.on('close', (code) => res(code === 0));
+  });
+  if (!madeSrc || !existsSync(src)) { clean(); return null; }
+
+  const scalePart = `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12`;
+  const padPart = `pad_vaapi=${width}:${height}:${rect.x}:${rect.y}:color=black`;
+  // Half-white so a driver that ignores alpha (opaque white) is caught too.
+  const canvas = (w, h, extra = '') =>
+    ['-f', 'lavfi', '-i', `color=c=white@0.5:s=${w}x${h}:r=30${extra},format=rgba`];
+
+  const CANDIDATES = [
+    {
+      id: 'pad-overlay',
+      inputs: canvas(rect.w, rect.h),
+      graph: `[1:v]hwupload[ov];[0:v]${scalePart},${padPart}[b];`
+        + `[b][ov]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`,
+    },
+    {
+      // Same, minus the overlay offset: the canvas is padded to full size on
+      // the CPU (cheap — it is one RGBA frame) so the composite lands at 0,0.
+      // Distinguishes "pad_vaapi and overlay_vaapi cannot coexist" from
+      // "overlay_vaapi cannot take an offset".
+      id: 'wide-canvas',
+      inputs: canvas(rect.w, rect.h,
+        `,pad=${width}:${height}:${rect.x}:${rect.y}:color=black@0.0`),
+      graph: `[1:v]hwupload[ov];[0:v]${scalePart},${padPart}[b];`
+        + `[b][ov]overlay_vaapi[v]`,
+    },
+    {
+      id: 'overlay-pad',
+      inputs: canvas(rect.w, rect.h),
+      graph: `[1:v]hwupload[ov];[0:v]${scalePart}[b];`
+        + `[b][ov]overlay_vaapi,${padPart}[v]`,
+    },
+    {
+      // As above with a no-op scale between the composite and the pad. If
+      // what breaks the chain is the frame overlay_vaapi hands downstream
+      // (context, cropping, alignment), a plain scale re-normalises it.
+      id: 'overlay-scale-pad',
+      inputs: canvas(rect.w, rect.h),
+      graph: `[1:v]hwupload[ov];[0:v]${scalePart}[b];`
+        + `[b][ov]overlay_vaapi,${scalePart},${padPart}[v]`,
+    },
+    {
+      id: 'bg-composite',
+      inputs: [
+        ...canvas(rect.w, rect.h),
+        '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=30,format=nv12`,
+      ],
+      graph: `[1:v]hwupload[ov];[0:v]${scalePart}[b];[b][ov]overlay_vaapi[vs];`
+        + `[2:v]hwupload[bg];[bg][vs]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`,
+    },
+  ];
+
+  for (const cand of CANDIDATES) {
+    try { rmSync(out); } catch { /* gone */ }
+    const encoded = await new Promise((res) => {
+      const c = spawn('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+        '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi',
+        '-hwaccel_device', 'va', '-i', src,
+        ...cand.inputs,
+        '-filter_complex', cand.graph,
+        '-map', '[v]', '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '2M', out,
+      ], { stdio: 'ignore' });
+      const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 30_000);
+      c.on('error', () => { clearTimeout(t); res(false); });
+      c.on('close', (code) => { clearTimeout(t); res(code === 0); });
+    });
+    if (!encoded || !existsSync(out)) continue;
+    if (await barsAndBlendCorrect(out, width, height, rect)) {
+      clean();
+      return cand.id;
+    }
+  }
+
+  clean();
+  return null;
+}
+
+/**
+ * Does the probe frame have black pillarbox bars and a blended centre?
+ * Exit codes alone have lied on this project before — a graph can encode
+ * happily and still put the picture in the wrong place.
+ */
+async function barsAndBlendCorrect(file, width, height, rect) {
+  const COLS = 64;
+  const ROWS = 36;
+  const px = await new Promise((res) => {
+    const c = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-i', file,
+      '-vf', `scale=${COLS}:${ROWS}`, '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const bufs = [];
+    c.stdout.on('data', (d) => bufs.push(d));
+    c.on('error', () => res(null));
+    c.on('close', () => res(Buffer.concat(bufs)));
+  });
+  if (!px || px.length < COLS * ROWS * 3) return false;
+
+  const at = (col, row) => {
+    const i = (row * COLS + col) * 3;
+    return [px[i], px[i + 1], px[i + 2]];
+  };
+  const midRow = Math.floor(ROWS / 2);
+
+  // Sample well inside the left bar, if there is one.
+  const barCols = Math.floor((rect.x / width) * COLS);
+  if (barCols >= 2) {
+    const [r, g, b] = at(1, midRow);
+    if (r > 60 || g > 60 || b > 60) return false;   // bar is not black
+  }
+  const barRows = Math.floor((rect.y / height) * ROWS);
+  if (barRows >= 2) {
+    const [r, g, b] = at(Math.floor(COLS / 2), 1);
+    if (r > 60 || g > 60 || b > 60) return false;
+  }
+  // Centre: half white over green.
+  const [r, g, b] = at(Math.floor(COLS / 2), midRow);
+  return g > 130 && r > 60 && r < 200 && b > 60 && b < 200;
+}

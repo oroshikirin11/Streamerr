@@ -22,10 +22,11 @@ import {
 } from './auth.js';
 import {
   probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
+  pickPillarboxGraph,
 } from './ffmpeg/probe.js';
 import { normalizeBitrate } from './ffmpeg/encoders.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
-import { PipelinePlayout } from './ffmpeg/pipeline.js';
+import { PipelinePlayout, contentRect } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
@@ -436,6 +437,26 @@ app.post('/api/stream/start', wrap(async (req, res) => {
           { width: profile.width, height: profile.height });
       }
       profile.gpuSubs = globalThis.__alphaOk;
+
+      // Pillarboxed content needs a graph shape this driver actually
+      // supports; which one that is has to be measured, not assumed.
+      const rect = contentRect(selection.video, profile);
+      if (profile.gpuSubs && rect.bars) {
+        const key = `${rect.w}x${rect.h}@${rect.x},${rect.y}`;
+        globalThis.__barsGraph ??= {};
+        if (globalThis.__barsGraph[key] === undefined) {
+          globalThis.__barsGraph[key] = await pickPillarboxGraph({
+            device: profile.device,
+            width: profile.width, height: profile.height, rect,
+          });
+          console.log(`pillarbox+subtitle graph for ${key}: `
+            + `${globalThis.__barsGraph[key] ?? 'none — burning on the CPU'}`);
+        }
+        profile.barsGraph = globalThis.__barsGraph[key];
+        // No working GPU composite for this shape: the CPU path burns
+        // subtitles between scale and pad, which every driver can do.
+        if (!profile.barsGraph) profile.gpuSubs = false;
+      }
     }
   }
 
