@@ -314,7 +314,9 @@ export class PipelinePlayout extends EventEmitter {
     // inside the live connection, and Owncast drops a session that goes
     // quiet for 10s. Connect once there is something to send instead —
     // _bankFeed spawns the publisher when the bank has enough.
-    if (startAt != null || this._chunkWorkers() <= 1) this._spawnPublisher();
+    // Only the chunked path defers this, and it gates on its own `ready`
+    // event; every other path spawns the publisher from _spawnSource.
+    if (startAt != null) this._spawnPublisher();
     if (startAt != null && startAt - Date.now() / 1000 > 5) {
       // Scheduled start: broadcast the countdown card until the hour hits.
       // The first clip goes back on the queue — the card's natural end is a
@@ -356,6 +358,16 @@ export class PipelinePlayout extends EventEmitter {
     // while nothing reaches the server. Data piling up in the bank with
     // nothing leaving it is the tell, and it is worth failing loudly over:
     // silently "playing" to an empty stream is the worst outcome there is.
+    // This check asks whether a publisher has stopped accepting. Before one
+    // exists the question is meaningless, and answering it anyway is what
+    // killed chunked clips: the chunked path deliberately waits for two
+    // finished chunks before connecting, so on a slow clip chunk 0 lands in
+    // the bank while chunk 1 is still encoding. Bank non-empty, no
+    // publisher, _lastAiredAt frozen since startup because nothing can
+    // accept anything yet — and the broadcast was killed seconds before it
+    // would have gone live. Encode failures are the scheduler's `fatal` to
+    // report, not this one's.
+    if (!this.publisher) return;
     if ((this._bankBytes ?? 0) > 0 && this._lastAiredAt
         && Date.now() - this._lastAiredAt > 20_000) {
       // Distinguish "never got going" from "stopped mid-broadcast". A
@@ -1449,6 +1461,16 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _spawnSource(args, { kind }) {
+    // A source process implies a publisher, always. Deciding that earlier —
+    // from _chunkWorkers, before _play has resolved the geometry — was a
+    // prediction, and it could disagree with the branch actually taken: a
+    // clip whose worker count collapses to 1 once the video is known takes
+    // this path, which has no `ready` event to fall back on, and the
+    // publisher was never spawned at all. The bank then filled against a
+    // drain that bails on a missing stdin, so nothing was ever published
+    // and the only symptom was the 20s liveness guard. Tie it to the fact
+    // instead of the forecast.
+    if (!this.publisher && !this._stopping) this._spawnPublisher();
     this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
     // Every new source process is a fresh muxer: a splice in the TS stream.
     // The publisher's ffmpeg reads through it, but a browser's MSE decoder
