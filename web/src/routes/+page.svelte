@@ -27,6 +27,8 @@
   let episodes = $state([]);
   let selected = $state(new Set());
   let starting = $state(false);
+  /** How many were just appended to a running broadcast, for the hint. */
+  let queued = $state(0);
   let tracksFor = $state(null);
   // Per-broadcast track choice, picked before starting.
   let trackOverride = $state(null);
@@ -182,6 +184,9 @@
       } else {
         await api.start(ordered, trackOverride, startAtEpoch());
       }
+      // Queued behind a running broadcast: say where the air times live,
+      // because nothing else on this page points at them.
+      queued = live ? ordered.length : 0;
       selected = new Set();
       trackOverride = null;
       scheduling = false;
@@ -298,6 +303,14 @@
   </header>
 
   {#if error}<p class="err">{error}</p>{/if}
+  {#if queued}
+    <p class="queued">
+      Added {queued} to the queue.
+      <a href="/queue">Open Schedule</a> to see when each one airs, or to
+      program a time.
+      <button class="lnk" onclick={() => (queued = 0)} aria-label="Dismiss">×</button>
+    </p>
+  {/if}
 
   {#if seasons.length > 1}
     <div class="seasons">
@@ -489,6 +502,19 @@
     background: transparent; border-color: var(--border); font-size: 13px;
   }
   .tr.pick { border-color: var(--accent); color: var(--accent); }
+  .queued {
+    display: flex; align-items: center; gap: 8px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--radius);
+    padding: 8px 12px; font-size: 13px; margin: 0 0 12px;
+  }
+  .queued a { color: var(--accent); }
+  .lnk {
+    margin-left: auto; background: none; border: none; color: var(--muted);
+    cursor: pointer; padding: 0 4px; font-size: 15px; line-height: 1;
+  }
+
   .selbar {
     display: flex; align-items: center; gap: 9px;
     padding: 6px 10px; margin-bottom: 2px;

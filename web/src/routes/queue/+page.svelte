@@ -107,27 +107,57 @@
   let pinId = $state(null);
   let pinValue = $state('');
 
-  const clock = (epoch) => (epoch == null ? null : new Date(epoch * 1000)
-    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }));
+  const hhmm = (epoch) => new Date(epoch * 1000)
+    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const sameDay = (a, b) => new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
+
+  /**
+   * A long queue runs past midnight — 50 episodes is the best part of a
+   * day — so a bare HH:MM would make tomorrow 02:14 look like today's.
+   * Anything off today's date carries its weekday.
+   */
+  function clock(epoch) {
+    if (epoch == null) return null;
+    const now = Date.now() / 1000;
+    if (sameDay(epoch, now)) return hhmm(epoch);
+    return `${new Date(epoch * 1000).toLocaleDateString([], { weekday: 'short' })} ${hhmm(epoch)}`;
+  }
+
+  /** The day a pin is being typed against — the row's own, not today's. */
+  let pinBase = $state(null);
 
   function openPin(q) {
     pinId = q.id;
+    pinBase = q.startAt ?? q.at ?? Math.floor(Date.now() / 1000);
     // Seed with the time it would air anyway, so nudging is the easy case.
-    pinValue = clock(q.startAt ?? q.at) ?? '';
+    pinValue = hhmm(pinBase);
   }
 
-  /** "HH:MM" today, or tomorrow when that time has already passed. */
-  function epochFor(hhmm) {
-    const [h, m] = hhmm.split(':').map(Number);
+  /**
+   * "HH:MM" on the day this item was already going to air, so nudging an
+   * episode that falls after midnight does not yank it back to today.
+   * Never resolves into the past.
+   */
+  function epochFor(hm, base) {
+    const [h, m] = hm.split(':').map(Number);
     if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
-    const d = new Date();
+    const d = new Date((base ?? Math.floor(Date.now() / 1000)) * 1000);
     d.setHours(h, m, 0, 0);
-    if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+    while (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
     return Math.floor(d.getTime() / 1000);
   }
 
+  /** Shift a programmed time a whole day, for a multi-day marathon. */
+  async function nudgeDay(id, days) {
+    const q = status.queue.find((x) => x.id === id);
+    const base = (q?.startAt ?? q?.at ?? Math.floor(Date.now() / 1000)) + days * 86400;
+    if (base * 1000 <= Date.now()) return;
+    pinId = null;
+    await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: base } : e)));
+  }
+
   async function savePin(id) {
-    const at = pinValue ? epochFor(pinValue) : null;
+    const at = pinValue ? epochFor(pinValue, pinBase) : null;
     pinId = null;
     // An item that aired while this was open is simply gone from the list,
     // so the edit becomes a no-op instead of hitting the wrong episode.
@@ -136,6 +166,15 @@
   async function clearPin(id) {
     pinId = null;
     await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: null } : e)));
+  }
+
+  /** Gaps run from seconds to most of a day; h:mm:ss suits neither end. */
+  function fmtGap(sec) {
+    if (sec < 90) return `${Math.round(sec)}s`;
+    if (sec < 3600) return `${Math.round(sec / 60)} min`;
+    const h = Math.floor(sec / 3600);
+    const m = Math.round((sec % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
   }
 
   /** Dead air before row i, in seconds — a pin pushing past the natural end. */
@@ -297,6 +336,11 @@
   <div class="uphead">
     <h2>Up next</h2>
     {#if endsAt}<span class="muted small">ends around {clock(endsAt)}</span>{/if}
+    {#if status.queue?.length > 1}
+      <span class="muted small" style="margin-left:auto">
+        {status.queue.length} queued
+      </span>
+    {/if}
   </div>
 
   {#if !status.queue?.length}
@@ -312,19 +356,28 @@
           <!-- A programmed time the previous item cannot reach: the engine
                fills the wait with an interval card rather than starting
                early, so say so instead of leaving an unexplained jump. -->
-          <li class="gap">
+          <li class="gap" class:long={gap > 1200}>
             <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
                  stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>
-            interval card · {fmtTime(gap)}
+            interval card · {fmtGap(gap)}
+            {#if gap > 1200}
+              — viewers see a card for that long; consider stopping and
+              starting again nearer the time
+            {/if}
           </li>
         {/if}
         <li>
           {#if pinId === item.id}
-            <span class="tcell">
+            {@const target = pinValue ? epochFor(pinValue, pinBase) : null}
+            <span class="tcell edit">
               <input class="tin" type="time" bind:value={pinValue}
                      onkeydown={(e) => { if (e.key === 'Enter') savePin(item.id); if (e.key === 'Escape') pinId = null; }}
                      aria-label="Air time" />
             </span>
+            {#if target && !sameDay(target, Date.now() / 1000)}
+              <span class="onday">{new Date(target * 1000)
+                .toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+            {/if}
           {:else}
             {@const late = item.startAt && item.at && item.at > item.startAt + 30}
             <button class="tcell t" class:pinned={item.startAt && !late} class:late disabled={editing}
@@ -347,6 +400,10 @@
             {#if pinId === item.id}
               <button class="ic ok" onclick={() => savePin(item.id)} title="Set time" aria-label="Set time">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 13l4 4L19 7"/></svg>
+              </button>
+              <button class="ic" onclick={() => nudgeDay(item.id, 1)}
+                      title="Move a day later" aria-label="Move a day later">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
               </button>
               {#if item.startAt}
                 <button class="ic rm" onclick={() => clearPin(item.id)} title="Clear the programmed time" aria-label="Clear time">
@@ -428,8 +485,14 @@
      keeps one width whether it is projected, programmed or being edited. */
   .tcell {
     display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px;
-    width: 74px; flex-shrink: 0;
+    /* Wide enough for a weekday-qualified time ("Wed 14:26") plus the pin
+       marker, so a schedule crossing midnight never wraps. */
+    width: 106px; flex-shrink: 0; white-space: nowrap;
     font-variant-numeric: tabular-nums; font-size: 13px;
+  }
+  .onday {
+    font-size: 11px; color: var(--accent);
+    white-space: nowrap; flex-shrink: 0;
   }
   .t {
     padding: 3px 6px; border: 1px solid transparent; border-radius: 6px;
@@ -446,10 +509,12 @@
 
   .q li.gap {
     display: flex; align-items: center; gap: 7px;
-    border: none; padding: 3px 10px 3px 84px;
+    border: none; padding: 3px 10px 3px 116px;
     font-size: 12px; color: var(--muted); font-style: italic;
   }
   .q li.gap:hover { background: transparent; }
+  /* A gap this size is dead air, not a breather — say so plainly. */
+  .q li.gap.long { color: var(--danger); font-style: normal; }
 
   .qctl { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
   .q li:hover .qctl, .q li:focus-within .qctl, .qctl.open { opacity: 1; }
