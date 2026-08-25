@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { api, fmtTime, audioLabel, subtitleLabel } from '$lib/api.js';
+  import { api, connectStatus, fmtTime, audioLabel, subtitleLabel } from '$lib/api.js';
 
   let status = $state({ status: 'stopped', playing: null, queue: [] });
   let error = $state('');
@@ -28,38 +28,139 @@
           audio: { language: 'jpn', title: null, codec: 'aac', channels: 2 },
           subtitle: { language: 'eng', title: null, codec: 'ass', forced: false, external: false },
         },
-        queue: [
-          { id: 'a', title: "Frieren — S1E2", duration: 1420 },
-          { id: 'b', title: "Frieren — S1E3", duration: 1435 },
-          { id: 'c', title: "Frieren — S1E4", duration: 1418 },
-        ],
+        queue: (() => {
+          const t = Math.floor(Date.now() / 1000) + 1362;
+          return [
+            { id: 'a', title: "Frieren — S1E2", duration: 1420, at: t },
+            { id: 'b', title: "Frieren — S1E3", duration: 1435, at: t + 1420 },
+            { id: 'c', title: "Frieren — S1E4", duration: 1418,
+              at: t + 4200, startAt: t + 4200 },
+          ];
+        })(),
       };
       return;
     }
-    try { status = await api.streamStatus(); }
+    try { applyStatus(await api.streamStatus()); }
     catch (err) { error = err.message; }
   }
 
-  onMount(() => { refresh(); if (!mock) timer = setInterval(refresh, 4000); });
-  onDestroy(() => clearInterval(timer));
+  let stopFeed;
+  onMount(() => {
+    refresh();
+    if (mock) return;
+    // Driven by the same push the transport bar uses, so the rundown moves
+    // the instant the engine advances rather than up to a poll later. The
+    // slow timer is only a safety net for a dropped socket.
+    stopFeed = connectStatus((msg) => {
+      if (msg.type === 'stream') applyStatus(msg.payload);
+    });
+    timer = setInterval(refresh, 10000);
+  });
+  onDestroy(() => { clearInterval(timer); stopFeed?.(); });
 
-  /** Every edit is a full replacement of the upcoming list, keyed by id. */
+  /**
+   * Adopt a status push, and abandon a time edit whose item is no longer
+   * in the queue.
+   *
+   * Rows are identified by item id rather than position precisely because
+   * of this moment: an item going on air shifts everything up, and an edit
+   * keyed by row would land on whichever item took the slot.
+   */
+  function applyStatus(next) {
+    status = next;
+    if (pinId && !(next.queue ?? []).some((q) => q.id === pinId)) {
+      pinId = null;
+      note = 'That item went on air — its time can no longer be changed.';
+      setTimeout(() => {
+        if (note.startsWith('That item went on air')) note = '';
+      }, 5000);
+    }
+  }
+
+  /**
+   * Every edit is a full replacement of the upcoming list. Entries carry
+   * their pin as well as their id, so reordering or removing an item never
+   * silently drops the times someone programmed.
+   */
   async function editQueue(fn) {
     editing = true; error = '';
     try {
-      const ids = (status.queue ?? []).map((q) => q.id);
-      await api.setQueue(fn(ids));
+      const entries = (status.queue ?? [])
+        .map((q) => ({ id: q.id, startAt: q.startAt ?? null }));
+      await api.setQueue(fn(entries));
       await refresh();
     } catch (err) { error = err.message; }
     finally { editing = false; }
   }
 
-  const removeAt = (i) => editQueue((ids) => ids.filter((_, j) => j !== i));
-  const move = (i, d) => editQueue((ids) => {
-    const next = [...ids];
+  const removeAt = (i) => editQueue((es) => es.filter((_, j) => j !== i));
+  const move = (i, d) => editQueue((es) => {
+    const next = [...es];
     const [x] = next.splice(i, 1);
     next.splice(i + d, 0, x);
     return next;
+  });
+
+  // ── programmed air times ─────────────────────────────────────────────
+
+  /** Which ITEM is having its time edited, and the value being typed. */
+  let pinId = $state(null);
+  let pinValue = $state('');
+
+  const clock = (epoch) => (epoch == null ? null : new Date(epoch * 1000)
+    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }));
+
+  function openPin(q) {
+    pinId = q.id;
+    // Seed with the time it would air anyway, so nudging is the easy case.
+    pinValue = clock(q.startAt ?? q.at) ?? '';
+  }
+
+  /** "HH:MM" today, or tomorrow when that time has already passed. */
+  function epochFor(hhmm) {
+    const [h, m] = hhmm.split(':').map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+    return Math.floor(d.getTime() / 1000);
+  }
+
+  async function savePin(id) {
+    const at = pinValue ? epochFor(pinValue) : null;
+    pinId = null;
+    // An item that aired while this was open is simply gone from the list,
+    // so the edit becomes a no-op instead of hitting the wrong episode.
+    await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: at } : e)));
+  }
+  async function clearPin(id) {
+    pinId = null;
+    await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: null } : e)));
+  }
+
+  /** Dead air before row i, in seconds — a pin pushing past the natural end. */
+  function gapBefore(i) {
+    const q = status.queue[i];
+    if (!q?.at) return 0;
+    const prev = i === 0 ? null : status.queue[i - 1];
+    const prevEnd = i === 0
+      ? (status.position != null && status.playing?.duration
+        ? Date.now() / 1000 + (status.playing.duration - status.position) : null)
+      : (prev?.at != null && prev.duration ? prev.at + prev.duration : null);
+    if (prevEnd == null) return 0;
+    return Math.max(0, Math.round(q.at - prevEnd));
+  }
+
+  /** A pre-show or interval card is on air, not an episode. */
+  const card = $derived(Boolean(status.playing?.countdown));
+
+  /** When the last queued item finishes — the end of the evening. */
+  const endsAt = $derived.by(() => {
+    const q = status.queue ?? [];
+    for (let i = q.length - 1; i >= 0; i--) {
+      if (q[i].at != null && q[i].duration) return q[i].at + q[i].duration;
+    }
+    return null;
   });
 
   async function loadTracks() {
@@ -100,7 +201,7 @@
 
 
 <div class="wrap">
-<h1>Queue</h1>
+<h1>Schedule</h1>
 {#if error}<p class="err">{error}</p>{/if}
 
 {#if status.status === 'stopped'}
@@ -115,10 +216,16 @@
         <p class="muted small" style="margin: 0 0 2px;">On air</p>
         <p style="margin: 0;"><strong>{status.playing?.title ?? '—'}</strong></p>
         <p class="muted small" style="margin: 2px 0 0;">
-          {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
+          {#if card}
+            live in {fmtTime(Math.max(0, (status.playing.duration ?? 0) - (status.position ?? 0)))}
+          {:else}
+            {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
+          {/if}
         </p>
         <!-- Burned into the picture, so it is worth seeing at a glance:
-             viewers cannot switch this at their end. -->
+             viewers cannot switch this at their end. A pre-show or interval
+             card has no tracks worth reporting. -->
+        {#if !card}
         <div class="chips">
           <span class="chip" title="Audio track being broadcast">
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
@@ -132,18 +239,21 @@
             {subtitleLabel(status.tracks?.subtitle)}
           </span>
         </div>
+        {/if}
       </div>
     </div>
     <div class="row">
       <button onclick={skipCurrent} disabled={skipping || !status.queue?.length}
-              title={status.queue?.length
-                ? `Skip to ${status.queue[0].title}`
-                : 'Nothing queued to skip to'}>
+              title={card
+                ? 'Start the show now instead of waiting'
+                : status.queue?.length ? `Skip to ${status.queue[0].title}` : 'Nothing queued to skip to'}>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"
              style="vertical-align:-2px; margin-right:6px;"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
-        {skipping ? 'Skipping…' : 'Skip episode'}
+        {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
       </button>
-      <button onclick={loadTracks} disabled={switching}>Change audio or subtitles</button>
+      {#if !card}
+        <button onclick={loadTracks} disabled={switching}>Change audio or subtitles</button>
+      {/if}
       <div style="flex:1"></div>
       <button class="danger" onclick={stop}>Stop broadcast</button>
     </div>
@@ -184,7 +294,11 @@
     {#if note}<p class="small">{note}</p>{/if}
   </div>
 
-  <h2 style="margin-top:22px">Up next</h2>
+  <div class="uphead">
+    <h2>Up next</h2>
+    {#if endsAt}<span class="muted small">ends around {clock(endsAt)}</span>{/if}
+  </div>
+
   {#if !status.queue?.length}
     <p class="muted">
       Nothing queued — the broadcast ends when this finishes.
@@ -193,27 +307,78 @@
   {:else}
     <ul class="q">
       {#each status.queue as item, i (item.id ?? i)}
+        {@const gap = gapBefore(i)}
+        {#if gap > 30}
+          <!-- A programmed time the previous item cannot reach: the engine
+               fills the wait with an interval card rather than starting
+               early, so say so instead of leaving an unexplained jump. -->
+          <li class="gap">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                 stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>
+            interval card · {fmtTime(gap)}
+          </li>
+        {/if}
         <li>
-          <span class="pos muted small">{i + 1}</span>
+          {#if pinId === item.id}
+            <span class="tcell">
+              <input class="tin" type="time" bind:value={pinValue}
+                     onkeydown={(e) => { if (e.key === 'Enter') savePin(item.id); if (e.key === 'Escape') pinId = null; }}
+                     aria-label="Air time" />
+            </span>
+          {:else}
+            {@const late = item.startAt && item.at && item.at > item.startAt + 30}
+            <button class="tcell t" class:pinned={item.startAt && !late} class:late disabled={editing}
+                    onclick={() => openPin(item)}
+                    title={late
+                      ? `Programmed for ${clock(item.startAt)}, but what runs before it does not finish until then`
+                      : item.startAt ? 'Programmed — click to change' : 'Click to program an air time'}>
+              {#if item.startAt}
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
+                     stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+              {/if}
+              {clock(item.at) ?? '—:—'}
+            </button>
+          {/if}
+
           <span class="qt">{item.title}</span>
-          {#if item.duration}<span class="muted small">{fmtTime(item.duration)}</span>{/if}
-          <span class="qctl">
-            <button class="ic" disabled={editing || i === 0} onclick={() => move(i, -1)}
-                    title="Move up" aria-label="Move up">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-            </button>
-            <button class="ic" disabled={editing || i === status.queue.length - 1} onclick={() => move(i, 1)}
-                    title="Move down" aria-label="Move down">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
-            </button>
-            <button class="ic rm" disabled={editing} onclick={() => removeAt(i)}
-                    title="Remove from queue" aria-label="Remove from queue">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
-            </button>
+          {#if item.duration}<span class="muted small dur">{fmtTime(item.duration)}</span>{/if}
+
+          <span class="qctl" class:open={pinId === item.id}>
+            {#if pinId === item.id}
+              <button class="ic ok" onclick={() => savePin(item.id)} title="Set time" aria-label="Set time">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 13l4 4L19 7"/></svg>
+              </button>
+              {#if item.startAt}
+                <button class="ic rm" onclick={() => clearPin(item.id)} title="Clear the programmed time" aria-label="Clear time">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+              {:else}
+                <button class="ic" onclick={() => (pinId = null)} title="Cancel" aria-label="Cancel">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                </button>
+              {/if}
+            {:else}
+              <button class="ic" disabled={editing || i === 0} onclick={() => move(i, -1)}
+                      title="Move up" aria-label="Move up">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+              </button>
+              <button class="ic" disabled={editing || i === status.queue.length - 1} onclick={() => move(i, 1)}
+                      title="Move down" aria-label="Move down">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+              </button>
+              <button class="ic rm" disabled={editing} onclick={() => removeAt(i)}
+                      title="Remove from schedule" aria-label="Remove from schedule">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+              </button>
+            {/if}
           </span>
         </li>
       {/each}
     </ul>
+    <p class="muted small hint">
+      Times are projected from each item's length. Click one to program it —
+      the broadcast then waits behind an interval card rather than starting early.
+    </p>
   {/if}
 {/if}
 </div>
@@ -243,6 +408,11 @@
     background: transparent; border-color: var(--border); font-size: 13px;
   }
   .line.on { border-color: var(--accent); color: var(--accent); }
+  .uphead {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 22px 0 6px;
+  }
+  .uphead h2 { margin: 0; }
   .q { list-style: none; padding: 0; margin: 0; }
   .q li {
     display: flex; align-items: center; gap: 12px;
@@ -251,10 +421,40 @@
     transition: background .12s ease;
   }
   .q li:hover { background: var(--surface-2); }
-  .pos { min-width: 18px; text-align: right; font-variant-numeric: tabular-nums; }
   .qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dur { font-variant-numeric: tabular-nums; }
+
+  /* The time column is the point of this view, so it leads every row and
+     keeps one width whether it is projected, programmed or being edited. */
+  .tcell {
+    display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px;
+    width: 74px; flex-shrink: 0;
+    font-variant-numeric: tabular-nums; font-size: 13px;
+  }
+  .t {
+    padding: 3px 6px; border: 1px solid transparent; border-radius: 6px;
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  .t:hover:not(:disabled) { border-color: var(--border); color: var(--text); }
+  .t.pinned { color: var(--accent); font-weight: 500; }
+  /* Programmed, but the material ahead of it overruns that time. */
+  .t.late { color: var(--muted); text-decoration: underline dotted; }
+  .tin {
+    width: 74px; padding: 2px 4px; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .q li.gap {
+    display: flex; align-items: center; gap: 7px;
+    border: none; padding: 3px 10px 3px 84px;
+    font-size: 12px; color: var(--muted); font-style: italic;
+  }
+  .q li.gap:hover { background: transparent; }
+
   .qctl { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
-  .q li:hover .qctl, .q li:focus-within .qctl { opacity: 1; }
+  .q li:hover .qctl, .q li:focus-within .qctl, .qctl.open { opacity: 1; }
+  .qctl .ok:hover:not(:disabled) { color: var(--success); }
+  .hint { margin-top: 10px; }
   .qctl .ic {
     display: inline-flex; align-items: center; justify-content: center;
     width: 26px; height: 26px; padding: 0; border-radius: 6px;

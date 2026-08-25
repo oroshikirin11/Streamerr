@@ -229,7 +229,14 @@ function streamStatus() {
         ...(s.playing.countdown ? { countdown: true } : {}),
       }
       : null,
-    queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
+    queue: s.queue.map((q) => ({
+      id: q.id,
+      title: q.title,
+      duration: q.duration ?? null,
+      // Projected air time, and the pin that fixed it (both epoch seconds).
+      at: q.at ?? null,
+      startAt: q.startAt ?? null,
+    })),
     position: s.position,
     tracks: s.tracks ?? null,
     preview: previewEnabled(),
@@ -891,10 +898,18 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
   // time the loop finishes, which may be null.
   const e = engine;
   const items = [];
-  for (const id of req.body?.itemIds ?? []) {
+  // Entries are either a bare id or { id, startAt } — the schedule page
+  // sends the latter so pinned air times survive a reorder or removal.
+  for (const entry of req.body?.itemIds ?? []) {
+    const id = typeof entry === 'string' ? entry : entry?.id;
+    if (!id) continue;
+    const pin = typeof entry === 'object' ? Number(entry.startAt) || null : null;
     if (engine !== e) {
       return res.status(409).json({ error: 'The broadcast ended while the queue was being added' });
     }
+    // Keep what the engine already knows: a duration it probed in the
+    // background is not something the library can tell us again.
+    const known = e.queue.find((q) => q.id === id);
     const item = await library.item(id);
     items.push({
       id: item.id,
@@ -902,8 +917,9 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
         ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
         : item.title,
       srcPath: library.resolvePath(item),
-      duration: item.duration ?? null,
+      duration: known?.duration ?? item.duration ?? null,
       image: item.image ?? null,
+      ...(pin ? { startAt: pin } : {}),
     });
   }
   if (engine !== e) {

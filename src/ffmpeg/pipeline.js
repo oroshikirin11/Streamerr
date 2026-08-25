@@ -197,7 +197,7 @@ export class PipelinePlayout extends EventEmitter {
 
     this.queue = [...items];
     this._stopping = false;
-    this._countdownUntil = startAt;
+    this._fillDurations();
 
     const first = this.queue.shift();
     // If the chosen subtitle lives inside the container and no extracted copy
@@ -236,7 +236,7 @@ export class PipelinePlayout extends EventEmitter {
       // The first clip goes back on the queue — the card's natural end is a
       // normal source close, so the ordinary _advance() picks it up.
       this.queue.unshift(first);
-      this._playCountdown();
+      this._playCountdown(startAt);
     } else {
       this._play(first, 0);
     }
@@ -418,12 +418,13 @@ export class PipelinePlayout extends EventEmitter {
 
   snapshot() {
     const air = this._onAir();
+    const sched = this._schedule();
     const a = this.selection?.audio ?? null;
     const sub = this.selection?.subtitle ?? null;
     return {
       status: this.status,
       playing: air.item ? { ...air.item, duration: air.duration } : null,
-      queue: [...this.queue],
+      queue: this.queue.map((q, i) => ({ ...q, at: sched[i] ?? null })),
       position: air.position,
       // What is actually being burned in, so the panel can show it without
       // asking — the choice is baked into the stream and is not something a
@@ -515,7 +516,71 @@ export class PipelinePlayout extends EventEmitter {
 
   setQueue(items) {
     this.queue = [...items];
+    this._fillDurations();
     this.emit('queue', this.snapshot());
+  }
+
+  /**
+   * When each queued item is projected to go on air, in epoch seconds.
+   *
+   * Everything downstream of an item of unknown length is unknowable, so
+   * those report null rather than a confident lie — except past a pinned
+   * item, whose time is fixed regardless of what came before it.
+   */
+  _schedule() {
+    let t = Date.now() / 1000;
+    let known = true;
+    const cur = this.current;
+    if (cur?.item?.countdown) {
+      // A card runs until its target; the show begins exactly then.
+      t = cur.item.until ?? t;
+    } else if (cur) {
+      const dur = cur.duration ?? cur.item?.duration ?? null;
+      if (dur == null) known = false;
+      else t += Math.max(0, dur - (this.aired ?? this.position ?? 0));
+    }
+    return this.queue.map((q) => {
+      if (q.startAt != null && (!known || q.startAt > t)) {
+        t = q.startAt;
+        known = true;
+      }
+      const at = known ? t : null;
+      if (known) {
+        if (q.duration == null) known = false;
+        else t += q.duration;
+      }
+      return at;
+    });
+  }
+
+  /**
+   * Fill in missing queue durations in the background.
+   *
+   * The filesystem library deliberately does not probe while browsing — one
+   * ffprobe per file would make the grid crawl — so queued items arrive
+   * with duration null and the schedule has nothing to add up. Probing
+   * reads container headers only, and runs one at a time so it never
+   * competes with the broadcast for the disk.
+   */
+  _fillDurations() {
+    if (this._fillingDurations) return;
+    this._fillingDurations = true;
+    this._detached((async () => {
+      try {
+        for (;;) {
+          const q = this.queue.find((x) => x.duration == null && x.srcPath);
+          if (!q || this._abort.signal.aborted) return;
+          let d = null;
+          try { d = await probeDuration(q.srcPath); } catch { /* stays unknown */ }
+          if (this._abort.signal.aborted) return;
+          // Null would re-match the search forever; 0 is falsy but finite.
+          q.duration = d ?? 0;
+          if (this.queue.includes(q)) this.emit('queue', this.snapshot());
+        }
+      } finally {
+        this._fillingDurations = false;
+      }
+    })(), 'probing queue durations');
   }
 
   // ── publisher ────────────────────────────────────────────────────────
@@ -764,19 +829,24 @@ export class PipelinePlayout extends EventEmitter {
    * _play's guard below — which recomputes the remaining time from the
    * wall clock, so a respawned or paused countdown stays on schedule.
    */
-  _playCountdown() {
+  _playCountdown(until, { heading = 'STARTING SOON' } = {}) {
     this._killSource();
     this.holding = false;
-    const startAt = this._countdownUntil ?? Date.now() / 1000;
-    const seconds = Math.max(1, startAt - Date.now() / 1000);
-    const when = new Date(startAt * 1000)
+    const seconds = Math.max(1, until - Date.now() / 1000);
+    const when = new Date(until * 1000)
       .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
     this.current = {
       item: {
         id: '__countdown__',
-        title: `Pre-show — live at ${when}`,
+        title: heading === 'UP NEXT'
+          ? `Interval — next at ${when}`
+          : `Pre-show — live at ${when}`,
         duration: seconds,
         countdown: true,
+        // Carried on the item so a respawn re-derives the wait from the
+        // wall clock rather than replaying the original length.
+        until,
+        heading,
       },
       offset: 0,
       duration: seconds,
@@ -787,6 +857,7 @@ export class PipelinePlayout extends EventEmitter {
       tsOffset: this.timeline,
       statsPeriodMs: this.statsPeriodMs,
       seconds,
+      heading,
       nextTitle: this.queue[0]?.title ?? '',
     }), { kind: 'clip' });
   }
@@ -795,7 +866,9 @@ export class PipelinePlayout extends EventEmitter {
   _play(item, offset = 0, { duration = null } = {}) {
     // Restarting the countdown (watchdog respawn, resume after pause) must
     // re-derive its remaining length — it counts wall-clock time, not media.
-    if (item?.countdown) return this._playCountdown();
+    if (item?.countdown) {
+      return this._playCountdown(item.until, { heading: item.heading });
+    }
     this._killSource();
     this.holding = false;
     this.current = { item, offset, duration: duration ?? item.duration ?? null };
@@ -1250,6 +1323,16 @@ export class PipelinePlayout extends EventEmitter {
       this._demoted = null;
       this._gpuSubsDemoted = false;
     }
+    // A pinned item waits for its wall-clock time behind an interval card
+    // rather than starting early. Peek, don't shift: the card's natural end
+    // re-enters here, and by then the time has arrived.
+    const pinned = this.queue[0];
+    if (pinned?.startAt != null && pinned.startAt - Date.now() / 1000 > 5) {
+      this.emit('queue', this.snapshot());
+      this._playCountdown(pinned.startAt, { heading: 'UP NEXT' });
+      return;
+    }
+
     const next = this.queue.shift();
     if (!next) {
       this.emit('queue-empty');
@@ -1719,6 +1802,7 @@ const HOLD_FONTS = [
  */
 export function buildCountdownArgs({
   profile, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
+  heading = 'STARTING SOON',
 }) {
   const W = profile.width;
   const H = profile.height;
@@ -1733,7 +1817,7 @@ export function buildCountdownArgs({
   const vf = [
     // The dark band the text sits on, so the clock reads over any bar color.
     `drawbox=x=0:y=ih*0.30:w=iw:h=ih*0.40:color=black@0.72:t=fill`,
-    `drawtext=${font}text='STARTING SOON':fontcolor=white@0.85:`
+    `drawtext=${font}text='${String(heading).replace(/[\\':%]/g, '')}':fontcolor=white@0.85:`
       + 'fontsize=h/22:x=(w-text_w)/2:y=h*0.345',
     `drawtext=${font}text='${clock}':fontcolor=white:`
       + 'fontsize=h/5:x=(w-text_w)/2:y=h*0.42',

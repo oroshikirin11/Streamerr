@@ -102,6 +102,13 @@
     selected = next;
   }
 
+  /** All / none for the episodes currently listed (one season, or all). */
+  const allSelected = $derived(
+    episodes.length > 0 && episodes.every((e) => selected.has(e.id)));
+  function toggleAll() {
+    selected = allSelected ? new Set() : new Set(episodes.map((e) => e.id));
+  }
+
   /** Everything from this episode to the end — the usual "watch on" case. */
   function selectFrom(id) {
     const i = episodes.findIndex((e) => e.id === id);
@@ -301,6 +308,22 @@
     </div>
   {/if}
 
+  {#if episodes.length}
+    <div class="selbar">
+      <input type="checkbox" id="ep-all" checked={allSelected}
+             indeterminate={selected.size > 0 && !allSelected}
+             onchange={toggleAll} />
+      <label for="ep-all" class="selall">
+        {allSelected ? 'Select none' : 'Select all'}
+        <span class="muted small">({episodes.length})</span>
+      </label>
+      {#if selected.size}
+        <span class="muted small selcount">{selected.size} selected</span>
+        <button class="ghost small" onclick={() => (selected = new Set())}>Clear</button>
+      {/if}
+    </div>
+  {/if}
+
   <ul class="eps">
     {#each episodes as ep}
       <li class:sel={selected.has(ep.id)}>
@@ -466,6 +489,15 @@
     background: transparent; border-color: var(--border); font-size: 13px;
   }
   .tr.pick { border-color: var(--accent); color: var(--accent); }
+  .selbar {
+    display: flex; align-items: center; gap: 9px;
+    padding: 6px 10px; margin-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  .selbar input { width: auto; }
+  .selall { font-size: 13px; cursor: pointer; user-select: none; }
+  .selcount { margin-left: auto; }
+
   .sched {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; padding: 7px 0; color: var(--muted);
