@@ -30,6 +30,7 @@
 
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
+import { Writable } from 'stream';
 import { EventEmitter } from 'events';
 import { join } from 'path';
 import { ProgressParser } from './progress.js';
@@ -276,7 +277,10 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _checkHealth() {
-    if (this.status !== 'running' || !this.source) return;
+    // The chunked path has no single source process, but it still has a
+    // bank and a publisher — and those are what the checks below actually
+    // examine. Requiring a source here is what left it unsupervised.
+    if (this.status !== 'running' || (!this.source && !this.scheduler)) return;
     // A source paused for backpressure is not stalled — it is doing exactly
     // what it was told. ffmpeg reports no progress while its stdout is
     // paused, so without this the watchdog kills every source that encodes
@@ -302,6 +306,9 @@ export class PipelinePlayout extends EventEmitter {
       this.stop();
       return;
     }
+    // Everything past here inspects the source process; the chunked path
+    // has none, and its own workers report failure through the scheduler.
+    if (!this.source) return;
     const silent = Date.now() - (this._lastBlockAt ?? Date.now());
     // A source that has not produced its FIRST block yet is starting, not
     // stalled — huge files over SMB need many seconds to open, and the
@@ -709,6 +716,8 @@ export class PipelinePlayout extends EventEmitter {
       this.scheduler.stop();
       this.scheduler = null;
     }
+    // Whoever was waiting on bank room will never be resumed now.
+    if (this._bankRoom) { const cb = this._bankRoom; this._bankRoom = null; cb(); }
     const s = this.source;
     this.source = null;
     if (!s) return;
@@ -739,6 +748,32 @@ export class PipelinePlayout extends EventEmitter {
       try { src.stdout.pause(); } catch { /* dying */ }
     }
     this._bankDrain();
+  }
+
+  /**
+   * Bank bytes that did not come from a source process.
+   *
+   * The chunk workers used to pipe straight into the publisher, which
+   * skipped everything that hangs off the bank: `aired`/`airedItem` never
+   * moved, `_published` stayed at zero so the TS packet-alignment repair
+   * had a byte count that omitted the whole clip, the preview window got
+   * nothing, and `_checkHealth` bailed out because there was no source to
+   * inspect — the parallel path ran a live broadcast with no watchdog at
+   * all. Feeding the bank instead restores all of it at once.
+   *
+   * @returns {boolean} false when the bank is full and the caller should
+   *   stop writing until `_bankResume` says otherwise.
+   */
+  _bankFeed(chunk) {
+    this._bank ??= [];
+    this._bank.push({
+      data: chunk, pos: this.position, tl: this.timeline,
+      item: this.current?.item ?? null, gen: this._srcGen ?? 0,
+    });
+    this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
+    const room = this._bankBytes <= this._bankMax;
+    this._bankDrain();
+    return room;
   }
 
   _bankDrain() {
@@ -794,6 +829,12 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _bankResume() {
+    // A chunk writer parked because the bank was full.
+    if (this._bankRoom && (this._bankBytes ?? 0) < this._bankMax * 0.9) {
+      const cb = this._bankRoom;
+      this._bankRoom = null;
+      cb();
+    }
     // Resume as soon as there is meaningful room, not at half empty. Wide
     // hysteresis made the encoder work in long bursts — idle while the bank
     // drained to 50%, then a sprint to refill — and a burst cycle that
@@ -1089,6 +1130,14 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     sched.on('warn', (m) => this.emit('warn', m));
+    // Chunk workers that keep failing must end the broadcast rather than
+    // marching silently through the queue: the streaming path has this
+    // guard (_deadClips) and lives in _spawnSource, which chunks never run.
+    sched.on('fatal', (err) => {
+      if (this.scheduler !== sched || this._stopping) return;
+      this.emit('fatal', err);
+      this.stop();
+    });
     sched.on('chunk', ({ start }) => {
       // Position is where the newest delivered chunk begins; the publisher is
       // still paying it out, so this leads the viewer by up to one chunk.
@@ -1101,7 +1150,30 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     this.scheduler = sched;
-    if (this.publisher?.stdin.writable) sched.start(this.publisher.stdin);
+    if (!this.publisher?.stdin.writable) return;
+
+    // Into the bank, not straight at the publisher — see _bankFeed. A
+    // Writable keeps pipe() backpressure working, so a fast worker cannot
+    // outrun the bank cap.
+    const sink = new Writable({
+      highWaterMark: 1 << 20,
+      write: (chunk, _enc, cb) => {
+        if (this.status === 'starting') {
+          // Same moment the streaming path claims 'running': the first
+          // bytes on their way out. Until this the watchdog stays off.
+          this.status = 'running';
+          this._lastBlockAt = Date.now();
+          this._lastAiredAt = Date.now();
+          this.emit('status', this.status);
+        }
+        this._sawBlock = true;
+        if (this._bankFeed(chunk)) return cb();
+        this._bankRoom = cb;      // released by _bankResume
+        return undefined;
+      },
+    });
+    sink.on('error', () => { /* publisher gone; close handler deals with it */ });
+    sched.start(sink);
   }
 
   /**
@@ -1911,7 +1983,7 @@ export function buildChunkArgs({
     '-t', Number(dur).toFixed(3),
     ...filterArgs,
     '-map', `0:a:${audioIdx}?`,
-    ...be.encoderArgs(profile),
+    ...be.encoderArgs(profEff),
     ...audioArgs(profile),
     // Absolute placement on the output timeline. This is what lets chunks be
     // produced out of order and still join exactly.

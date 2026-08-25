@@ -176,9 +176,21 @@ export class ChunkScheduler extends EventEmitter {
 
     if (next.failed) {
       safeUnlink(next.out);
+      // Dropping a bad chunk quietly and carrying on means a broken
+      // filtergraph plays an entire queue as silence. The streaming path
+      // stops after two dead clips in a row; match it.
+      this._failStreak = (this._failStreak ?? 0) + 1;
+      if (this._failStreak >= 2) {
+        this.running = false;
+        this.emit('fatal', new Error(
+          `Two chunks in a row failed to encode (${this._failStreak}); `
+          + 'stopping rather than broadcasting nothing.'));
+        return;
+      }
       this._drain();
       return;
     }
+    this._failStreak = 0;
 
     this._writing = true;
     const rs = createReadStream(next.out);
