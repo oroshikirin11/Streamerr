@@ -29,7 +29,7 @@ export function parseEpisode(name, { allowBareNumber = true } = {}) {
       season: Number(m[1]),
       episode: Number(m[2]),
       episodeEnd: m[3] ? Number(m[3]) : null,
-      title: cleanTitle(stem, m[0]),
+      title: cleanTitle(stem, m[0]) ?? `Episode ${Number(m[2])}`,
     };
   }
   m = /(?:^|[\s._-])(\d{1,2})[xX](\d{1,3})(?:[\s._-]|$)/.exec(stem);
@@ -38,16 +38,20 @@ export function parseEpisode(name, { allowBareNumber = true } = {}) {
       season: Number(m[1]),
       episode: Number(m[2]),
       episodeEnd: null,
-      title: cleanTitle(stem, m[0]),
+      title: cleanTitle(stem, m[0]) ?? `Episode ${Number(m[2])}`,
     };
   }
   // Bare "- 05 -" or "Ep05", common in anime releases. Only trustworthy
   // when the folder already says these are episodes; see the caller.
+  // `(?:v\d)?` covers the anime convention of a re-release: "- 12v2 -".
   m = allowBareNumber
-    ? /(?:[\s._-]|^)(?:[eE][pP]?)?(\d{1,3})(?:[\s._-]|$)/.exec(stem)
+    ? /(?:[\s._-]|^)(?:[eE][pP]?)?(\d{1,3})(?:[vV]\d)?(?:[\s._-]|$)/.exec(stem)
     : null;
   if (m && Number(m[1]) > 0 && Number(m[1]) < 999) {
-    return { season: 1, episode: Number(m[1]), episodeEnd: null, title: cleanTitle(stem, m[0]) };
+    return {
+      season: 1, episode: Number(m[1]), episodeEnd: null,
+      title: cleanTitle(stem, m[0]) ?? `Episode ${Number(m[1])}`,
+    };
   }
   return { season: null, episode: null, episodeEnd: null, title: stem };
 }
@@ -59,9 +63,18 @@ function cleanTitle(stem, matched) {
     // Strip the usual release-quality suffixes.
     .replace(/[\s._-]*(WEBDL|WEB-DL|WEBRip|BluRay|BDRip|HDTV|DVDRip|REMUX)[\s._-]*\d{0,4}[pP]?.*$/i, '')
     .replace(/[\s._-]*\d{3,4}[pP].*$/, '')
+    // Release groups and tags in brackets: "[1080p]", "(Dual Audio)".
+    // Removing the contents used to leave the brackets behind, which is
+    // how an episode ended up titled "[".
+    .replace(/[[(][^\])]*[\])]?/g, ' ')
     .replace(/[._]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    // Nothing meaningful survives as punctuation alone.
+    .replace(/^[\s.\-_·|~[\]()]+|[\s.\-_·|~[\]()]+$/g, '')
     .trim();
-  return cleaned || stem;
+  // Too little left to be a title — the caller falls back to "Episode N",
+  // which at least tells the viewer which episode they are looking at.
+  return cleaned.length >= 2 ? cleaned : null;
 }
 
 /** Movies or shows, guessed from the folder name and what is inside. */
