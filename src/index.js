@@ -64,6 +64,52 @@ let lastEngine = null;
 let trackIntent = {};
 let library = makeLibrary(config);
 
+/**
+ * Decide which GPU paths this clip can use.
+ *
+ * Must run per CLIP, not once per broadcast: whether subtitles are burned
+ * at all, and whether the picture needs pillarbox bars, are properties of
+ * the file. A queue that opens with a 16:9 episode and continues with a 4:3
+ * one would otherwise carry the first episode's answer into a graph shape
+ * the driver was never asked about. Probe results are cached per geometry,
+ * so this costs nothing after the first clip of each shape.
+ */
+async function tuneProfile(profile, selection) {
+  if (profile.backend !== 'vaapi' || config.encoder.gpuSubs === false) return;
+  profile.gpuFull = true;
+  profile.gpuSubs = false;
+  profile.barsGraph = undefined;
+  if (!selection?.subtitle) return;
+
+  if (globalThis.__alphaOk === undefined) {
+    globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
+      { width: profile.width, height: profile.height });
+  }
+  profile.gpuSubs = globalThis.__alphaOk;
+  if (!profile.gpuSubs) return;
+
+  // Pillarboxed content needs a graph shape this driver actually
+  // supports; which one that is has to be measured, not assumed.
+  const rect = contentRect(selection.video, profile);
+  if (!rect.bars) return;
+
+  const key = `${rect.w}x${rect.h}@${rect.x},${rect.y}`;
+  globalThis.__barsGraph ??= {};
+  if (globalThis.__barsGraph[key] === undefined) {
+    globalThis.__barsGraph[key] = await pickPillarboxGraph({
+      device: profile.device,
+      width: profile.width, height: profile.height, rect,
+      profile,
+    });
+    console.log(`pillarbox+subtitle graph for ${key}: `
+      + `${globalThis.__barsGraph[key] ?? 'none — burning on the CPU'}`);
+  }
+  profile.barsGraph = globalThis.__barsGraph[key];
+  // No working GPU composite for this shape: the CPU path burns
+  // subtitles between scale and pad, which every driver can do.
+  if (!profile.barsGraph) profile.gpuSubs = false;
+}
+
 /** Track preferences for one clip, honouring any live switch. */
 function trackPrefs() {
   const prefs = { ...(config.tracks ?? {}) };
@@ -78,11 +124,12 @@ function trackPrefs() {
 }
 
 /** Re-pick tracks against a specific file's own streams. */
-async function selectionFor(item) {
+async function selectionFor(item, profile = null) {
   const tracks = await probeTracks(item.srcPath);
   const subs = await listSubtitles(item.srcPath, tracks);
   const selection = selectTracks(tracks, subs, trackPrefs());
   selection.video = tracks.video[0] ?? null;
+  if (profile) await tuneProfile(profile, selection);
   return selection;
 }
 
@@ -135,7 +182,7 @@ function buildEngine({ profile, selection }) {
     selection,
     // Extracted subtitle tracks and embedded fonts live here.
     cacheDir: config.paths.cache,
-    resolveSelection: selectionFor,
+    resolveSelection: (item) => selectionFor(item, profile),
   });
 
   e.on('status', () => broadcast('stream', streamStatus()));
@@ -516,37 +563,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // subtitle-free 4K films were software-decoding at 0.6x while the GPU
   // idled, because this used to be gated on subtitles existing. The overlay
   // (subtitled) variant additionally needs the driver to honour alpha.
-  if (profile.backend === 'vaapi' && config.encoder.gpuSubs !== false) {
-    profile.gpuFull = true;
-    if (selection.subtitle) {
-      if (globalThis.__alphaOk === undefined) {
-        globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
-          { width: profile.width, height: profile.height });
-      }
-      profile.gpuSubs = globalThis.__alphaOk;
-
-      // Pillarboxed content needs a graph shape this driver actually
-      // supports; which one that is has to be measured, not assumed.
-      const rect = contentRect(selection.video, profile);
-      if (profile.gpuSubs && rect.bars) {
-        const key = `${rect.w}x${rect.h}@${rect.x},${rect.y}`;
-        globalThis.__barsGraph ??= {};
-        if (globalThis.__barsGraph[key] === undefined) {
-          globalThis.__barsGraph[key] = await pickPillarboxGraph({
-            device: profile.device,
-            width: profile.width, height: profile.height, rect,
-            profile,
-          });
-          console.log(`pillarbox+subtitle graph for ${key}: `
-            + `${globalThis.__barsGraph[key] ?? 'none — burning on the CPU'}`);
-        }
-        profile.barsGraph = globalThis.__barsGraph[key];
-        // No working GPU composite for this shape: the CPU path burns
-        // subtitles between scale and pad, which every driver can do.
-        if (!profile.barsGraph) profile.gpuSubs = false;
-      }
-    }
-  }
+  await tuneProfile(profile, selection);
 
   const conn = await testRtmpConnection(rtmpTarget());
   if (!conn.ok) {

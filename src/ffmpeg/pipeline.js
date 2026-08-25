@@ -328,7 +328,15 @@ export class PipelinePlayout extends EventEmitter {
         const tail = graceful ? (this._bank ?? []) : [];
         this._bank = [];
         this._bankBytes = 0;
-        for (const c of tail) p.stdin.write(c.data);
+        for (const c of tail) {
+          // Keep the aired markers moving as the tail goes out, or the
+          // panel spends the last clip of a broadcast still reporting the
+          // one before it.
+          this.aired = c.pos;
+          this.airedTimeline = c.tl;
+          this.airedItem = c.item;
+          p.stdin.write(c.data);
+        }
         // Closing stdin lets the publisher flush and close the RTMP session
         // cleanly rather than being cut off mid-packet.
         p.stdin.end();
