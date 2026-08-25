@@ -63,6 +63,7 @@
       streamKey = '';
       jellyfinKey = '';
       cfg.library.pathMap ??= [];
+      cfg.preview ??= { enabled: true };
       cfg.tracks ??= {};
       cfg.tracks.languages ??= ['eng'];
       cfg.tracks.audioMode ??= 'original';
@@ -449,6 +450,27 @@
       <button class="primary" onclick={() => save('tracks')}>Save</button>
       {#if saved === 'tracks'}<span class="ok small">Saved</span>{/if}
     </div>
+  </section>
+
+  <!-- Live preview -->
+  <section class="card">
+    <h3>Live preview</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.preview.enabled} style="width:auto"
+             onchange={async () => {
+               await api.saveConfig({ preview: { enabled: cfg.preview.enabled } });
+               saved = 'preview';
+               setTimeout(() => { if (saved === 'preview') saved = ''; }, 2500);
+             }} />
+      Floating preview window while broadcasting
+      {#if saved === 'preview'}<span class="ok small">Saved</span>{/if}
+    </label>
+    <p class="muted small">
+      Plays the exact stream Owncast receives, straight from the encoder —
+      it costs the server no extra encoding work, only the stream's own
+      bitrate to each open panel. Each panel can also hide it with the
+      button on the play bar; this switch turns it off everywhere.
+    </p>
   </section>
 
   <!-- Developer -->

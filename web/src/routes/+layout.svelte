@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { api, connectStatus, fmtTime } from '$lib/api.js';
+  import PreviewWindow from '$lib/PreviewWindow.svelte';
 
   let { children } = $props();
 
@@ -22,11 +23,22 @@
   /** Fraction of the seek strip under the cursor, for the time bubble. */
   let hoverFrac = $state(null);
 
+  /** Live preview window: open by default, per-browser choice remembered. */
+  let previewOpen = $state(localStorage.getItem('jsr-preview-open') !== '0');
+  /** Measured, not assumed — the window docks just above the transport bar. */
+  let footerH = $state(76);
+  function togglePreview() {
+    previewOpen = !previewOpen;
+    localStorage.setItem('jsr-preview-open', previewOpen ? '1' : '0');
+  }
+
   const live = $derived(stream.status === 'running' || stream.status === 'paused');
   /** First-time subtitle extraction before going live — can take minutes. */
   const preparing = $derived(
     stream.status === 'preparing' || stream.status === 'starting');
   const paused = $derived(stream.status === 'paused');
+  /** Server-side switch (Settings) — hides the preview everywhere when off. */
+  const previewAllowed = $derived(live && stream.preview !== false);
 
   onMount(async () => {
     await refreshAuth();
@@ -263,7 +275,7 @@
     </main>
 
     {#if stream.playing}
-      <footer>
+      <footer bind:clientHeight={footerH}>
         <div class="seek" class:seekable={stream.playing.duration}
              role="slider" tabindex="0" aria-label="Seek"
              aria-valuemin="0" aria-valuemax={Math.round(stream.playing.duration ?? 0)}
@@ -335,6 +347,16 @@
           </div>
 
           <div class="fright">
+            {#if previewAllowed}
+              <button class="pvt" class:on={previewOpen} onclick={togglePreview}
+                      title={previewOpen ? 'Hide the live preview' : 'Watch the outgoing stream'}
+                      aria-label="Live preview" aria-pressed={previewOpen}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                     stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                  <path d="M3 5h18v13H3z"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor" stroke="none"/>
+                </svg>
+              </button>
+            {/if}
             <button onclick={openTracks} disabled={busyCtl || preparing}>Audio &amp; subs</button>
             <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
           </div>
@@ -383,6 +405,12 @@
       {/if}
     {/if}
   </div>
+{/if}
+
+{#if authed && previewAllowed && previewOpen}
+  <!-- Keyed on nothing but presence: mounting connects, unmounting tears the
+       player down, so going off air cleans up by itself. -->
+  <PreviewWindow bottomInset={footerH + 14} onclose={togglePreview} />
 {/if}
 
 {#if toast}
@@ -616,6 +644,12 @@
 
   .fright { display: flex; gap: 8px; justify-content: flex-end; }
   .fright button { padding: 6px 12px; font-size: 13px; }
+  .fright .pvt {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; padding: 6px 0; color: var(--muted);
+  }
+  .fright .pvt:hover { color: var(--text); }
+  .fright .pvt.on { color: var(--accent); border-color: var(--accent); }
   .panel {
     grid-column: 2; border-top: 1px solid var(--border);
     background: var(--surface); padding: 12px 20px 16px;

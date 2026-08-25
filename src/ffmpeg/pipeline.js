@@ -336,6 +336,7 @@ export class PipelinePlayout extends EventEmitter {
           this.airedTimeline = c.tl;
           this.airedItem = c.item;
           p.stdin.write(c.data);
+          this.emit('data', c.data);
         }
         // Closing stdin lets the publisher flush and close the RTMP session
         // cleanly rather than being cut off mid-packet.
@@ -607,6 +608,10 @@ export class PipelinePlayout extends EventEmitter {
       }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
+      // Mirror of the publisher's input for preview windows: the exact bytes
+      // going out, tapped after the write so a dead publisher mirrors
+      // nothing. With no listener this is a no-op.
+      this.emit('data', c.data);
       if (!ok) {
         w.once('drain', () => {
           this._bankDraining = false;
@@ -910,6 +915,11 @@ export class PipelinePlayout extends EventEmitter {
 
   _spawnSource(args, { kind }) {
     this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
+    // Every new source process is a fresh muxer: a splice in the TS stream.
+    // The publisher's ffmpeg reads through it, but a browser's MSE decoder
+    // wedges on it silently — playback time keeps advancing over a frozen
+    // picture. Announce it so preview clients get resynced instead.
+    this.emit('discontinuity');
     // Backpressure state is per-process: carrying a stale `paused` flag into
     // a new source means the bank cap is never applied to it again.
     this._srcPaused = false;

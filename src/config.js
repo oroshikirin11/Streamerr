@@ -62,6 +62,10 @@ const DEFAULTS = {
   // only reliably portable form.
   paths: { cache: './cache', run: './run' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
+  // The floating preview window in the panel. It replays the exact bytes the
+  // publisher sends — no second encode — so its only real cost is the
+  // stream's own bitrate to each open panel.
+  preview: { enabled: true },
   // Shows the read-only Console page in the panel.
   devMode: false,
   tracks: {

@@ -31,6 +31,12 @@ and emits **one unbroken stream that never changes shape**, with the right
 subtitle and audio track chosen per file the way a media server would, and
 burned into the picture because that's the only thing the player can show.
 
+While you broadcast, the panel shows a **floating live preview** — a small
+draggable window playing the exact stream Owncast is receiving, seconds ahead
+of your viewers. It taps the already-encoded output on its way out, so it
+costs the server no additional encoding work; pin it to any corner, resize
+it, or turn it off in Settings.
+
 ### Why it has to transcode
 
 A reasonable question is why not just copy the file through untouched — plenty
@@ -297,6 +303,7 @@ Everything the wizard configures is editable later, grouped in the UI:
 | **Library** | Jellyfin or folder, with a directory browser |
 | **Path mapping** | only when Jellyfin's paths differ from this container's |
 | **Languages** | languages you understand, original vs dubbed, subtitle policy |
+| **Live preview** | the floating preview window (on by default) |
 | **Developer** | read-only log console |
 
 **Framerate** defaults to *auto*: each file is output at its own rate up to your

@@ -182,8 +182,13 @@ function broadcast(type, payload) {
   }
 }
 
+/** Whether panels should offer the floating preview window at all. */
+const previewEnabled = () => config.preview?.enabled !== false;
+
 function streamStatus() {
-  if (!engine) return { status: 'stopped', playing: null, queue: [] };
+  if (!engine) {
+    return { status: 'stopped', playing: null, queue: [], preview: previewEnabled() };
+  }
   const s = engine.snapshot();
   return {
     status: s.status,
@@ -193,7 +198,65 @@ function streamStatus() {
     queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
     position: s.position,
     tracks: s.tracks ?? null,
+    preview: previewEnabled(),
   };
+}
+
+// ── preview fan-out ────────────────────────────────────────────────────
+//
+// Preview windows receive the publisher's input verbatim — the same MPEG-TS
+// the RTMP session carries, no second encode. Two rules keep this safe:
+// the fan-out may NEVER apply backpressure to the bank (a slow panel gets
+// cut off and resynced, the broadcast never waits), and a client must only
+// ever start reading at a TS packet boundary, because mpegts.js probes the
+// very first byte for the 0x47 sync marker rather than scanning for it.
+
+const previewSockets = new Set();
+// A panel on a link slower than the stream's bitrate accumulates unsent
+// bytes here in the server; past this we stop feeding it and resync when it
+// catches up. ~14s of a 4.5 Mbps stream.
+const PREVIEW_BUFFER_MAX = 8_000_000;
+
+function wirePreview(e) {
+  // Byte offset within THIS publisher session's TS stream. Timestamps and
+  // packet phase both restart with the engine, so anyone still connected
+  // from the previous broadcast is cut off to reconnect into clean state.
+  let tsBytes = 0;
+  for (const ws of previewSockets) {
+    try { ws.close(1000, 'stream restarted'); } catch { /* closing */ }
+  }
+  // A source swap splices the TS stream. The publisher survives it; a
+  // browser's MSE decoder does not — it freezes without raising any event.
+  // Cutting the sockets here makes every client rebuild its player against
+  // the post-splice stream, which is the only reliable way back to a moving
+  // picture. The first spawn of a broadcast has no one mid-stream to cut.
+  e.on('discontinuity', () => {
+    if (tsBytes === 0) return;
+    for (const ws of previewSockets) {
+      try { ws.close(1000, 'stream splice'); } catch { /* closing */ }
+    }
+  });
+
+  e.on('data', (chunk) => {
+    const at = tsBytes;
+    tsBytes += chunk.length;
+    if (!previewSockets.size || !previewEnabled()) return;
+    for (const ws of previewSockets) {
+      if (ws.readyState !== 1) continue;
+      if (ws.bufferedAmount > PREVIEW_BUFFER_MAX) { ws.jsrNeedsSync = true; continue; }
+      if (ws.jsrNeedsSync) {
+        // Joining (or rejoining after falling behind) mid-stream: start at
+        // the next packet boundary and let the demuxer wait for the next
+        // PAT and keyframe — a moment of black, never a corrupt picture.
+        const skip = (188 - (at % 188)) % 188;
+        if (skip >= chunk.length) continue;
+        ws.jsrNeedsSync = false;
+        ws.send(chunk.subarray(skip));
+      } else {
+        ws.send(chunk);
+      }
+    }
+  });
 }
 
 /**
@@ -212,6 +275,8 @@ function buildEngine({ profile, selection }) {
     cacheDir: config.paths.cache,
     resolveSelection: (item) => selectionFor(item, profile),
   });
+
+  wirePreview(e);
 
   e.on('status', () => broadcast('stream', streamStatus()));
   e.on('nowplaying', () => broadcast('stream', streamStatus()));
@@ -405,6 +470,17 @@ app.put('/api/config', (req, res) => {
   try {
     saveConfig(patch);
     refreshLibrary();
+    // Turning the preview off mid-broadcast takes effect immediately: every
+    // open panel learns via the status push, and connected preview windows
+    // are cut rather than left streaming a feature that is now disabled.
+    if (patch.preview !== undefined) {
+      if (!previewEnabled()) {
+        for (const ws of previewSockets) {
+          try { ws.close(1000, 'preview disabled'); } catch { /* closing */ }
+        }
+      }
+      broadcast('stream', streamStatus());
+    }
     res.json(redactedConfig());
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -774,7 +850,20 @@ if (existsSync(WEB_DIR)) {
 
 // ── websocket ──────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+// Two endpoints share the HTTP server: /ws (JSON status feed) and
+// /ws/preview (binary MPEG-TS). A WebSocketServer bound with {server, path}
+// rejects every other path itself, so with two of them the routing has to
+// be explicit.
+const wss = new WebSocketServer({ noServer: true });
+const previewWss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  const path = (req.url ?? '').split('?')[0];
+  const target = path === '/ws' ? wss : path === '/ws/preview' ? previewWss : null;
+  if (!target) { socket.destroy(); return; }
+  target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
+});
+
 wss.on('connection', (ws, req) => {
   if (passwordHash() && !validSession(tokenFromRequest(req))) {
     ws.close(4401, 'unauthorized');
@@ -784,6 +873,23 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ type: 'stream', payload: streamStatus(), ts: Date.now() }));
   ws.on('close', () => clients.delete(ws));
   ws.on('error', () => clients.delete(ws));
+});
+
+previewWss.on('connection', (ws, req) => {
+  if (passwordHash() && !validSession(tokenFromRequest(req))) {
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+  if (!previewEnabled()) {
+    ws.close(1000, 'preview disabled');
+    return;
+  }
+  // Starts unsynced: the fan-out aligns this client's first bytes to a TS
+  // packet boundary before sending anything.
+  ws.jsrNeedsSync = true;
+  previewSockets.add(ws);
+  ws.on('close', () => previewSockets.delete(ws));
+  ws.on('error', () => previewSockets.delete(ws));
 });
 
 // ── start ──────────────────────────────────────────────────────────────
