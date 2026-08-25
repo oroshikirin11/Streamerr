@@ -182,6 +182,35 @@ function broadcast(type, payload) {
   }
 }
 
+// ── Owncast title sync ─────────────────────────────────────────────────
+//
+// Owncast's watch page shows one static stream title unless something sets
+// it. This pushes the on-air title (via the integrations API and the access
+// token from Settings) whenever the aired clip changes, so viewers see
+// "Show — S1E4" instead of whatever the stream was called last month.
+// Fire-and-forget: a failed sync is a log line, never a broken broadcast.
+
+let owncastTitleSent = null;
+function syncOwncastTitle() {
+  const oc = config.owncast ?? {};
+  if (!oc.apiUrl || !oc.accessToken || oc.syncTitle === false) return;
+  const title = streamStatus().playing?.title ?? null;
+  if (!title || title === owncastTitleSent) return;
+  owncastTitleSent = title;
+  fetch(`${String(oc.apiUrl).replace(/\/+$/, '')}/api/integrations/streamtitle`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${oc.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ value: title }),
+  }).then((r) => {
+    if (!r.ok) dpush('warn', `Owncast title sync: HTTP ${r.status}`);
+  }).catch((err) => {
+    dpush('warn', `Owncast title sync failed: ${err.message}`);
+  });
+}
+
 /** Whether panels should offer the floating preview window at all. */
 const previewEnabled = () => config.preview?.enabled !== false;
 
@@ -193,7 +222,12 @@ function streamStatus() {
   return {
     status: s.status,
     playing: s.playing
-      ? { title: s.playing.title, duration: s.playing.duration, image: s.playing.image ?? null }
+      ? {
+        title: s.playing.title,
+        duration: s.playing.duration,
+        image: s.playing.image ?? null,
+        ...(s.playing.countdown ? { countdown: true } : {}),
+      }
       : null,
     queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
     position: s.position,
@@ -278,13 +312,14 @@ function buildEngine({ profile, selection }) {
 
   wirePreview(e);
 
-  e.on('status', () => broadcast('stream', streamStatus()));
-  e.on('nowplaying', () => broadcast('stream', streamStatus()));
+  e.on('status', () => { broadcast('stream', streamStatus()); syncOwncastTitle(); });
+  e.on('nowplaying', () => { broadcast('stream', streamStatus()); syncOwncastTitle(); });
   e.on('queue', () => broadcast('stream', streamStatus()));
   e.on('seeked', () => broadcast('stream', streamStatus()));
   e.on('selection', () => broadcast('stream', streamStatus()));
   e.on('progress', (b) => broadcast('progress', {
     position: b.position, speed: b.speed, drops: b.drops,
+    buffer: b.buffer, bufferMax: b.bufferMax,
   }));
   e.on('warn', (m) => { dpush('warn', m); broadcast('warn', { message: redact(String(m)) }); });
   e.on('log', (m) => dpush('ffmpeg', m));
@@ -631,6 +666,18 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   const ids = req.body?.itemIds ?? [];
   if (!ids.length) return res.status(400).json({ error: 'Nothing selected' });
 
+  // Scheduled start: broadcast a countdown card until this moment, then
+  // roll the queue. Seconds since epoch; anything not sensibly in the
+  // future is treated as "start now" rather than rejected.
+  let startAt = Number(req.body?.startAt) || null;
+  if (startAt != null) {
+    const now = Date.now() / 1000;
+    if (startAt <= now + 5) startAt = null;
+    if (startAt != null && startAt > now + 24 * 3600) {
+      return res.status(400).json({ error: 'Scheduled start must be within 24 hours' });
+    }
+  }
+
   ensureDirs();
   const sel = await selectBackend({
     backend: config.encoder.backend,
@@ -687,7 +734,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // HTTP request cannot sit open that long. The engine reports 'preparing'
   // then 'running' over the status feed; failures arrive the same way.
   const e = engine;
-  e.start(items).catch((err) => {
+  e.start(items, { startAt }).catch((err) => {
     dpush('error', `start failed: ${err.message}`);
     broadcast('error', { message: redact(String(err.message ?? err)) });
     try { e.stop(); } catch { /* already down */ }

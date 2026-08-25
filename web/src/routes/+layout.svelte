@@ -37,8 +37,19 @@
   const preparing = $derived(
     stream.status === 'preparing' || stream.status === 'starting');
   const paused = $derived(stream.status === 'paused');
+  /** Pre-show countdown card on air: wall-clock time, nothing to seek in. */
+  const counting = $derived(Boolean(stream.playing?.countdown));
   /** Server-side switch (Settings) — hides the preview everywhere when off. */
   const previewAllowed = $derived(live && stream.preview !== false);
+
+  /** Bank reserve over the last ~45s, for the sidebar sparkline. */
+  let bufPts = $state([]);
+  let bufMax = $state(15);
+  const lastBuf = $derived(bufPts.length ? bufPts[bufPts.length - 1] : 0);
+  const bufLine = $derived(bufPts
+    .map((v, i) => `${((i / Math.max(1, bufPts.length - 1)) * 100).toFixed(1)},`
+      + `${(24 - Math.min(1, v / bufMax) * 21).toFixed(1)}`)
+    .join(' '));
 
   onMount(async () => {
     await refreshAuth();
@@ -91,9 +102,14 @@
         }
         stream = msg.payload;
         if (msg.payload.position != null) position = msg.payload.position;
+        if (msg.payload.status === 'stopped') bufPts = [];
       } else if (msg.type === 'progress') {
         position = msg.payload.position;
         speed = msg.payload.speed;
+        if (msg.payload.buffer != null && !counting && !paused) {
+          if (msg.payload.bufferMax) bufMax = msg.payload.bufferMax;
+          bufPts = [...bufPts.slice(-89), msg.payload.buffer];
+        }
       } else if (msg.type === 'error' || msg.type === 'warn') {
         toast = { kind: msg.type, message: msg.payload.message };
         setTimeout(() => { toast = null; }, 8000);
@@ -253,6 +269,16 @@
           <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
         {/if}
       </div>
+      {#if live && !counting && !paused && bufPts.length > 1}
+        <!-- Encoded-but-unaired reserve: the slack the broadcast can spend
+             before a slow scene shows on air. -->
+        <div class="bufrow" title="Buffered ahead of air — reserve the encoder has banked">
+          <svg class="buf" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+            <polyline points={bufLine} class:low={lastBuf < 3} />
+          </svg>
+          <span class="buflab" class:low={lastBuf < 3}>{Math.round(lastBuf)}s</span>
+        </div>
+      {/if}
       <nav>
         {#each nav as n}
           <a href={n.href} class:active={page.url.pathname === n.href}>
@@ -281,7 +307,7 @@
              aria-valuemin="0" aria-valuemax={Math.round(stream.playing.duration ?? 0)}
              aria-valuenow={Math.round(position)}
              onclick={(e) => {
-               if (!stream.playing.duration || busyCtl || preparing) return;
+               if (!stream.playing.duration || busyCtl || preparing || counting) return;
                const r = e.currentTarget.getBoundingClientRect();
                const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
                ctl(() => api.seek({ position: frac * stream.playing.duration }));
@@ -293,6 +319,7 @@
              }}
              onmouseleave={() => (hoverFrac = null)}
              onkeydown={(e) => {
+               if (counting) return;
                if (e.key === 'ArrowRight') skip(30);
                if (e.key === 'ArrowLeft') skip(-30);
              }}>
@@ -318,15 +345,20 @@
                 {:else if preparing}<span class="pill">Preparing subtitles…</span>{/if}
               </p>
               <p class="muted small">
-                {fmtTime(position)}
-                {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
-                {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
+                {#if counting}
+                  live in {fmtTime(Math.max(0, (stream.playing.duration ?? 0) - position))}
+                  {#if stream.queue?.length} · first up: {stream.queue[0].title}{/if}
+                {:else}
+                  {fmtTime(position)}
+                  {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
+                  {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
+                {/if}
               </p>
             </div>
           </div>
 
           <div class="ctl">
-            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl || preparing} title="Back 30 seconds" aria-label="Back 30 seconds">
+            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl || preparing || counting} title="Back 30 seconds" aria-label="Back 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg><span class="tiny">30</span>
             </button>
             <button class="ic play" onclick={togglePause} disabled={busyCtl || preparing} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
@@ -336,12 +368,14 @@
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
               {/if}
             </button>
-            <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing} title="Forward 30 seconds" aria-label="Forward 30 seconds">
+            <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing || counting} title="Forward 30 seconds" aria-label="Forward 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
             </button>
             <button class="ic" onclick={nextClip} disabled={busyCtl || !stream.queue?.length}
-                    title={stream.queue?.length ? `Skip to ${stream.queue[0].title}` : 'Nothing queued to skip to'}
-                    aria-label="Skip to next episode">
+                    title={counting
+                      ? 'Start the show now'
+                      : stream.queue?.length ? `Skip to ${stream.queue[0].title}` : 'Nothing queued to skip to'}
+                    aria-label={counting ? 'Start the show now' : 'Skip to next episode'}>
               <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
             </button>
           </div>
@@ -557,6 +591,22 @@
     50% { box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent); }
   }
   .speed { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bufrow {
+    display: flex; align-items: center; gap: 7px;
+    padding: 0 10px 12px; margin-top: -6px;
+  }
+  .buf { flex: 1; height: 26px; min-width: 0; }
+  .buf polyline {
+    stroke: color-mix(in srgb, var(--success) 65%, transparent);
+    stroke-width: 1.5; fill: none;
+    vector-effect: non-scaling-stroke;
+  }
+  .buf polyline.low { stroke: var(--danger); }
+  .buflab {
+    font-size: 11px; color: var(--muted);
+    font-variant-numeric: tabular-nums; min-width: 22px; text-align: right;
+  }
+  .buflab.low { color: var(--danger); }
   .speed.slow { color: var(--danger); }
 
   main { padding: 22px 26px; min-width: 0; min-height: 0; overflow-y: auto; }

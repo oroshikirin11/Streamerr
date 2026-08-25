@@ -96,6 +96,7 @@
         patch.owncast = {
           rtmpUrl: cfg.owncast.rtmpUrl,
           apiUrl: cfg.owncast.apiUrl,
+          syncTitle: cfg.owncast.syncTitle !== false,
           ...(streamKey ? { streamKey } : {}),
         };
       }
@@ -200,6 +201,15 @@
     {#if keyStored && !streamKey}
       <p class="muted small">A key is saved. It is never sent back to the browser.</p>
     {/if}
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+      <input type="checkbox" bind:checked={cfg.owncast.syncTitle} style="width:auto" />
+      Update the Owncast stream title as episodes change
+    </label>
+    <p class="muted small">
+      Viewers see the episode on air ("Show — S1E4") on the watch page.
+      Needs the Owncast API address and access token from setup.
+    </p>
 
     <div class="actions">
       <button class="primary" onclick={() => save('owncast')}>Save</button>

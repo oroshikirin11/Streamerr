@@ -135,6 +135,27 @@
     };
   }
 
+  /** Scheduled start: "HH:MM" today, or tomorrow when that is already past. */
+  let scheduling = $state(false);
+  let startTime = $state('');
+  function toggleSchedule() {
+    scheduling = !scheduling;
+    if (scheduling && !startTime) {
+      // Suggest the next half-hour — movie night starts on a round time.
+      const d = new Date(Date.now() + 5 * 60_000);
+      d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0);
+      startTime = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+  }
+  function startAtEpoch() {
+    if (!scheduling || !startTime) return null;
+    const [h, m] = startTime.split(':').map(Number);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+    return Math.floor(d.getTime() / 1000);
+  }
+
   async function stream() {
     if (!selected.size) return;
     starting = true;
@@ -147,15 +168,16 @@
         const st = await api.streamStatus();
         if (st.status === 'stopped') {
           live = false;
-          await api.start(ordered, trackOverride);
+          await api.start(ordered, trackOverride, startAtEpoch());
         } else {
           await api.setQueue([...(st.queue ?? []).map((q) => q.id), ...ordered]);
         }
       } else {
-        await api.start(ordered, trackOverride);
+        await api.start(ordered, trackOverride, startAtEpoch());
       }
       selected = new Set();
       trackOverride = null;
+      scheduling = false;
       // Back to the grid: once it is playing, the transport bar is where you
       // control it, and the season list has served its purpose.
       series = null;
@@ -246,8 +268,23 @@
     <h1 style="margin:0">{series.title}</h1>
     <div class="spacer"></div>
     {#if selected.size}
+      {#if !live}
+        {#if scheduling}
+          <input class="schedtime" type="time" bind:value={startTime}
+                 title="The stream opens with a countdown card until this time" />
+        {/if}
+        <button class="sched" class:on={scheduling} onclick={toggleSchedule}
+                title={scheduling ? 'Start immediately instead' : 'Schedule the start — a countdown card runs until then'}
+                aria-pressed={scheduling} aria-label="Schedule the start">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+               stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
+          </svg>
+        </button>
+      {/if}
       <button class="primary" disabled={starting} onclick={stream}>
         {#if starting}{live ? 'Queueing…' : 'Starting…'}
+        {:else if scheduling && startTime && !live}Go live at {startTime}
         {:else}{live ? 'Add' : 'Stream'} {selected.size} episode{selected.size > 1 ? 's' : ''}{live ? ' to queue' : ''}{/if}
       </button>
     {/if}
@@ -429,4 +466,11 @@
     background: transparent; border-color: var(--border); font-size: 13px;
   }
   .tr.pick { border-color: var(--accent); color: var(--accent); }
+  .sched {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; padding: 7px 0; color: var(--muted);
+  }
+  .sched:hover { color: var(--text); }
+  .sched.on { color: var(--accent); border-color: var(--accent); }
+  .schedtime { width: auto; padding: 6px 8px; font-size: 13px; }
 </style>

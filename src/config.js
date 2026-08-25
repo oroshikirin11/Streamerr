@@ -17,7 +17,15 @@ const CONFIG_PATH = process.env.JELLYSTREAMERR_CONFIG
 
 const DEFAULTS = {
   server: { port: 8099, host: '0.0.0.0' },
-  owncast: { rtmpUrl: '', streamKey: '', apiUrl: '', accessToken: '' },
+  owncast: {
+    rtmpUrl: '',
+    streamKey: '',
+    apiUrl: '',
+    accessToken: '',
+    // Push the on-air title to Owncast's watch page as episodes change.
+    // Needs apiUrl + accessToken; does nothing without them.
+    syncTitle: true,
+  },
   library: {
     provider: 'filesystem',
     jellyfin: { url: '', apiKey: '' },

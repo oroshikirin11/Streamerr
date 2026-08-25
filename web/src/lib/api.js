@@ -76,8 +76,8 @@ export const api = {
   tracks: (id) => request('GET', `/api/library/tracks?id=${id}`),
 
   streamStatus: () => request('GET', '/api/stream/status'),
-  start: (itemIds, trackOverride) =>
-    request('POST', '/api/stream/start', { itemIds, trackOverride }),
+  start: (itemIds, trackOverride, startAt = null) =>
+    request('POST', '/api/stream/start', { itemIds, trackOverride, startAt }),
   stop: () => request('POST', '/api/stream/stop'),
   setQueue: (itemIds) => request('POST', '/api/stream/queue', { itemIds }),
   liveTracks: () => request('GET', '/api/stream/tracks'),

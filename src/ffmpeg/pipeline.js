@@ -29,6 +29,7 @@
  */
 
 import { spawn } from 'child_process';
+import { existsSync } from 'fs';
 import { EventEmitter } from 'events';
 import { join } from 'path';
 import { ProgressParser } from './progress.js';
@@ -182,6 +183,7 @@ export class PipelinePlayout extends EventEmitter {
     this._abort = new AbortController();
 
     const kbps = parseInt(String(profile?.videoBitrate ?? '6000'), 10) || 6000;
+    this._kbps = kbps;
     /** ~BANK_SECONDS of stream at the configured bitrate, clamped. */
     this._bankMax = Math.min(BANK_MAX_BYTES,
       Math.max(BANK_MIN_BYTES, kbps * 125 * BANK_SECONDS));
@@ -189,12 +191,13 @@ export class PipelinePlayout extends EventEmitter {
 
   // ── lifecycle ────────────────────────────────────────────────────────
 
-  async start(items = []) {
+  async start(items = [], { startAt = null } = {}) {
     if (this.status !== 'stopped') throw new Error(`Already ${this.status}`);
     if (!items.length) throw new Error('Nothing to play');
 
     this.queue = [...items];
     this._stopping = false;
+    this._countdownUntil = startAt;
 
     const first = this.queue.shift();
     // If the chosen subtitle lives inside the container and no extracted copy
@@ -228,7 +231,15 @@ export class PipelinePlayout extends EventEmitter {
     // open. Reading the head first means the source starts hot.
     await this._warm(first);
     this._spawnPublisher();
-    this._play(first, 0);
+    if (startAt != null && startAt - Date.now() / 1000 > 5) {
+      // Scheduled start: broadcast the countdown card until the hour hits.
+      // The first clip goes back on the queue — the card's natural end is a
+      // normal source close, so the ordinary _advance() picks it up.
+      this.queue.unshift(first);
+      this._playCountdown();
+    } else {
+      this._play(first, 0);
+    }
     // 'running' is claimed only when the encoder actually produces output
     // (first progress block) — a green "On air" during a startup that later
     // fails is a lie the user rightly called out.
@@ -440,6 +451,8 @@ export class PipelinePlayout extends EventEmitter {
   /** Jump within the current clip. Relative unless `absolute` is given. */
   seek({ delta = 0, position = null } = {}) {
     if (!this.current) throw new Error('Nothing playing');
+    // The countdown counts wall-clock time; there is nothing to seek in.
+    if (this.current.item?.countdown) return this.position;
 
     // Flush first: it rewinds the playhead to what has aired, and a
     // relative skip has to count from there or +30 lands a bankful further
@@ -743,8 +756,46 @@ export class PipelinePlayout extends EventEmitter {
     this._bankResume();
   }
 
+  /**
+   * The pre-show card: SMPTE bars with a ticking clock until the scheduled
+   * start. It is spawned as an ordinary clip so its natural end advances
+   * into the first episode through the standard path, and every respawn
+   * route (watchdog, crash, resume after pause) funnels back through
+   * _play's guard below — which recomputes the remaining time from the
+   * wall clock, so a respawned or paused countdown stays on schedule.
+   */
+  _playCountdown() {
+    this._killSource();
+    this.holding = false;
+    const startAt = this._countdownUntil ?? Date.now() / 1000;
+    const seconds = Math.max(1, startAt - Date.now() / 1000);
+    const when = new Date(startAt * 1000)
+      .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    this.current = {
+      item: {
+        id: '__countdown__',
+        title: `Pre-show — live at ${when}`,
+        duration: seconds,
+        countdown: true,
+      },
+      offset: 0,
+      duration: seconds,
+    };
+    this.position = 0;
+    this._spawnSource(buildCountdownArgs({
+      profile: this.profile,
+      tsOffset: this.timeline,
+      statsPeriodMs: this.statsPeriodMs,
+      seconds,
+      nextTitle: this.queue[0]?.title ?? '',
+    }), { kind: 'clip' });
+  }
+
   /** Start (or restart) the source at a given offset within a clip. */
   _play(item, offset = 0, { duration = null } = {}) {
+    // Restarting the countdown (watchdog respawn, resume after pause) must
+    // re-derive its remaining length — it counts wall-clock time, not media.
+    if (item?.countdown) return this._playCountdown();
     this._killSource();
     this.holding = false;
     this.current = { item, offset, duration: duration ?? item.duration ?? null };
@@ -1090,6 +1141,9 @@ export class PipelinePlayout extends EventEmitter {
 
       this.emit('progress', {
         position: this._onAir().position, speed, drops: b.dropFrames,
+        // Bank reserve in seconds — how much stall the broadcast can absorb.
+        buffer: (this._bankBytes ?? 0) / (this._kbps * 125),
+        bufferMax: this._bankMax / (this._kbps * 125),
       });
     });
     s.stdio[3]?.on('data', (d) => parser.push(d));
@@ -1608,10 +1662,29 @@ export function buildChunkArgs({
 }
 
 /** Hold card, matching the output profile so the publisher sees no change. */
+/** drawtext font argument that works across distros: the well-known DejaVu
+ *  locations first, fontconfig's default face when none of them exist. */
+function fontArg() {
+  const f = HOLD_FONTS.find((p) => { try { return existsSync(p); } catch { return false; } });
+  return f ? `fontfile=${f}:` : '';
+}
+
+/** Card encoder: software x264 so cards work even when hardware encoding is
+ *  what broke, matched to the profile so the publisher never sees a seam. */
+function cardEncodeArgs(profile) {
+  const gop = String((profile.gopSeconds ?? 2) * (profile.fps ?? 30));
+  return [
+    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+    '-b:v', profile.videoBitrate, '-maxrate', profile.videoBitrate,
+    '-bufsize', profile.videoBitrate,
+    '-g', gop, '-keyint_min', gop, '-sc_threshold', '0', '-bf', '0',
+    '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
+  ];
+}
+
 export function buildHoldArgs({
   profile, tsOffset = 0, statsPeriodMs = 500, label = 'Paused',
 }) {
-  const gop = String((profile.gopSeconds ?? 2) * (profile.fps ?? 30));
   const text = String(label).replace(/[\\':]/g, '');
 
   return [
@@ -1622,15 +1695,9 @@ export function buildHoldArgs({
     '-re',
     '-f', 'lavfi', '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps}`,
     '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-    '-vf', `drawtext=fontfile=${HOLD_FONT}:text='${text}':fontcolor=white:`
+    '-vf', `drawtext=${fontArg()}text='${text}':fontcolor=white:`
       + 'fontsize=h/18:x=(w-text_w)/2:y=(h-text_h)/2',
-    // Software x264: the hold has to work even when hardware encoding is what
-    // broke, and it costs nothing on a black frame.
-    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
-    '-b:v', profile.videoBitrate, '-maxrate', profile.videoBitrate,
-    '-bufsize', profile.videoBitrate,
-    '-g', gop, '-keyint_min', gop, '-sc_threshold', '0', '-bf', '0',
-    '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
+    ...cardEncodeArgs(profile),
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
@@ -1638,7 +1705,59 @@ export function buildHoldArgs({
   ];
 }
 
-const HOLD_FONT = '/usr/share/fonts/TTF/DejaVuSans.ttf';
+const HOLD_FONTS = [
+  '/usr/share/fonts/TTF/DejaVuSans.ttf',                       // Arch
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',           // Debian/Ubuntu
+  '/usr/share/fonts/dejavu/DejaVuSans.ttf',                    // Fedora
+];
+
+/**
+ * The pre-show card: SMPTE bars, a big clock counting down to the scheduled
+ * start, and the first title underneath. Runs exactly `seconds` and exits 0,
+ * which the ordinary clip-close path treats as a natural end — _advance()
+ * then rolls straight into the show.
+ */
+export function buildCountdownArgs({
+  profile, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
+}) {
+  const W = profile.width;
+  const H = profile.height;
+  const R = Math.ceil(seconds);
+  const font = fontArg();
+  // Remaining time, rendered live by drawtext: R counts down with stream
+  // time. Hours appear only when the wait is that long.
+  const clock = R >= 3600
+    ? `%{eif\\:trunc((${R}-t)/3600)\\:d\\:1}\\:%{eif\\:mod(trunc((${R}-t)/60),60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`
+    : `%{eif\\:trunc((${R}-t)/60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`;
+  const title = String(nextTitle).replace(/[\\':%]/g, '').slice(0, 70);
+  const vf = [
+    // The dark band the text sits on, so the clock reads over any bar color.
+    `drawbox=x=0:y=ih*0.30:w=iw:h=ih*0.40:color=black@0.72:t=fill`,
+    `drawtext=${font}text='STARTING SOON':fontcolor=white@0.85:`
+      + 'fontsize=h/22:x=(w-text_w)/2:y=h*0.345',
+    `drawtext=${font}text='${clock}':fontcolor=white:`
+      + 'fontsize=h/5:x=(w-text_w)/2:y=h*0.42',
+    ...(title ? [
+      `drawtext=${font}text='${title}':fontcolor=white@0.85:`
+        + 'fontsize=h/26:x=(w-text_w)/2:y=h*0.625',
+    ] : []),
+  ].join(',');
+
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
+    '-re',
+    '-f', 'lavfi', '-t', String(R),
+    '-i', `smptehdbars=s=${W}x${H}:r=${profile.fps}`,
+    '-f', 'lavfi', '-t', String(R),
+    '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    '-vf', vf,
+    ...cardEncodeArgs(profile),
+    '-output_ts_offset', Number(tsOffset).toFixed(3),
+    '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+    '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+    '-f', 'mpegts', 'pipe:1',
+  ];
+}
 
 function lastLines(s, n) {
   return (s || '').split('\n').filter(Boolean).slice(-n).join('\n');
