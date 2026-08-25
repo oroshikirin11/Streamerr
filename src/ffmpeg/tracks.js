@@ -62,7 +62,7 @@ export function probeTracks(path) {
       '-v', 'error',
       '-show_streams',
       '-show_entries',
-      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio,r_frame_rate,color_transfer:'
+      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio,r_frame_rate,color_transfer,pix_fmt,profile:'
       + 'stream_tags=language,title:stream_disposition=default,forced,hearing_impaired',
       '-of', 'json',
       path,
@@ -132,6 +132,10 @@ function groupStreams(streams) {
       // source without drift; hdr flags whether tone mapping is required.
       entry.frameRate = s.r_frame_rate ?? null;
       entry.hdr = ['smpte2084', 'arib-std-b67'].includes(s.color_transfer);
+      // Needed to know whether the GPU can decode this at all — see
+      // gpuDecodable(). 10-bit H.264 is the common case that cannot.
+      entry.pixFmt = s.pix_fmt ?? null;
+      entry.profile = s.profile ?? null;
     }
     result[type].push(entry);
   }

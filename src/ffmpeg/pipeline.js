@@ -61,6 +61,29 @@ export function effectiveFps(video, profile) {
   return { rate: String(cap), fps: cap };
 }
 
+/**
+ * Whether the GPU can decode this source.
+ *
+ * Intel's H.264 decoder is 8-bit 4:2:0 only, and 10-bit H.264 ("Hi10P") is
+ * ubiquitous in anime releases. Handing one to VAAPI fails at hwaccel init;
+ * the decoder then emits software frames the VAAPI filter chain cannot
+ * accept ("Impossible to convert between the formats"), and the whole thing
+ * finally surfaces as an encoder -22 several stages downstream — which is
+ * why this looked like a pillarbox or encoder-argument problem for so long.
+ *
+ * Decoding on the CPU and uploading keeps filters and encode on the GPU,
+ * which is where nearly all of the win is.
+ */
+export function gpuDecodable(video) {
+  if (!video) return true;
+  const codec = String(video.codec ?? '').toLowerCase();
+  const pix = String(video.pixFmt ?? '').toLowerCase();
+  if (!pix) return true;                       // unknown: let it try
+  if (codec === 'h264') return pix === 'yuv420p' || pix === 'yuvj420p';
+  // HEVC/VP9/AV1 10-bit 4:2:0 is fine; anything deeper or wider is not.
+  return !/(12|16)le?$/.test(pix) && !/44[04]/.test(pix) && !/422/.test(pix);
+}
+
 export function contentRect(video, profile) {
   const W = profile.width;
   const H = profile.height;
@@ -1244,6 +1267,23 @@ export class PipelinePlayout extends EventEmitter {
         // one frame has been wrong about sustained encoding before. The CPU
         // burn path has no such constraint, so demote once and retry the
         // same clip at the same position instead of failing the broadcast.
+        // Hardware DECODE failing is its own fault, and a different one
+        // from the composite failing: the driver cannot read this file at
+        // all. It surfaces far downstream — the decoder falls back to
+        // software frames, the VAAPI filters reject them, and the encoder
+        // reports -22 — so match on the real message, not the symptom.
+        // Decoding on the CPU keeps filters and encode on the GPU.
+        if (!this._sawBlock && !this.profile?.swDecode && this.current
+            && /hwaccel initialisation returned error|Failed setup for format vaapi/i.test(stderr)) {
+          this.profile.swDecode = true;
+          this.emit('warn', 'This file cannot be decoded by the GPU '
+            + '(10-bit H.264 is the usual reason) — decoding on the CPU and '
+            + 'keeping the rest on the GPU.');
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
         if (!this._sawBlock && this.profile?.gpuSubs && this.selection?.subtitle
             && !this._gpuSubsDemoted && this.current) {
           this._gpuSubsDemoted = true;
@@ -1317,6 +1357,7 @@ export class PipelinePlayout extends EventEmitter {
     // milliseconds after the previous one's processes were SIGKILLed can
     // catch the device mid-teardown. Give the GPU one more chance on the
     // next clip; a second failure latches CPU for the whole broadcast.
+    if (this.profile?.swDecode) delete this.profile.swDecode;
     if (this._gpuSubsDemoted && (this._gpuSubFails ?? 0) < 2 && this._demoted) {
       if (this._demoted.barsFailed) delete this.profile.barsFailed;
       if (this._demoted.gpuSubs) this.profile.gpuSubs = true;
@@ -1460,16 +1501,20 @@ export function buildSourceArgs({
       ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
         + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
       : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
+    const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
-      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      ...(hwDec
+        ? ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va']
+        : []),
       '-extra_hw_frames', '8',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
-      '-vf', rect.bars
+      // Software-decoded frames have to be handed to the GPU explicitly.
+      '-vf', (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
         ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
-        : scalePart,
+        : scalePart),
       '-map', '0:v:0', '-map', `0:a:${audioIdx}?`,
       ...be.encoderArgs(profEff),
       '-async_depth', '4',
@@ -1573,13 +1618,16 @@ export function buildSourceArgs({
       }
     }
 
+    const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
     const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
-      + `[0:v]${videoChain}[b];${composite}`;
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
-      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      ...(hwDec
+        ? ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va']
+        : []),
       // Extra decode surfaces let decode run ahead of scale/encode instead
       // of lock-stepping — pipelining, not quality.
       '-extra_hw_frames', '8',
