@@ -180,7 +180,18 @@
           live = false;
           await api.start(ordered, trackOverride, startAtEpoch());
         } else {
-          await api.setQueue([...(st.queue ?? []).map((q) => q.id), ...ordered]);
+          // Entries, not bare ids: sending ids alone silently discarded
+          // every programmed air time and off-air break already set on the
+          // schedule, so adding one episode from the library wiped an
+          // evening's planning.
+          await api.setQueue([
+            ...(st.queue ?? []).map((q) => ({
+              id: q.id,
+              startAt: q.startAt ?? null,
+              breakOffline: q.breakOffline ?? false,
+            })),
+            ...ordered.map((id) => ({ id })),
+          ]);
         }
       } else {
         await api.start(ordered, trackOverride, startAtEpoch());
