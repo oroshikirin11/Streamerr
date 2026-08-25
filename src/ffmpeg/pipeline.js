@@ -75,8 +75,12 @@ export function contentRect(video, profile) {
   const even = (n) => Math.max(2, Math.round(n / 2) * 2);
   const w = even(vw * r);
   const h = even(vh * r);
-  const x = Math.round((W - w) / 2);
-  const y = Math.round((H - h) / 2);
+  // Offsets even as well: NV12 chroma is 2x2-subsampled, and placing a
+  // surface at an odd x/y is exactly the kind of thing a strict VAAPI
+  // driver answers with -22. A scope film (2.35:1 → h=818 → y=131) hits
+  // this; being one pixel off exact centre is invisible.
+  const x = Math.round((W - w) / 4) * 2;
+  const y = Math.round((H - h) / 4) * 2;
   return { w, h, x, y, bars: x > 1 || y > 1 };
 }
 import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
@@ -170,6 +174,12 @@ export class PipelinePlayout extends EventEmitter {
     this._lastBlockAt = null;
     this._respawns = [];
     this._watch = null;
+
+    // Everything background this engine ever spawns (subtitle and font
+    // extraction) hangs off this signal, so stop() actually stops the
+    // machine instead of leaving detached ffmpegs demuxing a remux for
+    // minutes after the broadcast ended.
+    this._abort = new AbortController();
 
     const kbps = parseInt(String(profile?.videoBitrate ?? '6000'), 10) || 6000;
     /** ~BANK_SECONDS of stream at the configured bitrate, clamped. */
@@ -316,6 +326,7 @@ export class PipelinePlayout extends EventEmitter {
 
   stop({ graceful = false } = {}) {
     this._stopping = true;
+    this._abort.abort();     // take background extractions down too
     this._killSource();
     if (this.publisher) {
       const p = this.publisher;
@@ -382,6 +393,7 @@ export class PipelinePlayout extends EventEmitter {
    */
   hardStop() {
     this._stopping = true;
+    this._abort.abort();
     this._bank = [];
     this._bankBytes = 0;
     if (this._watch) { clearInterval(this._watch); this._watch = null; }
@@ -927,8 +939,8 @@ export class PipelinePlayout extends EventEmitter {
       }
     };
     const p = Promise.all([
-      extractSubtitle(item.srcPath, sub, this.cacheDir, onProgress),
-      extractFonts(item.srcPath, this.cacheDir),
+      extractSubtitle(item.srcPath, sub, this.cacheDir, onProgress, this._abort.signal),
+      extractFonts(item.srcPath, this.cacheDir, this._abort.signal),
     ]).then(([path, fontsDir]) => {
       if (!path) return null;
       const entry = { path, fontsDir };
@@ -1108,14 +1120,17 @@ export class PipelinePlayout extends EventEmitter {
         if (!this._sawBlock && this.profile?.gpuSubs && this.selection?.subtitle
             && !this._gpuSubsDemoted && this.current) {
           this._gpuSubsDemoted = true;
+          this._gpuSubFails = (this._gpuSubFails ?? 0) + 1;
           // Scope the demotion to what actually failed: the pillarboxed
           // composite failing says nothing about plain 16:9 clips, and
           // demoting everything sent full-HD episodes to the CPU for the
           // rest of the broadcast for no reason.
           if (contentRect(this.selection?.video, this.profile).bars) {
             this.profile.barsFailed = true;
+            this._demoted = { barsFailed: true };
           } else {
             this.profile.gpuSubs = false;
+            this._demoted = { gpuSubs: true };
           }
           this.emit('warn', 'GPU subtitle compositing failed on this driver — '
             + `retrying this clip with CPU burn-in. (${tail})`);
@@ -1171,6 +1186,16 @@ export class PipelinePlayout extends EventEmitter {
 
   /** Move to the next queued clip, or end the broadcast. */
   _advance() {
+    // One GPU-composite failure can be a transient — a broadcast started
+    // milliseconds after the previous one's processes were SIGKILLed can
+    // catch the device mid-teardown. Give the GPU one more chance on the
+    // next clip; a second failure latches CPU for the whole broadcast.
+    if (this._gpuSubsDemoted && (this._gpuSubFails ?? 0) < 2 && this._demoted) {
+      if (this._demoted.barsFailed) delete this.profile.barsFailed;
+      if (this._demoted.gpuSubs) this.profile.gpuSubs = true;
+      this._demoted = null;
+      this._gpuSubsDemoted = false;
+    }
     const next = this.queue.shift();
     if (!next) {
       this.emit('queue-empty');

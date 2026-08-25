@@ -84,7 +84,7 @@ function keyFor(srcPath, typeIndex) {
  *
  * @returns {Promise<string|null>} path to the extracted subtitle file
  */
-export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null) {
+export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null, signal = null) {
   if (!isExtractable(sub)) return null;
   if (!existsSync(srcPath)) return null;
 
@@ -122,7 +122,7 @@ export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null)
     // reached — exactly the number a progress bar wants.
     '-progress', 'pipe:3', '-stats_period', '2',
     tmp,
-  ], undefined, timeout, onProgress);
+  ], undefined, timeout, onProgress, signal);
 
   if (!ok || !existsSync(tmp)) {
     safeUnlink(tmp);
@@ -144,7 +144,7 @@ export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null)
  *
  * @returns {Promise<string|null>} directory containing the fonts
  */
-export async function extractFonts(srcPath, cacheDir) {
+export async function extractFonts(srcPath, cacheDir, signal = null) {
   if (!existsSync(srcPath)) return null;
 
   let dir;
@@ -169,8 +169,9 @@ export async function extractFonts(srcPath, cacheDir) {
     '-i', srcPath,
     '-t', '0.1',
     '-f', 'null', '-',
-  ], dir);
+  ], dir, 120_000, null, signal);
 
+  if (signal?.aborted) return null;
   // A file with no attachments is not a failure — there is simply nothing to
   // extract, and libass falls back to system fonts. Mark it done either way so
   // we don't retry on every clip.
@@ -184,14 +185,21 @@ function safeUnlink(p) {
   try { unlinkSync(p); } catch { /* already gone */ }
 }
 
-function run(args, cwd, timeoutMs = 120_000, onProgress = null) {
+function run(args, cwd, timeoutMs = 120_000, onProgress = null, signal = null) {
   return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(false); return; }
     const child = spawn('ffmpeg', args, {
       stdio: onProgress
         ? ['ignore', 'ignore', 'pipe', 'pipe']
         : ['ignore', 'ignore', 'pipe'],
       cwd,
     });
+    // The caller stopping (broadcast ended, engine replaced) must take the
+    // extraction down with it: an orphaned demux of a Bluray remux keeps
+    // hammering the disk and the network share for many minutes after the
+    // user pressed stop, competing with whatever plays next.
+    const onAbort = () => { try { child.kill('SIGKILL'); } catch { /* gone */ } };
+    signal?.addEventListener('abort', onAbort, { once: true });
     if (onProgress) {
       let buf = '';
       child.stdio[3]?.on('data', (d) => {
@@ -203,7 +211,12 @@ function run(args, cwd, timeoutMs = 120_000, onProgress = null) {
       });
     }
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.on('error', () => { clearTimeout(timer); resolve(false); });
-    child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+    const done = (ok) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(ok);
+    };
+    child.on('error', () => done(false));
+    child.on('close', (code) => done(code === 0 && !signal?.aborted));
   });
 }
