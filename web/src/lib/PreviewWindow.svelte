@@ -139,7 +139,20 @@
   let wdBuf = 0;
   let wdStuck = 0;
   function checkStall() {
-    if (!video || !player || video.paused) return;
+    if (!video || !player) return;
+    // A paused element is NOT a reason to stand down. After a splice
+    // tears the player down and rebuilds it, the browser can leave the
+    // fresh element paused — and a watchdog that bails on paused then
+    // never runs again, which is a permanent stillframe that only
+    // toggling the window off and on cleared. Unless we are genuinely
+    // waiting on a user gesture, a paused live monitor IS the stall:
+    // nudge it, and rebuild if it stays down.
+    if (video.paused) {
+      if (needsGesture) return;
+      tryPlay();
+      if (++wdStuck >= 2) { wdStuck = 0; retry(300); }
+      return;
+    }
     const frames = video.getVideoPlaybackQuality?.().totalVideoFrames
       ?? Math.round(video.currentTime * 30);
     const buf = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
