@@ -56,11 +56,11 @@ const DEFAULTS = {
     // large files, so this must not be disableable: a stale `false` saved by
     // an older build put the engine into an endless startup loop.
     extractSubtitles: true,
-    // Encode this many chunks of a clip at once when burning subtitles.
-    // libass is single-threaded, so one process cannot use the rest of the
-    // CPU; several can. 1 disables it. Only engages when subtitles are on,
-    // since that is the only thing that pins the pipeline to one core.
-    parallelChunks: 1,
+    // Chunk-encoding concurrency. Decided per clip by the engine — see
+    // _chunkWorkers — because the right answer depends on whether THIS
+    // clip can use the GPU compositor, which varies by file and by driver.
+    // Left here as an escape hatch: 2 or more forces that many workers.
+    parallelChunks: 'auto',
     // Longer chunks mean fewer seams but more latency before playback starts.
     chunkSeconds: 20,
   },

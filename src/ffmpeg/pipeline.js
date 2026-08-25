@@ -31,6 +31,7 @@
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { Writable } from 'stream';
+import { cpus } from 'os';
 import { EventEmitter } from 'events';
 import { join } from 'path';
 import { ProgressParser } from './progress.js';
@@ -1054,7 +1055,7 @@ export class PipelinePlayout extends EventEmitter {
     // Several encodes at once when one process cannot keep up. Only worth it
     // when subtitles are being burned — that is what pins the pipeline to a
     // single core.
-    const workers = Number(this.profile?.parallelChunks ?? 1);
+    const workers = this._chunkWorkers();
     if (workers > 1 && this.selection?.subtitle) {
       this._playChunked(item, offset, cached, workers);
       this.emit('nowplaying', this.snapshot());
@@ -1103,6 +1104,43 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   /** Encode this clip as parallel chunks fed to the publisher in order. */
+  /**
+   * How many chunk workers this clip deserves — decided here, not asked of
+   * the user.
+   *
+   * Chunking only pays when the CPU is burning the subtitles: libass is
+   * single-threaded, so one process is capped at one core no matter how
+   * many the machine has. But the decision to chunk happens BEFORE the
+   * graph is chosen, so switching it on also forces the CPU path and gives
+   * up the GPU compositor — which is 2-4x cheaper for ordinary subtitles.
+   * As a setting that was a trap: turning it up to use more cores quietly
+   * stopped using the GPU, and on the common case made things slower.
+   *
+   * So: chunk only when this clip was going to burn on the CPU anyway, and
+   * leave a core for the publisher, the audio and Node itself.
+   */
+  _chunkWorkers() {
+    // An explicit 2+ in the config still wins, for debugging on a box
+    // whose behaviour we cannot predict. 0/1/absent means "decide for me".
+    const manual = Number(this.profile?.parallelChunks);
+    if (Number.isFinite(manual) && manual >= 2) return Math.min(manual, 8);
+
+    const sub = this.selection?.subtitle;
+    if (!sub) return 1;
+
+    // Exactly the conditions buildSourceArgs uses to pick the GPU
+    // composite. If it is available, it beats any number of CPU workers.
+    const video = this.selection?.video;
+    const gpuComposite = Boolean(this.profile?.gpuSubs)
+      && !this.profile?.swDecode
+      && gpuDecodable(video)
+      && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
+    if (gpuComposite) return 1;
+
+    const cores = cpus()?.length || 2;
+    return Math.max(1, Math.min(4, cores - 1));
+  }
+
   _playChunked(item, offset, cached, workers) {
     this._clipBase = this.timeline;
     const chunkSeconds = Number(this.profile?.chunkSeconds ?? 20);

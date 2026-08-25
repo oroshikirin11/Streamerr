@@ -115,7 +115,6 @@
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           hwDecode: Boolean(cfg.encoder.hwDecode),
-          parallelChunks: +cfg.encoder.parallelChunks || 1,
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
       }
@@ -365,10 +364,7 @@
     </p>
 
     <div class="g3" style="margin-top:6px">
-      <div>
-        <label>Parallel chunks</label>
-        <input type="number" min="1" max="8" bind:value={cfg.encoder.parallelChunks} />
-      </div>
+      <div></div>
       <div>
         <label>Chunk length (s)</label>
         <input type="number" min="4" max="120" bind:value={cfg.encoder.chunkSeconds} />
