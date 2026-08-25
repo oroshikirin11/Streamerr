@@ -86,6 +86,27 @@ import { ChunkScheduler } from './chunker.js';
 const SOURCE_FAIL_MS = 2_000;
 /** Publisher exiting this fast means the RTMP target rejected us. */
 const PUBLISH_FAIL_MS = 5_000;
+/**
+ * Elastic buffer between source and publisher, in bytes (~16s at 12 Mbps).
+ *
+ * Encode speed is not constant: libass renders heavy typesetting on one
+ * core, so a clip can swing 1.3x → 0.7x scene by scene. Direct piping gave
+ * the pipeline only the OS pipe (well under a second) of slack, so every
+ * dip below 1.0x — and every source restart at a seek or episode boundary —
+ * starved the publisher immediately; ten starved seconds and Owncast ends
+ * the broadcast. With a bank, fast sections build reserve that slow
+ * sections and restarts spend.
+ *
+ * Deliberately bounded: everything banked is encoded-but-unaired, so a
+ * user-initiated jump (seek, track change, skip) discards it to stay
+ * responsive, and viewers skip forward by however much was banked. A few
+ * tens of seconds of resilience is worth that; minutes would not be. The
+ * byte cap is derived from the configured bitrate to land at ~BANK_SECONDS
+ * regardless of quality settings.
+ */
+const BANK_SECONDS = 15;
+const BANK_MIN_BYTES = 2 * 1024 * 1024;
+const BANK_MAX_BYTES = 48 * 1024 * 1024;
 
 export class PipelinePlayout extends EventEmitter {
   /**
@@ -133,6 +154,11 @@ export class PipelinePlayout extends EventEmitter {
     this._lastBlockAt = null;
     this._respawns = [];
     this._watch = null;
+
+    const kbps = parseInt(String(profile?.videoBitrate ?? '6000'), 10) || 6000;
+    /** ~BANK_SECONDS of stream at the configured bitrate, clamped. */
+    this._bankMax = Math.min(BANK_MAX_BYTES,
+      Math.max(BANK_MIN_BYTES, kbps * 125 * BANK_SECONDS));
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────
@@ -246,15 +272,29 @@ export class PipelinePlayout extends EventEmitter {
     }
   }
 
-  stop() {
+  stop({ graceful = false } = {}) {
     this._stopping = true;
     this._killSource();
     if (this.publisher) {
-      // Closing stdin lets the publisher flush and close the RTMP session
-      // cleanly rather than being cut off mid-packet.
-      try { this.publisher.stdin.end(); } catch { /* already gone */ }
       const p = this.publisher;
-      setTimeout(() => { if (!p.killed) p.kill('SIGKILL'); }, 5000).unref?.();
+      try {
+        // On a natural end (queue ran dry) the bank holds the closing
+        // seconds of the final clip, already encoded but not yet aired —
+        // hand it all to the publisher and let it play out to EOF, or the
+        // broadcast ends however-many banked seconds before the ending.
+        // On a user stop, responsiveness wins and the tail is dropped.
+        const tail = graceful ? (this._bank ?? []) : [];
+        this._bank = [];
+        this._bankBytes = 0;
+        for (const c of tail) p.stdin.write(c);
+        // Closing stdin lets the publisher flush and close the RTMP session
+        // cleanly rather than being cut off mid-packet.
+        p.stdin.end();
+      } catch { /* already gone */ }
+      // Graceful gets time to air the tail at realtime; the timer is only a
+      // failsafe against a publisher that never sees EOF.
+      const killMs = graceful ? 120_000 : 5000;
+      setTimeout(() => { if (!p.killed) p.kill('SIGKILL'); }, killMs).unref?.();
     }
   }
 
@@ -282,6 +322,7 @@ export class PipelinePlayout extends EventEmitter {
     }
 
     // Restart only the source; the publisher and its connection are untouched.
+    this._bankFlush();
     this._play(this.current.item, next, { duration: this.current.duration });
     this.emit('seeked', { position: next });
     return next;
@@ -290,6 +331,7 @@ export class PipelinePlayout extends EventEmitter {
   pause() {
     if (this.status === 'paused' || !this.current) return;
     this.status = 'paused';
+    this._bankFlush();
     // Hold the pipe with a card so the publisher keeps writing and Owncast
     // never sees the ten seconds of silence that would end the broadcast.
     this._spawnHold();
@@ -310,6 +352,7 @@ export class PipelinePlayout extends EventEmitter {
       const item = this.current.item;
       const pos = this.position;
       const dur = this.current.duration;
+      this._bankFlush();
       this.prepare(item).finally(() => this._play(item, pos, { duration: dur }));
     }
     this.emit('selection', selection);
@@ -387,8 +430,66 @@ export class PipelinePlayout extends EventEmitter {
     this.source = null;
     if (!s) return;
     // Unhook first so its exit isn't mistaken for the clip finishing.
-    s.stdout?.unpipe?.();
+    s.stdout?.removeAllListeners?.('data');
+    try { s.stdout?.resume?.(); } catch { /* already gone */ }
     try { s.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+
+  // ── the bank: bounded elastic buffer feeding the publisher ───────────
+
+  _bankPush(src, chunk) {
+    if (this.source !== src) return;   // superseded mid-flight
+    this._bank ??= [];
+    this._bank.push(chunk);
+    this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
+    // Backpressure moves from the OS pipe to here: past the cap the source
+    // pauses, and resumes once half the bank has aired.
+    if (this._bankBytes > this._bankMax && !this._srcPaused) {
+      this._srcPaused = true;
+      try { src.stdout.pause(); } catch { /* dying */ }
+    }
+    this._bankDrain();
+  }
+
+  _bankDrain() {
+    if (this._bankDraining) return;
+    const w = this.publisher?.stdin;
+    if (!w || !w.writable) return;
+    this._bankDraining = true;
+    while (this._bank?.length) {
+      const c = this._bank.shift();
+      this._bankBytes -= c.length;
+      let ok = false;
+      try { ok = w.write(c); } catch { break; /* publisher died mid-write */ }
+      if (!ok) {
+        w.once('drain', () => {
+          this._bankDraining = false;
+          this._bankResume();
+          this._bankDrain();
+        });
+        return;
+      }
+    }
+    this._bankDraining = false;
+    this._bankResume();
+  }
+
+  _bankResume() {
+    if (this._srcPaused && (this._bankBytes ?? 0) < this._bankMax / 2) {
+      this._srcPaused = false;
+      try { this.source?.stdout?.resume(); } catch { /* gone */ }
+    }
+  }
+
+  /**
+   * Drop everything encoded but not yet aired. Called on every user-visible
+   * jump — seek, track change, skip, pause — so the action takes effect now
+   * rather than after the bank plays out.
+   */
+  _bankFlush() {
+    this._bank = [];
+    this._bankBytes = 0;
+    this._bankResume();
   }
 
   /** Start (or restart) the source at a given offset within a clip. */
@@ -636,10 +737,8 @@ export class PipelinePlayout extends EventEmitter {
     });
     this.source = s;
 
-    if (this.publisher?.stdin.writable) {
-      // end:false is essential — the publisher must survive this source.
-      s.stdout.pipe(this.publisher.stdin, { end: false });
-    }
+    // Through the bank, not a direct pipe — see BANK_MAX_BYTES.
+    s.stdout.on('data', (d) => this._bankPush(s, d));
 
     const parser = new ProgressParser();
     const startOffset = kind === 'clip' ? (this.current?.offset ?? 0) : 0;
@@ -735,6 +834,22 @@ export class PipelinePlayout extends EventEmitter {
       const ranMs = Date.now() - startedAt;
       if (code !== 0) {
         const tail = lastLines(stderr, 3);
+        // The GPU subtitle composite failing outright (h264_vaapi rejecting
+        // every frame) is a driver property, not a file property — the
+        // startup probe is supposed to catch it, but a probe that passes on
+        // one frame has been wrong about sustained encoding before. The CPU
+        // burn path has no such constraint, so demote once and retry the
+        // same clip at the same position instead of failing the broadcast.
+        if (!this._sawBlock && this.profile?.gpuSubs && this.selection?.subtitle
+            && !this._gpuSubsDemoted && this.current) {
+          this._gpuSubsDemoted = true;
+          this.profile.gpuSubs = false;
+          this.emit('warn', 'GPU subtitle compositing failed on this driver — '
+            + `retrying with CPU burn-in. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
         // A clip that exits with an error before producing a single frame
         // did not "finish" — it failed. Advancing here turns one broken
         // filtergraph into a silent march through the whole queue, each
@@ -771,7 +886,7 @@ export class PipelinePlayout extends EventEmitter {
     const next = this.queue.shift();
     if (!next) {
       this.emit('queue-empty');
-      this.stop();
+      this.stop({ graceful: true });
       return;
     }
     this.emit('queue', this.snapshot());
@@ -830,6 +945,7 @@ export class PipelinePlayout extends EventEmitter {
       this.status = 'starting';
       this.emit('status', this.status);
     }
+    this._bankFlush();
     this._advance();
     return true;
   }

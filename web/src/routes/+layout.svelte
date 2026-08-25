@@ -467,13 +467,19 @@
   .center { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
   .login { width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px; }
 
-  .app { display: grid; grid-template-columns: 190px 1fr; grid-template-rows: 1fr auto; min-height: 100vh; }
+  /* Fixed viewport: the app never scrolls as a page. Long content scrolls
+     inside <main>, so the transport bar stays put on every tab. */
+  .app {
+    display: grid; grid-template-columns: 190px 1fr;
+    grid-template-rows: 1fr auto auto; height: 100vh;
+  }
   aside {
-    grid-row: 1 / 3;
+    grid-row: 1 / 4;
     border-right: 1px solid var(--border);
     background: var(--surface);
     padding: 14px 10px;
     display: flex; flex-direction: column; gap: 4px;
+    overflow-y: auto;
   }
   .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 16px; font-size: 14px; letter-spacing: .01em; }
   .mark {
@@ -523,7 +529,7 @@
   .speed { color: var(--muted); font-variant-numeric: tabular-nums; }
   .speed.slow { color: var(--danger); }
 
-  main { padding: 22px 26px; min-width: 0; }
+  main { padding: 22px 26px; min-width: 0; min-height: 0; overflow-y: auto; }
 
   footer {
     grid-column: 2; position: relative;
@@ -611,6 +617,7 @@
   .panel {
     grid-column: 2; border-top: 1px solid var(--border);
     background: var(--surface); padding: 12px 20px 16px;
+    max-height: 45vh; overflow-y: auto;
   }
   .phead { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 8px; }

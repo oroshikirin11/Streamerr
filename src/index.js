@@ -8,7 +8,7 @@
 import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
-import { existsSync, createReadStream } from 'fs';
+import { existsSync, createReadStream, readdirSync } from 'fs';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -202,6 +202,28 @@ function redactedConfig() {
 /** Read-only activity log for the web console. No input path exists. */
 app.get('/api/debug/log', (req, res) => {
   res.json({ entries: dlist(Number(req.query.after) || 0) });
+});
+
+/**
+ * Directory listing for the library folder picker. Directories only, names
+ * only — never file contents — and only for an authenticated session (the
+ * panel already runs with filesystem-wide read access by design: its whole
+ * job is reading the media tree the operator points it at).
+ */
+app.get('/api/fs/dirs', (req, res) => {
+  const path = resolve(String(req.query.path || '/'));
+  let entries;
+  try {
+    entries = readdirSync(path, { withFileTypes: true });
+  } catch (err) {
+    return res.status(400).json({ error: `Cannot read ${path}: ${err.code ?? err.message}` });
+  }
+  const dirs = entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const parent = dirname(path);
+  res.json({ path, parent: parent === path ? null : parent, dirs });
 });
 
 app.get('/api/config', (req, res) => res.json(redactedConfig()));

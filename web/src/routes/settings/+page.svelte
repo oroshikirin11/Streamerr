@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { api } from '$lib/api.js';
+  import DirBrowser from '$lib/DirBrowser.svelte';
 
   // Everything the wizard configures is editable here. Setup exists to get a
   // working system quickly, not to be the only way to change something.
@@ -25,6 +26,13 @@
   let pwMsg = $state('');
 
   let fsRoots = $state('');
+  let browsing = $state(false);
+
+  function addRoot(path) {
+    const roots = parseList(fsRoots);
+    if (!roots.includes(path)) fsRoots = [...roots, path].join('\n');
+    browsing = false;
+  }
 
   // Common output sizes; Custom reveals the manual fields.
   const RES_PRESETS = [
@@ -346,6 +354,9 @@
     {:else}
       <label>Folders, one per line</label>
       <textarea rows="3" bind:value={fsRoots} spellcheck="false"></textarea>
+      <div class="actions" style="margin-top:8px;">
+        <button onclick={() => (browsing = true)}>Browse…</button>
+      </div>
     {/if}
 
     <div class="actions">
@@ -478,6 +489,11 @@
     </div>
     {#if pwMsg}<p class="small">{pwMsg}</p>{/if}
   </section>
+
+  {#if browsing}
+    <DirBrowser start={parseList(fsRoots)[0] ?? '/'}
+                onpick={addRoot} onclose={() => (browsing = false)} />
+  {/if}
 
   <p class="muted small">
     Prefer the guided flow? <a href="/setup">Re-run setup</a> — it changes the

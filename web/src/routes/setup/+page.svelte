@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api.js';
+  import DirBrowser from '$lib/DirBrowser.svelte';
 
   // Each step validates rather than just collecting — a value that has been
   // proven to work is worth far more than one that has been typed.
@@ -36,6 +37,13 @@
   let jellyfinUrl = $state('');
   let jellyfinKey = $state('');
   let fsRoots = $state('');
+  let browsing = $state(false);
+
+  function addRoot(path) {
+    const roots = fsRoots.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!roots.includes(path)) fsRoots = [...roots, path].join('\n');
+    browsing = false;
+  }
   let libResult = $state(null);
 
   // step 4
@@ -257,6 +265,13 @@
           next to the media, if present.
         </p>
         <textarea rows="4" bind:value={fsRoots} placeholder="/extHdd/media/tv" spellcheck="false"></textarea>
+        <div class="row">
+          <button onclick={() => (browsing = true)}>Browse…</button>
+        </div>
+        {#if browsing}
+          <DirBrowser start={fsRoots.split('\n')[0]?.trim() || '/'}
+                      onpick={addRoot} onclose={() => (browsing = false)} />
+        {/if}
       {/if}
       <div class="row">
         <button onclick={testLibrary} disabled={testing}>{testing ? 'Checking…' : 'Test'}</button>
