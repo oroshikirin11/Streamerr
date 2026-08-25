@@ -54,7 +54,46 @@ let engine = null;
  * still draining, and Owncast would go on showing the old programme.
  */
 let lastEngine = null;
+/**
+ * What the viewer asked for, in terms that survive crossing files: a
+ * language and a mode, never a track index. Indices are per-file — episode
+ * 1 as a WEBDL and episode 2 as a Bluray number their audio differently —
+ * so a remembered index either picks the wrong language or nothing at all.
+ * Reset when a broadcast starts, updated when tracks are switched live.
+ */
+let trackIntent = {};
 let library = makeLibrary(config);
+
+/** Track preferences for one clip, honouring any live switch. */
+function trackPrefs() {
+  const prefs = { ...(config.tracks ?? {}) };
+  if (trackIntent.audioLanguage) {
+    prefs.audioLanguages = [trackIntent.audioLanguage, ...(prefs.audioLanguages ?? [])];
+  }
+  if (trackIntent.subtitleLanguage) {
+    prefs.subtitleLanguages = [trackIntent.subtitleLanguage, ...(prefs.subtitleLanguages ?? [])];
+  }
+  if (trackIntent.subtitleMode) prefs.subtitleMode = trackIntent.subtitleMode;
+  return prefs;
+}
+
+/** Re-pick tracks against a specific file's own streams. */
+async function selectionFor(item) {
+  const tracks = await probeTracks(item.srcPath);
+  const subs = await listSubtitles(item.srcPath, tracks);
+  const selection = selectTracks(tracks, subs, trackPrefs());
+  selection.video = tracks.video[0] ?? null;
+  return selection;
+}
+
+/** Remember a live switch as language + mode, for the clips that follow. */
+function rememberIntent(selection, subtitleMode) {
+  trackIntent = {
+    audioLanguage: selection.audio?.language ?? null,
+    subtitleLanguage: selection.subtitle?.language ?? null,
+    subtitleMode: subtitleMode ?? trackIntent.subtitleMode,
+  };
+}
 
 /** Rebuild the library client whenever its settings change. */
 function refreshLibrary() {
@@ -96,6 +135,7 @@ function buildEngine({ profile, selection }) {
     selection,
     // Extracted subtitle tracks and embedded fonts live here.
     cacheDir: config.paths.cache,
+    resolveSelection: selectionFor,
   });
 
   e.on('status', () => broadcast('stream', streamStatus()));
@@ -516,6 +556,9 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     });
   }
 
+  // A fresh broadcast starts from the configured preferences, not from
+  // whatever was switched to during the last one.
+  trackIntent = {};
   engine = buildEngine({ profile, selection });
   // Not awaited: going live can legitimately take minutes when the first
   // clip's subtitles must be extracted (one full read of the file), and an
@@ -620,6 +663,10 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
     subtitleMode: req.body?.subtitleMode ?? config.tracks?.subtitleMode ?? 'auto',
   });
   selection.video = tracks.video[0] ?? null;
+
+  // Carry the CHOICE, not the index, into the rest of the queue.
+  rememberIntent(selection,
+    req.body?.subtitleMode ?? (req.body?.subtitleKey == null ? 'off' : undefined));
 
   // Only the source restarts; the publisher keeps the connection open, so
   // this is near-instant rather than an interruption.

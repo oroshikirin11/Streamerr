@@ -119,11 +119,23 @@ export class PipelinePlayout extends EventEmitter {
    * @param {object} o.profile   encoder profile incl. resolved `backend`
    * @param {object} [o.selection] track selection from selectTracks()
    */
-  constructor({ target, profile, selection = null, statsPeriodMs = 500, cacheDir = null }) {
+  constructor({
+    target, profile, selection = null, statsPeriodMs = 500, cacheDir = null,
+    resolveSelection = null,
+  }) {
     super();
     this.target = target;
     this.profile = profile;
     this.selection = selection;
+    /**
+     * Re-pick tracks for a clip that is about to play, against that clip's
+     * OWN streams. Track indices are per-file: "audio track 8" on a WEBDL
+     * release is a different language — or absent — on the Bluray release of
+     * the next episode. Reusing the index produced a source with no audio at
+     * all, and the publisher then wrote nothing while its audio input sat
+     * waiting, so the panel showed playback while Owncast showed nothing.
+     */
+    this.resolveSelection = resolveSelection;
     this.statsPeriodMs = statsPeriodMs;
     /** Where extracted subtitle tracks and fonts are kept. */
     this.cacheDir = cacheDir;
@@ -214,6 +226,7 @@ export class PipelinePlayout extends EventEmitter {
     this.emit('status', this.status);
 
     this._lastBlockAt = Date.now();
+    this._lastAiredAt = Date.now();
     this._watch = setInterval(() => this._checkHealth(), 2000);
     this._watch.unref?.();
   }
@@ -227,6 +240,22 @@ export class PipelinePlayout extends EventEmitter {
     // fills, and the broadcast churns through respawns forever.
     if (this._srcPaused) {
       this._lastBlockAt = Date.now();
+      return;
+    }
+    // The source producing frames is not the same as viewers receiving them.
+    // A publisher can wedge — waiting on an audio stream a source never
+    // supplied, say — and then the encoder happily runs a whole episode
+    // while nothing reaches the server. Data piling up in the bank with
+    // nothing leaving it is the tell, and it is worth failing loudly over:
+    // silently "playing" to an empty stream is the worst outcome there is.
+    if ((this._bankBytes ?? 0) > 0 && this._lastAiredAt
+        && Date.now() - this._lastAiredAt > 20_000) {
+      this.emit('fatal', new Error(
+        'The stream stopped reaching the server: the encoder is still '
+        + 'producing, but nothing has been accepted for 20s. If the clip '
+        + 'has no audio track this is usually why.',
+      ));
+      this.stop();
       return;
     }
     const silent = Date.now() - (this._lastBlockAt ?? Date.now());
@@ -537,6 +566,7 @@ export class PipelinePlayout extends EventEmitter {
     while (this._bank?.length) {
       const c = this._bank.shift();
       this._bankBytes -= c.data.length;
+      if (c.pos !== this.aired) this._lastAiredAt = Date.now();
       this.aired = c.pos;
       this.airedTimeline = c.tl;
       this.airedItem = c.item;
@@ -1031,31 +1061,47 @@ export class PipelinePlayout extends EventEmitter {
     const token = (this._advanceToken = (this._advanceToken ?? 0) + 1);
     const stale = () => this._stopping || this._advanceToken !== token;
 
+    // Tracks are re-resolved per clip; see resolveSelection.
+    const withTracks = async () => {
+      if (!this.resolveSelection) return;
+      try {
+        const sel = await this.resolveSelection(next);
+        if (sel && !stale()) {
+          this.selection = sel;
+          this.emit('selection', sel);
+        }
+      } catch (err) {
+        this.emit('warn', `could not re-check tracks for ${next.title}: ${err.message}`);
+      }
+    };
+
     // Extraction for the next clip normally finishes during the previous
     // one's playback — but a skip can arrive minutes before that, and
     // playing anyway would burn subtitles straight from the container: the
     // exact stall that makes large files unplayable. Hold the pipe with a
     // card instead. The publisher keeps writing, so Owncast never notices,
     // and the wait is visible rather than a mystery.
-    if (this._needsExtraction(next)) {
-      this.current = { item: next, offset: 0, duration: next.duration ?? null };
-      this.position = 0;
-      this.status = 'preparing';
-      this._spawnHold('Preparing subtitles');
-      this.emit('status', this.status);
-      this.emit('nowplaying', this.snapshot());
-      this._extract(next).finally(() => {
-        if (stale()) return;
-        this.status = 'starting';
+    withTracks().then(() => {
+      if (stale()) return;
+      if (this._needsExtraction(next)) {
+        this.current = { item: next, offset: 0, duration: next.duration ?? null };
+        this.position = 0;
+        this.status = 'preparing';
+        this._spawnHold('Preparing subtitles');
         this.emit('status', this.status);
+        this.emit('nowplaying', this.snapshot());
+        this._extract(next).finally(() => {
+          if (stale()) return;
+          this.status = 'starting';
+          this.emit('status', this.status);
+          this._play(next, 0);
+        });
+        return;
+      }
+      this.prepare(next).finally(() => {
+        if (stale()) return;
         this._play(next, 0);
       });
-      return;
-    }
-
-    this.prepare(next).finally(() => {
-      if (stale()) return;
-      this._play(next, 0);
     });
   }
 
