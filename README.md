@@ -1,146 +1,432 @@
 # Jellystreamerr
 
 Web-controlled playout for [Owncast](https://owncast.online). Browse your media
-library in the browser, click an episode, and it streams — with the rest of the
-season following automatically.
+library in the browser, click an episode, and it goes live — subtitles burned
+in, the right dub selected, and the rest of the season following automatically.
 
-Runs headless in a container or LXC. No OBS, no desktop, no capture.
-
-## Status
-
-Engine works; the web UI is not built yet. Current surface is the CLI.
-
-| | |
-|---|---|
-| Encoder probing | ✅ |
-| Normalization + cache | ✅ |
-| Gapless chained playout | ✅ verified |
-| Owncast streaming | ⏳ untested against a live server |
-| Jellyfin library | ⏳ not started |
-| Web UI | ⏳ not started |
-
-## How it works
-
-Every clip is transcoded once into a single house profile and cached. Playout
-then runs `-c copy`, so **no encoding happens while streaming** — the encode
-work sits on a background queue that runs faster than realtime.
-
-Playback is one ffmpeg process that never restarts. It reads a chain of nested
-`.ffconcat` scripts, each pointing at the next:
+Runs headless in a container. No OBS, no desktop, no capture card.
 
 ```
-p000000.ffconcat          <- playing now
-  ffconcat version 1.0
-  file 3f2a....ts
-  file p000001.ffconcat   <- written later, while ffmpeg is already running
+your library  →  Jellystreamerr  →  Owncast  →  viewers
+ (any format)     (one clean stream)
 ```
 
-The concat demuxer opens a nested reference *lazily*, at the moment playback
-reaches it. So the process runs for days while everything past the playhead
-stays editable — which is how the queue can change mid-stream.
+**Contents:** [What it's for](#what-its-for) · [Quick start](#quick-start-docker)
+· [Hardware and encoders](#hardware-and-encoders) · [How it works](#how-it-works)
+· [Subtitles and audio](#subtitles-and-audio) · [Performance](#performance)
+· [Library providers](#library-providers) · [Settings](#settings)
+· [Troubleshooting](#troubleshooting) · [CLI](#cli) · [Security](#security)
+· [Limitations](#limitations) · [From source](#run-from-source)
 
-This matters because Owncast accepts one publisher and drops the stream after
-10 seconds of socket silence. Restarting ffmpeg per episode would end the
-broadcast at every boundary.
+## What it's for
 
-## Quick start
+Owncast broadcasts **one flat video stream**. It has no track selector, no
+subtitle menu, and no per-viewer transcoding — whatever you send is exactly
+what everybody sees. A media library, meanwhile, agrees on nothing: 4K HEVC
+10-bit HDR remuxes, 1080p H.264 web releases, 1440×1080 4:3 broadcast rips,
+DTS and PCM and AAC, ASS subtitles and DVD subpictures.
+
+Jellystreamerr sits between those two facts. It takes a heterogeneous library
+and emits **one unbroken stream that never changes shape**, with the right
+subtitle and audio track chosen per file the way a media server would, and
+burned into the picture because that's the only thing the player can show.
+
+### Why it has to transcode
+
+A reasonable question is why not just copy the file through untouched — plenty
+of streaming setups do. It isn't available here, and **each of these alone is
+disqualifying**:
+
+- **Subtitles.** Owncast has no soft-subtitle support, so subtitles have to be
+  painted into the picture — and painting anything into the picture means
+  re-encoding it.
+- **Mixed sources.** A continuous stream needs constant parameters across clip
+  boundaries. Copying a 4K HDR remux and then a 4:3 HDTV rip into one stream
+  breaks players at every transition.
+- **Codec support.** RTMP carries H.264 + AAC. An HEVC remux with PCM 5.1 audio
+  can't traverse that link at all.
+- **Bitrate.** A 50 Mbps UHD remux is not something you push to viewers.
+- **Keyframes.** HLS cuts segments on keyframes; Owncast wants one every two
+  seconds. Source files typically have them every five to ten.
+
+So transcoding isn't overhead that could be switched off — it's the price of
+admission. The engineering effort went into making it *cheap enough to run
+live*, which is what the GPU paths below are about.
+
+## Quick start (Docker)
+
+Needs only Docker. The image bundles ffmpeg 9, every VAAPI driver, and the
+pre-built web UI — nothing to install on the host.
+
+**1. Clone and enter the repo:**
 
 ```bash
-cp config.example.json config.json   # then fill it in — it is gitignored
-npm install
-
-node src/cli.js probe                # which encoders actually work here
-node src/cli.js selftest             # prove gapless chaining locally
-node src/cli.js stream a.mkv b.mkv   # stream to the configured Owncast
+git clone <repo-url> jellystreamerr
+cd jellystreamerr
 ```
 
-`probe` runs a real 15-frame encode per backend, because `ffmpeg -encoders`
-reports what the binary was *compiled* with, not what the hardware can do —
-a machine can advertise five H.264 encoders and successfully run two.
-
-`selftest` needs no Owncast and no network. It builds four deliberately
-mismatched clips, chains them, and checks the output duration is exact.
-
-## Existing compose stack
-
-If your `docker-compose.yml` sits next to the checkout rather than inside it:
-
-```
-/srv/
-├── docker-compose.yml        <- your stack
-├── Jellystreamerr/           <- this repo
-├── jellystreamerr-config/    <- runtime state (created below)
-└── jellystreamerr-cache/
-```
-
-Give it its own state directories rather than reusing a `config/` that
-belongs to another service in the same stack.
-
-Relative paths in compose resolve from the **compose file's** directory, so
-the build context and volumes differ from the standalone file:
+**2. Point it at your media.** Edit `docker-compose.yml`:
 
 ```yaml
+services:
   jellystreamerr:
-    build: ./Jellystreamerr
-    image: jellystreamerr:latest
+    build: .
     container_name: jellystreamerr
     restart: unless-stopped
     ports:
-      - "8099:8099"
+      - "8099:8099"                 # web UI
+
     devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/renderD128:/dev/dri/renderD128   # hardware encoding
+
     group_add:
-      - "989"                       # stat -c '%g' /dev/dri/renderD128
-    environment:
-      - JELLYSTREAMERR_CONFIG=/config/config.json
+      - "989"                       # NUMERIC gid of the render group — see below
+
     volumes:
-      - ./jellystreamerr-config:/config
-      - ./jellystreamerr-cache:/app/cache
-      - /extHdd:/extHdd:ro
+      - ./config:/config            # settings + your stream key
+      - ./cache:/app/cache          # extracted subtitles and fonts
+      - /extHdd:/extHdd:ro          # your media, READ-ONLY — see path note
 ```
 
-Keeping state beside the checkout rather than inside it means `git pull`
-never touches your config or cache.
+**3. Get the render group id right.** On the host:
 
 ```bash
-cd /srv
-mkdir -p jellystreamerr-config jellystreamerr-cache
-cp Jellystreamerr/config.example.json jellystreamerr-config/config.json
-$EDITOR jellystreamerr-config/config.json      # rtmpUrl + streamKey
-
-docker compose build jellystreamerr
-docker compose run --rm jellystreamerr node src/cli.js probe
+stat -c '%g' /dev/dri/renderD128
 ```
 
-> **One GPU consumer at a time while testing.** If another container in the
-> stack also has `/dev/dri/renderD128` and is holding a VAAPI encode session,
-> the probe can fail in a way that looks exactly like a broken driver. Stop
-> it before probing.
+Put that number in `group_add`, quoted. It must be the numeric gid as the
+*host* sees it — the image is a different distro, so the group *name* will not
+match and doesn't need to. If `privileged: true` appears to fix a permission
+problem, this value is wrong; fix the number instead.
 
-The cache holds normalized clips and grows to `normalizer.cacheLimitGB` —
-put it on fast local storage, not the media array.
+**4. Build and start:**
 
-## Requirements
+```bash
+docker compose up -d --build
+```
 
-- Node 20+
-- ffmpeg **7.0+** with your platform's hardware encoder, and ffprobe
+**5. Open `http://<host>:8099`.** On first run you set a password (the panel can
+start broadcasts and stores your stream key, so it isn't left open), then an
+onboarding wizard walks through five validating steps:
 
-> Static ffmpeg builds cannot do VAAPI or QuickSync. They need a runtime
-> `dlopen` of `libva`, which a static PIE cannot do — so they list the encoder
-> and fail when you use it. Use `linuxserver/ffmpeg`, `jellyfin-ffmpeg`, or a
-> distro build.
+1. **Owncast** — RTMP address and stream key, from your Owncast admin page.
+   There's a *Send 30s to watch* button so you can confirm video actually
+   arrives, not just that the key was accepted.
+2. **Encoder** — probed by real test encodes; pick one or leave it automatic.
+3. **Library** — Jellyfin (URL + API key) or a folder, with a directory browser.
+4. **Paths** — only if Jellyfin reports paths this container can't open.
+5. **Languages** — preferred audio and subtitle behaviour.
 
-## Configuration
+Nothing needs editing by hand; everything is stored in `/config/config.json`.
 
-All secrets live in `config.json`, which is gitignored — stream key, Jellyfin
-API key, and server addresses. Nothing sensitive is committed.
+### Path note (important)
 
-Point `owncast.rtmpUrl` at a tailnet or LAN address if you can. RTMP is
-plaintext and carries the stream key in its handshake.
+The container must be able to **open the files at the paths the library
+reports**. With Jellyfin that means either mounting your media at the same path
+Jellyfin uses, or setting a path mapping in Settings (there's a *Check paths*
+button that tells you whether every reported path is readable).
 
-Encoder settings *are* the cache profile, so changing resolution, framerate or
-bitrate re-keys the cache and clips are re-normalized on next use.
+Mount it **read-only** — this service never writes to your library.
 
-## Licence
+### Running inside an LXC
 
-MIT
+If Docker itself runs in an unprivileged LXC, the container needs the render
+device passed through to the LXC first, in `/etc/pve/lxc/<id>.conf`:
+
+```
+dev0: /dev/dri/renderD128,gid=104,mode=0666
+```
+
+Restart with `pct stop <id> && pct start <id>` — rebooting from inside does not
+re-read the config.
+
+## Hardware and encoders
+
+The encoder is **never assumed**. At startup each backend is tried in order and
+tested with a real 15-frame encode:
+
+```
+vaapi → qsv → nvenc → amf → videotoolbox → x264
+```
+
+This matters because `ffmpeg -encoders` lists what the binary was *compiled*
+with, not what the hardware can do — a machine can advertise five H.264
+encoders and successfully run two.
+
+| Hardware | Result |
+|---|---|
+| **Intel** (iGPU, any generation) | VAAPI via iHD or i965, auto-selected |
+| **AMD** | VAAPI via Mesa |
+| **NVIDIA** | falls back to **software x264** — the image has no NVIDIA userspace libraries, so using NVENC needs `nvidia-container-toolkit` and compose changes |
+| **Anything else** | software x264 — works, but likely below realtime for subtitled 1080p |
+
+The image installs *every* VAAPI driver and deliberately never sets
+`LIBVA_DRIVER_NAME`; libva probes the device and picks correctly. Forcing a
+value is how an image ends up working on one vendor's hardware and silently
+failing on another.
+
+Driver behaviour is probed too, not assumed — see
+[Subtitles and audio](#subtitles-and-audio).
+
+## How it works
+
+Owncast accepts **one publisher** and ends the broadcast after ten seconds of
+socket silence. So the process that holds the RTMP connection must never
+restart — but seeking, pausing, changing tracks and advancing episodes all
+need a new ffmpeg. The engine splits those jobs:
+
+```
+┌─ source (restartable) ────────┐        ┌─ publisher (immortal) ─┐
+│ decode → filter → encode → TS │──pipe──│ copy → FLV → RTMP      │
+│ seek / tracks / pause here    │        │ holds the connection   │
+└───────────────────────────────┘        └────────────────────────┘
+```
+
+The publisher runs `-c copy` and paces the whole pipeline with `-re`. Sources
+come and go beneath it; `-output_ts_offset` continues each one's timestamps
+from where the last stopped, so the FLV muxer never sees the timeline jump
+backwards. The publisher's stdin is never closed when a source exits, or it
+would see EOF and end the broadcast we're protecting.
+
+**Between them sits a bounded elastic buffer** (~15 seconds at your bitrate).
+Encode speed is not constant — subtitle rendering is single-threaded, so a clip
+can swing scene by scene — and without a buffer every dip starved the publisher
+directly. Fast sections now bank reserve that slow sections spend. User actions
+(seek, pause, track change, skip) discard it so controls stay instant, and the
+playhead rewinds to what viewers actually saw rather than what had been
+encoded.
+
+That last detail is why a mid-episode subtitle change is seamless: the new
+encoder resumes at the *aired* position, not the encoder's position, so nothing
+is skipped or repeated.
+
+## Subtitles and audio
+
+**Tracks are chosen per file, not once per broadcast.** Track indices are
+per-file — "audio track 8" on a web release means something entirely different
+on the Bluray of the next episode, or doesn't exist. Selection is re-resolved
+against each clip's own streams, and a live switch is remembered as a
+**language and mode** rather than an index, so "Japanese dub, English subs"
+follows a queue across mixed releases.
+
+**Text subtitles** (ASS/SSA/SRT) are rendered by libass and composited. Where
+the driver allows it the composite happens on the GPU, with the CPU doing only
+the glyph rendering. Positioned subtitles are rendered at the video's *content
+rectangle*, so a 4:3 episode in a 16:9 frame keeps its typesetting where the
+author put it instead of smearing toward the pillarbox bars.
+
+**Bitmap subtitles** (PGS/VobSub) carry source-frame pixel coordinates, so they
+are composited at native size *before* scaling.
+
+**Subtitles are extracted to a cache before their first broadcast.** Burning
+them straight from the container makes ffmpeg demux the whole file a second
+time during playback — measured 24% slower on remuxes, and on very large files
+it prevents the encoder producing a frame at all. The first broadcast of a file
+shows a *Preparing* state while this happens once; every later one starts
+instantly. Extraction for upcoming episodes runs in the background during the
+current one.
+
+**Driver quirks are measured, not assumed.** Compositing subtitles onto
+pillarboxed video has several possible filtergraph shapes, and which ones work
+is driver-specific — on Intel iHD some fail outright, and on Mesa some encode
+happily while rendering *green* bars. At startup each candidate is run for one
+frame and checked **by pixel**, and the first shape that both encodes and puts
+the right colours in the right places is used. If none work, subtitles burn on
+the CPU, which every driver can do. If the GPU composite fails live anyway, the
+engine demotes that clip to CPU and retries rather than dropping the broadcast.
+
+## Performance
+
+Measured on an **Intel N100**, 4K HDR HEVC and 1080p sources → 1080p output:
+
+| Content | Speed |
+|---|---|
+| 4K HDR remux, no subtitles | **4.3–4.5×** |
+| 1080p + subtitles, first play (reading subs from the file) | **1.25×** |
+| 1080p + subtitles, cached | **1.37×** |
+| 1080p + subtitles, CPU burn-in fallback | **~1.05×** |
+| QSV instead of VAAPI | **2.7×** — slower; question closed by measurement |
+
+Anything at or above 1.0× streams comfortably. The number shown in the panel is
+a rolling 30-second average of real encode rate; in steady state it sits near
+1.0× **by design**, because the publisher paces output at realtime and
+backpressure throttles the encoder. Sustained *below* 1.0× is the problem case,
+and the panel warns before the stream stalls.
+
+Two settings are machine-dependent enough that guessing is worse than
+measuring — `parallelChunks` helped 3.5× on one machine and *hurt* on another.
+Run `cli.js benchmark <a typical file>` once per host and set them from that.
+
+**Quality note:** output is H.264 at your configured bitrate (12 Mbps is a
+sane 1080p figure — well above what streaming services use). Better codecs
+exist — HEVC is ~40% more efficient, AV1 more still — but RTMP carries H.264,
+and browser playback of the alternatives is inconsistent. At 12 Mbps the codec
+is not the limiting factor; the hardware encoder's lower efficiency per bit is
+comfortably absorbed. If quality ever looks lacking, raise the bitrate.
+
+## Library providers
+
+**Jellyfin** — reads the posters, seasons and episode order Jellyfin already
+scraped. Create a key under *Dashboard → API Keys*.
+
+**A folder** — no Jellyfin needed. Point it at a directory and it reads the
+layout:
+
+- Recurses into `Season NN/` subfolders.
+- Titles films from their **folder** name, since the filename is a release
+  string (`Backrooms 2026 2160p WEB-DL DDP5 1 Atmos DV HDR H 265-BYNDR` is not
+  a title).
+- Strips release tags from episode titles, falling back to `Episode 12` when
+  nothing meaningful survives.
+- A root holding *collections* rather than titles (`media/` containing `movies/`
+  and `tv/`) is split into one library per collection, so titles land on the
+  poster grid instead of the word "movies".
+- Posters come from `poster.jpg` / `folder.jpg` beside the media if present.
+
+Durations aren't shown in folder mode — probing every file would make browsing
+crawl.
+
+## Settings
+
+Everything the wizard configures is editable later, grouped in the UI:
+
+| Group | Covers |
+|---|---|
+| **Owncast** | RTMP address, stream key, connection test, 30s watch test |
+| **Output** | resolution preset or custom, framerate (auto/fixed), bitrates, keyframe interval, encoder, render device |
+| **Library** | Jellyfin or folder, with a directory browser |
+| **Path mapping** | only when Jellyfin's paths differ from this container's |
+| **Languages** | languages you understand, original vs dubbed, subtitle policy |
+| **Developer** | read-only log console |
+
+**Framerate** defaults to *auto*: each file is output at its own rate up to your
+cap, so 23.976fps anime stays 23.976 rather than being padded to 30 — less GPU
+work, no judder.
+
+**Keyframes** must divide Owncast's segment length. Two seconds is what its
+documentation recommends; changing it can break segmenting.
+
+## Troubleshooting
+
+- **"Owncast would not accept the stream — Connection timed out."** TCP connects
+  but the 1537-byte RTMP handshake is black-holed. Almost always an MTU problem
+  on the path, not a wrong stream key. If you're routing over a tunnel, confirm
+  large packets survive: `ping -M do -s 1300 <owncast-host>`.
+- **The panel says it's playing but Owncast shows nothing.** The encoder is
+  producing and the publisher isn't accepting. Most often the clip has **no
+  audio track** — an audio index that doesn't exist in that file makes ffmpeg
+  emit video only, and the publisher blocks forever waiting for audio it was
+  configured to mux. The log signature is the output size frozen while
+  `frame=` keeps climbing. The engine now fails loudly after 20 seconds of this
+  rather than pretending to stream.
+- **Owncast keeps showing the *previous* programme, goes offline, loops.** An
+  orphaned publisher from an earlier broadcast is still holding the connection —
+  Owncast accepts only one. Restart the service; current builds hard-stop the
+  old publisher before starting a new broadcast.
+- **A 4:3 episode plays but subtitled 4:3 dies instantly** with
+  `h264_vaapi ... error code: -22`. Your driver can't do the pillarboxed GPU
+  composite. Expected behaviour is that the startup probe catches this and the
+  clip burns on the CPU instead; check the console for the
+  `pillarbox+subtitle graph` line to see what was chosen.
+- **First broadcast of a big file sits in *Preparing* for minutes.** Normal —
+  it's the one-time subtitle extraction, which reads the file once. It's cached
+  afterwards, and the progress bar tracks it.
+- **Speed sits below 1.0× on subtitled content.** Subtitle rendering is
+  single-threaded; heavy typesetting is the expensive case. Run
+  `cli.js benchmark <that file>` — if the *no-subtitles* number is also poor,
+  subtitles aren't your bottleneck.
+- **The panel shows "Lost connection to Jellystreamerr".** The server isn't
+  answering. Check `docker compose logs jellystreamerr` — unhandled faults are
+  logged with a stack trace rather than taking the process down.
+- **Subtitles don't render at all.** The image ships fonts and fontconfig; the
+  `subtitles` filter renders *nothing* without them. If you're running from
+  source, that's the first thing to check.
+
+The **Console** page (enable *Developer mode* in Settings) streams server and
+ffmpeg activity live, with stream keys redacted — safe to copy and paste.
+
+## CLI
+
+The same engine is available inside the container:
+
+```bash
+docker compose exec jellystreamerr node src/cli.js probe          # which encoders work here
+docker compose exec jellystreamerr node src/cli.js tracks <file>  # what would be picked, and why
+docker compose exec jellystreamerr node src/cli.js testconnect    # does Owncast accept our key
+docker compose exec jellystreamerr node src/cli.js benchmark <file>
+docker compose exec jellystreamerr node src/cli.js pipetest       # seek/pause keep the connection alive
+docker compose exec jellystreamerr node src/cli.js stream a.mkv b.mkv
+```
+
+`benchmark` is the useful one on a new machine: it measures the same file with
+and without subtitles, across the GPU and CPU paths, and reports the fastest
+full-quality configuration.
+
+`pipetest` needs no Owncast — it builds clips locally, runs seeks and pauses
+through the real engine, and asserts one publisher process survived all of it.
+
+## Security
+
+The panel is **password-protected** (scrypt, set on first run) because it can
+start broadcasts and holds your Owncast stream key. Secrets are write-only from
+the browser's perspective: the API returns a sentinel, never the value, and
+`config.json` is gitignored so the repo stays publishable.
+
+Stream keys are redacted from every log line, including the Console page.
+
+RTMP sends the stream key **in plaintext**, so the link to Owncast should not
+cross the open internet — put it over a VPN or tailnet, and the ingest port
+needs no public exposure.
+
+The Developer console is read-only by design: the server exposes no input path,
+so it can show everything without becoming a remote shell.
+
+## Limitations
+
+Worth knowing before you rely on it:
+
+- **Viewers can't choose.** Burned-in means baked-in — everyone sees the
+  language you picked. That's inherent to broadcast, not a bug, but it's a real
+  difference from a media server.
+- **Mixed-framerate queues are unproven.** Framerate follows the source, so a
+  queue mixing 23.976 and 25fps changes rate mid-stream under `-c copy`. Nothing
+  has broken in testing, but if a boundary misbehaves, pin *Framerate* to
+  *Fixed*.
+- **Heavy typesetting is the performance ceiling.** Ordinary dialogue is nearly
+  free; continuously animated signs are where a low-power host runs out of road.
+- **No quality auto-degradation.** On a machine too slow for the content, the
+  panel warns — it will not silently drop resolution to cope. That's deliberate.
+- **NVIDIA needs container work** to use the GPU; see
+  [Hardware and encoders](#hardware-and-encoders).
+
+## Run from source
+
+Needs Node 20+ and **ffmpeg 9** on PATH. The ffmpeg version is a hard
+requirement, which is the actual reason this ships as a container — no
+mainstream stable distro packages it yet.
+
+```bash
+git clone <repo-url> jellystreamerr && cd jellystreamerr
+npm install
+cd web && npm install && npm run build && cd ..
+node src/index.js                 # panel on :8099
+```
+
+`JELLYSTREAMERR_CONFIG` sets the config path (default `./config.json`).
+
+## Development
+
+```bash
+cd web && npm run dev     # UI with live reload, proxies /api to :8099
+node src/index.js         # backend, in another terminal
+```
+
+Append `?mock=1` to a panel URL in dev to fake an active broadcast — the
+transport bar and queue controls only render while streaming, which otherwise
+makes them impossible to work on without a live Owncast.
+
+Before committing engine changes:
+
+```bash
+node src/cli.js pipetest      # publisher survives seek/pause/resume
+```
