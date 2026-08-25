@@ -305,20 +305,62 @@ export class PipelinePlayout extends EventEmitter {
         p.stdin.end();
       } catch { /* already gone */ }
       // Graceful gets time to air the tail at realtime; the timer is only a
-      // failsafe against a publisher that never sees EOF.
-      const killMs = graceful ? 120_000 : 5000;
+      // failsafe against a publisher that never sees EOF. Bounded by what
+      // the bank can hold (~15s) plus slack — a long fuse here means an old
+      // publisher can still own the RTMP connection when the next
+      // broadcast starts.
+      const killMs = graceful ? 30_000 : 3000;
       setTimeout(() => { if (!p.killed) p.kill('SIGKILL'); }, killMs).unref?.();
     }
   }
 
+  /**
+   * The clip and position viewers are actually watching.
+   *
+   * The encoder runs up to a bankful ahead of the picture, so reporting its
+   * progress made the panel read seconds ahead of the stream — and flip to
+   * the next episode while the previous one was still going out. What is
+   * left is Owncast's own HLS buffering, which is not ours to remove.
+   */
+  _onAir() {
+    const item = this.airedItem ?? this.current?.item ?? null;
+    const position = this.airedItem != null && this.aired != null
+      ? this.aired
+      : this.position;
+    const duration = item === this.current?.item
+      ? this.current?.duration ?? item?.duration ?? null
+      : item?.duration ?? null;
+    return { item, position, duration };
+  }
+
+  /**
+   * Tear everything down immediately, dropping whatever has not aired.
+   *
+   * stop() lets the publisher finish airing its buffer, which is right at
+   * the end of a queue and wrong the moment another broadcast wants the
+   * connection: Owncast accepts one publisher, so a lingering one keeps
+   * showing the previous programme while the new stream cannot get in.
+   */
+  hardStop() {
+    this._stopping = true;
+    this._bank = [];
+    this._bankBytes = 0;
+    if (this._watch) { clearInterval(this._watch); this._watch = null; }
+    this._killSource();
+    const p = this.publisher;
+    if (p) {
+      try { p.stdin.destroy(); } catch { /* already gone */ }
+      try { p.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  }
+
   snapshot() {
+    const air = this._onAir();
     return {
       status: this.status,
-      playing: this.current
-        ? { ...this.current.item, duration: this.current.duration }
-        : null,
+      playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: [...this.queue],
-      position: this.position,
+      position: air.position,
     };
   }
 
@@ -473,7 +515,10 @@ export class PipelinePlayout extends EventEmitter {
     // how far viewers have actually got — the encoder runs up to a bank
     // ahead of them, and every restart has to resume from what they saw,
     // not from what was encoded.
-    this._bank.push({ data: chunk, pos: this.position, tl: this.timeline });
+    this._bank.push({
+      data: chunk, pos: this.position, tl: this.timeline,
+      item: this.current?.item ?? null,
+    });
     this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
     // Backpressure moves from the OS pipe to here: past the cap the source
     // pauses, and resumes once half the bank has aired.
@@ -494,6 +539,7 @@ export class PipelinePlayout extends EventEmitter {
       this._bankBytes -= c.data.length;
       this.aired = c.pos;
       this.airedTimeline = c.tl;
+      this.airedItem = c.item;
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
       if (!ok) {
@@ -538,7 +584,13 @@ export class PipelinePlayout extends EventEmitter {
   _bankFlush() {
     this._bank = [];
     this._bankBytes = 0;
-    if (this.aired != null && this.aired < this.position) {
+    // `aired` is a position WITHIN the clip it was recorded for. Straight
+    // after an episode boundary it still refers to the previous episode,
+    // and rewinding the new episode's playhead to it would drop playback
+    // to an arbitrary offset — reachable by seeking just after a
+    // transition, which is exactly when someone tests transitions.
+    if (this.aired != null && this.aired < this.position
+        && this.airedItem === this.current?.item) {
       this.position = this.aired;
     }
     // The OUTPUT timeline has to rewind with it. `timeline` counts encoded
@@ -888,7 +940,7 @@ export class PipelinePlayout extends EventEmitter {
       }
 
       this.emit('progress', {
-        position: this.position, speed, drops: b.dropFrames,
+        position: this._onAir().position, speed, drops: b.dropFrames,
       });
     });
     s.stdio[3]?.on('data', (d) => parser.push(d));

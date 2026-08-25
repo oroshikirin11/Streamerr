@@ -46,6 +46,14 @@ app.use(express.json({ limit: '1mb' }));
 
 /** The single active broadcast. One publisher is all Owncast accepts. */
 let engine = null;
+/**
+ * The last engine built, alive or not. A finished broadcast keeps its
+ * publisher for a few seconds to air what it had buffered, but the engine
+ * slot is freed as soon as it ends — so without this handle the next
+ * broadcast could open a second RTMP connection while the previous one is
+ * still draining, and Owncast would go on showing the old programme.
+ */
+let lastEngine = null;
 let library = makeLibrary(config);
 
 /** Rebuild the library client whenever its settings change. */
@@ -126,6 +134,7 @@ function buildEngine({ profile, selection }) {
     broadcast('stream', streamStatus());
   });
 
+  lastEngine = e;
   return e;
 }
 
@@ -421,6 +430,11 @@ app.get('/api/stream/status', (req, res) => res.json(streamStatus()));
 
 app.post('/api/stream/start', wrap(async (req, res) => {
   if (engine) return res.status(409).json({ error: 'Already streaming' });
+  // Make sure the previous broadcast has really let go of the connection.
+  if (lastEngine) {
+    try { lastEngine.hardStop(); } catch { /* already down */ }
+    lastEngine = null;
+  }
 
   const ids = req.body?.itemIds ?? [];
   if (!ids.length) return res.status(400).json({ error: 'Nothing selected' });
