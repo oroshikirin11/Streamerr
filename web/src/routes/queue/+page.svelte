@@ -128,12 +128,51 @@
 
   /** The day a pin is being typed against — the row's own, not today's. */
   let pinBase = $state(null);
+  /** The earliest this row could air — the anchor a typed time resolves from. */
+  let pinFloor = $state(null);
 
-  function openPin(q) {
+  function openPin(q, i) {
     pinId = q.id;
     pinBase = q.startAt ?? q.at ?? Math.floor(Date.now() / 1000);
+    pinFloor = earliestFor(i ?? (status.queue ?? []).findIndex((x) => x.id === q.id));
     // Seed with the time it would air anyway, so nudging is the easy case.
     pinValue = hhmm(pinBase);   // always 24-hour, whatever the browser locale
+  }
+
+  /**
+   * Nudge the typed time with the arrow keys.
+   *
+   * Replacing <input type="time"> with a text field to force 24-hour cost
+   * the native stepper, and typing four digits to move an episode fifteen
+   * minutes is not a trade worth making.
+   */
+  function stepTime(e) {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    const t = parseClock(pinValue) ?? parseClock(hhmm(pinBase));
+    if (!t) return;
+    e.preventDefault();
+    const step = (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 60 : 5);
+    const mins = (((t.h * 60 + t.m + step) % 1440) + 1440) % 1440;
+    pinValue = `${String(Math.floor(mins / 60)).padStart(2, '0')}`
+      + `:${String(mins % 60).padStart(2, '0')}`;
+  }
+
+  /** Times worth offering for this row: the next quarter-hours, then hours. */
+  function timeSuggestions(floor) {
+    const out = [];
+    const start = new Date((floor ?? Date.now() / 1000) * 1000);
+    start.setSeconds(0, 0);
+    start.setMinutes(Math.ceil(start.getMinutes() / 15) * 15);
+    for (let i = 0; i < 5; i++) {
+      out.push(new Date(start.getTime() + i * 15 * 60_000));
+    }
+    const hour = new Date(start);
+    hour.setMinutes(0, 0, 0);
+    for (let i = 1; i <= 6; i++) {
+      out.push(new Date(hour.getTime() + i * 3_600_000));
+    }
+    return [...new Set(out.map((d) => `${String(d.getHours()).padStart(2, '0')}`
+      + `:${String(d.getMinutes()).padStart(2, '0')}`))];
   }
 
   /**
@@ -146,23 +185,26 @@
    * An unreachable time is refused by repin(); moving something to another
    * day is what the day-shift control is for.
    */
-  function epochFor(hm, base) {
+  /**
+   * "HH:MM" resolved to the next time it actually happens.
+   *
+   * Anchored to the earliest this row could air, not to today. An episode
+   * that lands at 23:56 on Friday and is given 02:00 obviously means two
+   * in the morning on Saturday — resolving that on Friday put it in the
+   * past and the editor refused it, which is technically defensible and
+   * completely wrong. Rolling forward is safe here in a way it was not
+   * before, because the resolved date is shown while it is typed.
+   */
+  function epochFor(hm, base, floor) {
     const t = parseClock(hm);
     if (!t) return null;
-    const d = new Date((base ?? Math.floor(Date.now() / 1000)) * 1000);
+    const anchor = floor ?? base ?? Math.floor(Date.now() / 1000);
+    const d = new Date(anchor * 1000);
     d.setHours(t.h, t.m, 0, 0);
-    return Math.floor(d.getTime() / 1000);
+    let at = Math.floor(d.getTime() / 1000);
+    while (at + 60 <= anchor) at += 86_400;
+    return at;
   }
-
-  /**
-   * Is this time genuinely before the material ahead of it finishes?
-   *
-   * A typed time carries no seconds, so a row seeded with its own
-   * projected time lands up to 59s "early" and used to flag itself as
-   * impossible. Compare whole minutes: only reject when the entire minute
-   * is past.
-   */
-  const tooEarly = (at, floor) => at != null && at + 60 <= floor;
 
   /** Shift a programmed time a whole day, for a multi-day marathon. */
   async function nudgeDay(id, days) {
@@ -212,18 +254,6 @@
 
     // Refuse rather than accept a time the broadcast cannot honour. The
     // editor stays open so the time can be corrected in place.
-    const earliest = earliestFor(i);
-    if (at != null && tooEarly(at, earliest)) {
-      const blocker = i === 0 ? (status.playing?.title ?? 'what is on air') : q[i - 1].title;
-      error = at < Date.now() / 1000
-        ? `That time has already passed. The earliest this can air is ${clock(earliest)}`
-          + `, when ${blocker} finishes — use the arrow to move it to another day.`
-        : `Cannot air before ${clock(earliest)} — ${blocker} is still running then.`;
-      setTimeout(() => {
-        if (error.startsWith('Cannot air before') || error.startsWith('That time has already')) error = '';
-      }, 7000);
-      return;
-    }
 
     const from = q[i]?.startAt ?? q[i]?.at ?? null;
     const delta = at != null && from != null ? at - from : 0;
@@ -247,7 +277,7 @@
   }
 
   const savePin = (id) =>
-    repin(id, pinValue ? epochFor(pinValue, pinBase) : null, pinValue || null);
+    repin(id, pinValue ? epochFor(pinValue, pinBase, pinFloor) : null, pinValue || null);
   async function clearPin(id) {
     pinId = null;
     await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: null } : e)));
@@ -341,7 +371,7 @@
   /** Editing a row inside a collapsed block must reveal it first. */
   function openBlockPin(b) {
     if (!expanded.has(b.key)) toggleBlock(b.key);
-    openPin(b.first);
+    openPin(b.first, b.rows[0].i);
   }
 
   /** When the last queued item finishes — the end of the evening. */
@@ -536,25 +566,41 @@
       {#snippet epRow(item, i)}
         <li class="ep">
           {#if pinId === item.id}
-            {@const target = pinValue ? epochFor(pinValue, pinBase) : null}
             {@const floor = earliestFor(i)}
+            {@const target = pinValue ? epochFor(pinValue, pinBase, floor) : null}
+            {@const waitH = target != null ? (target - floor) / 3600 : 0}
             <span class="tcell edit">
               <input class="tin" type="text" inputmode="numeric" maxlength="5"
                      placeholder="HH:MM" bind:value={pinValue}
-                     class:bad={target != null && tooEarly(target, floor)}
+                     list={`ts-${item.id}`}
                      oninput={(e) => { pinValue = maskClock(e.currentTarget.value); }}
-                     onkeydown={(e) => { if (e.key === 'Enter') savePin(item.id); if (e.key === 'Escape') pinId = null; }}
+                     onkeydown={(e) => {
+                       if (e.key === 'Enter') savePin(item.id);
+                       else if (e.key === 'Escape') pinId = null;
+                       else stepTime(e);
+                     }}
                      aria-label="Air time (24-hour, HH:MM)"
-                     title={`Not before ${clock(floor)} — what runs ahead of this is still going`} />
+                     title={'24-hour, HH:MM. Arrow keys nudge by 5 minutes, '
+                       + `shift-arrow by an hour. Earliest ${clock(floor)}.`} />
+              <datalist id={`ts-${item.id}`}>
+                {#each timeSuggestions(floor) as t}<option value={t}></option>{/each}
+              </datalist>
             </span>
             {#if target && !sameDay(target, Date.now() / 1000)}
-              <span class="onday">{new Date(target * 1000)
-                .toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+              <!-- Rolling to another day is only safe because it is stated
+                   here as it is typed; amber once the wait gets long. -->
+              <span class="onday" class:far={waitH >= 6}>
+                {new Date(target * 1000)
+                  .toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}
+                {#if waitH >= 6}· {fmtGap(target - floor)} wait{/if}
+              </span>
+            {:else if waitH >= 6}
+              <span class="onday far">{fmtGap(target - floor)} wait</span>
             {/if}
           {:else}
             {@const late = item.startAt && item.at && item.at > item.startAt + 30}
             <button class="tcell t" class:pinned={item.startAt && !late} class:late disabled={editing}
-                    onclick={() => openPin(item)}
+                    onclick={() => openPin(item, i)}
                     title={late
                       ? `Programmed for ${clock(item.startAt)}, but what runs before it does not finish until then`
                       : item.startAt ? 'Programmed — click to change' : 'Click to program an air time'}>
@@ -736,6 +782,8 @@
     font-size: 11px; color: var(--accent);
     white-space: nowrap; flex-shrink: 0;
   }
+  /* A long wait is legal but rarely intended — say so before it is saved. */
+  .onday.far { color: #c98a2e; }
   .t {
     padding: 3px 6px; border: 1px solid transparent; border-radius: 6px;
     background: transparent; color: var(--muted); cursor: pointer;
