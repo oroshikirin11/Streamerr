@@ -75,6 +75,8 @@ export class ChunkScheduler extends EventEmitter {
     this._sink = null;
     this._writing = false;
     this._procs = new Set();
+    /** Completion samples: { at, content } — see speed(). */
+    this._done = [];
   }
 
   /** The short opening chunk, on the same audio-frame grid as the rest. */
@@ -182,6 +184,8 @@ export class ChunkScheduler extends EventEmitter {
         // handed a chunk without the next one already encoded. Two
         // finished chunks means one to send and one in hand.
         this._encoded = (this._encoded ?? 0) + 1;
+        this._done.push({ at: Date.now(), content: this._durOf(index) });
+        if (this._done.length > 64) this._done.shift();
         if (!this._announcedReady && (this._encoded >= 2 || this.finished)) {
           this._announcedReady = true;
           this.emit('ready');
@@ -193,6 +197,41 @@ export class ChunkScheduler extends EventEmitter {
       this._fill();
       this._drain();
     });
+  }
+
+  /**
+   * Encoding throughput as a multiple of realtime — the same quantity a
+   * single ffmpeg reports as `speed=`, which the chunked path otherwise
+   * cannot show because there is no one process to ask.
+   *
+   * Measured as content finished per unit of WALL time, not per chunk.
+   * Chunks encode in parallel, so summing their individual rates would
+   * report several times the throughput actually being achieved; what has
+   * to stay above 1.0 is how fast finished content accumulates against the
+   * clock, because that is what the publisher is paying out.
+   *
+   * Reads ~1.0 in steady state by design rather than luck: once the bank
+   * fills, backpressure stops the workers. Sustained below 1.0 is the
+   * problem case.
+   */
+  speed(windowMs = 30_000) {
+    const now = Date.now();
+    const win = this._done.filter((d) => d.at >= now - windowMs);
+    // Falling back to the full history when the window runs dry is what
+    // keeps this readable in steady state. Once the bank is full,
+    // backpressure stops the workers and chunks stop completing, so a
+    // short window empties and would report nothing precisely when the
+    // stream is healthiest. Measuring across the paused time instead lets
+    // the figure settle toward 1.0, which is both true and the same thing
+    // the single-process path shows.
+    const recent = win.length >= 2 ? win : this._done;
+    // The oldest sample marks where measuring starts, so its own content
+    // finished before that point and must not be counted inside the span.
+    if (recent.length < 2) return null;
+    const span = (now - recent[0].at) / 1000;
+    if (span < 0.5) return null;
+    const content = recent.slice(1).reduce((a, d) => a + d.content, 0);
+    return Math.round((content / span) * 100) / 100;
   }
 
   /**

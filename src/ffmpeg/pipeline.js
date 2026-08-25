@@ -1287,7 +1287,9 @@ export class PipelinePlayout extends EventEmitter {
       // still paying it out, so this leads the viewer by up to one chunk.
       this.position = start;
       this.timeline = this._clipBase + (start - offset) + chunkSeconds;
-      this.emit('progress', { position: this.position, speed: null, drops: 0 });
+      this.emit('progress', {
+        position: this.position, speed: sched.speed(), drops: 0,
+      });
     });
     sched.on('complete', () => {
       if (this.scheduler === sched) this._advance();
