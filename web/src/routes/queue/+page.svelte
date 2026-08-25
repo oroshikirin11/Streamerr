@@ -821,12 +821,21 @@
     border: 1px solid var(--border);
     border-left: 3px solid var(--success);
     background: var(--surface); margin: 2px 0;
+    /* The remove control lives INSIDE the card, always. Nothing may escape
+       the rounded border, whatever the title and meta add up to. */
+    overflow: hidden;
   }
   .q li.blkrow.pinned { border-left-color: var(--accent); }
   .q li.blkrow:hover { background: var(--surface-2); }
   .bh {
-    display: flex; align-items: center; gap: 10px; width: 100%;
-    padding: 8px 12px 8px 8px; background: transparent; border: none;
+    display: flex; align-items: center; gap: 10px;
+    /* Not width:100% — that is a leftover from when this row was a block
+       element, and as a flex item it made the header demand the whole row
+       and push the remove control out past the border on any block whose
+       title and meta were too long to shrink. min-width:0 lets the title
+       give up space instead. */
+    flex: 1 1 auto; min-width: 0;
+    padding: 8px 10px 8px 8px; background: transparent; border: none;
     font-size: 14px; color: var(--text); text-align: left; cursor: pointer;
   }
   .chev { color: var(--muted); flex-shrink: 0; transition: transform .15s ease; }
@@ -835,10 +844,15 @@
   .bt.pin { color: var(--accent); font-weight: 500; }
   .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bl strong { font-weight: 500; }
-  .bm { color: var(--muted); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
-  /* Sits outside the expand button: a button cannot nest inside a button. */
+  .bm {
+    color: var(--muted); font-size: 12px; white-space: nowrap;
+    /* Truncates only after the title has given up everything it can. */
+    flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Sits beside the expand button, not within it: a button cannot nest in
+     a button. Never shrinks, so it always has its full hit area. */
   .bctl {
-    display: flex; align-items: center; padding-right: 8px;
+    display: flex; align-items: center; flex-shrink: 0; padding-right: 8px;
     opacity: 0; transition: opacity .12s ease;
   }
   .q li.blkrow:hover .bctl, .q li.blkrow:focus-within .bctl { opacity: 1; }
