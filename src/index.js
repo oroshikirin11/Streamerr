@@ -914,21 +914,33 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
     if (engine !== e) {
       return res.status(409).json({ error: 'The broadcast ended while the queue was being added' });
     }
-    // Keep what the engine already knows: a duration it probed in the
-    // background is not something the library can tell us again.
+    // An item the engine already holds needs no library lookup at all.
+    // Every edit sends the WHOLE queue back, so re-resolving each entry
+    // meant one round trip per queued item per keystroke — measured at
+    // 1.76s for a 113-episode queue, hammering Jellyfin for data that had
+    // not changed. Reuse what is known and only fetch genuinely new ids.
+    // (It also preserves durations probed in the background, which the
+    // library cannot tell us again.)
     const known = e.queue.find((q) => q.id === id);
-    const item = await library.item(id);
-    items.push({
-      id: item.id,
-      title: item.seriesName
-        ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
-        : item.title,
-      srcPath: library.resolvePath(item),
-      duration: known?.duration ?? item.duration ?? null,
-      image: item.image ?? null,
-      ...(pin ? { startAt: pin } : {}),
-      ...(pin && offline ? { breakOffline: true } : {}),
-    });
+    const base = known ?? await (async () => {
+      const item = await library.item(id);
+      return {
+        id: item.id,
+        title: item.seriesName
+          ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
+          : item.title,
+        srcPath: library.resolvePath(item),
+        duration: item.duration ?? null,
+        image: item.image ?? null,
+      };
+    })();
+    const next = { ...base };
+    delete next.startAt;
+    delete next.breakOffline;
+    delete next.at;                       // projection, recomputed per snapshot
+    if (pin) next.startAt = pin;
+    if (pin && offline) next.breakOffline = true;
+    items.push(next);
   }
   if (engine !== e) {
     return res.status(409).json({ error: 'The broadcast ended while the queue was being added' });

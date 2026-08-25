@@ -289,6 +289,22 @@
     return out;
   });
 
+  /** "24 episodes · 9h 26m · to Wed 03:44", built here so Svelte's
+   *  whitespace trimming around {#if} cannot glue the separators on. */
+  function blockMeta(b) {
+    const bits = [`${b.count} episodes`];
+    if (b.total) bits.push(fmtGap(b.total));
+    if (b.end) bits.push(`to ${clock(b.end)}`);
+    return bits.join(' · ');
+  }
+
+  /** "5:39 / 23:37", same reason. */
+  function airTime() {
+    const pos = fmtTime(status.position ?? 0);
+    const dur = status.playing?.duration;
+    return dur ? `${pos} / ${fmtTime(dur)}` : pos;
+  }
+
   /** "Show — S4E16 – E30" when a block is one series, else first … last. */
   function blockLabel(b) {
     const cut = (t) => {
@@ -410,7 +426,7 @@
           {#if card}
             live in {fmtTime(Math.max(0, (status.playing.duration ?? 0) - (status.position ?? 0)))}
           {:else}
-            {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
+            {airTime()}
           {/if}
         </p>
         <!-- Burned into the picture, so it is worth seeing at a glance:
@@ -623,9 +639,7 @@
               {:else}
                 <span class="bl">{blockLabel(b).range}</span>
               {/if}
-              <span class="bm">
-                {b.count} episodes{#if b.total} · {fmtGap(b.total)}{/if}{#if b.end} · to {clock(b.end)}{/if}
-              </span>
+              <span class="bm">{blockMeta(b)}</span>
             </button>
           </li>
           {#if expanded.has(b.key)}

@@ -553,6 +553,11 @@ export class PipelinePlayout extends EventEmitter {
 
   setQueue(items) {
     this.queue = [...items];
+    // An item that left and came back arrives with no duration again;
+    // let it be probed afresh rather than staying blank forever.
+    for (const it of items) {
+      if (it.duration == null) this._durTried?.delete(it.srcPath);
+    }
     this._fillDurations();
     this.emit('queue', this.snapshot());
   }
@@ -604,15 +609,23 @@ export class PipelinePlayout extends EventEmitter {
     this._fillingDurations = true;
     this._detached((async () => {
       try {
+        // Tried-and-failed is tracked separately from unknown. Writing 0
+        // to stop the search re-matching would have been a lie the
+        // schedule believes: a zero-length item makes everything after it
+        // project at the same instant.
+        this._durTried ??= new Set();
         for (;;) {
-          const q = this.queue.find((x) => x.duration == null && x.srcPath);
+          const q = this.queue.find((x) => x.duration == null && x.srcPath
+            && !this._durTried.has(x.srcPath));
           if (!q || this._abort.signal.aborted) return;
+          this._durTried.add(q.srcPath);
           let d = null;
           try { d = await probeDuration(q.srcPath); } catch { /* stays unknown */ }
           if (this._abort.signal.aborted) return;
-          // Null would re-match the search forever; 0 is falsy but finite.
-          q.duration = d ?? 0;
-          if (this.queue.includes(q)) this.emit('queue', this.snapshot());
+          if (d != null) {
+            q.duration = d;
+            if (this.queue.includes(q)) this.emit('queue', this.snapshot());
+          }
         }
       } finally {
         this._fillingDurations = false;
