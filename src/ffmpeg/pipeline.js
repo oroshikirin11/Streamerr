@@ -1696,19 +1696,36 @@ export class PipelinePlayout extends EventEmitter {
     return promise;
   }
 
+  /**
+   * Give the GPU a clean try at every clip.
+   *
+   * Whether a clip can composite on the GPU is a property of THAT clip —
+   * its pixel format, its geometry, whether it is pillarboxed — so a
+   * failure carries no information about the next one. This used to latch
+   * after two failures and send the rest of the broadcast to the CPU,
+   * which meant two bad clips early in a 30-episode queue cost the other
+   * 28 their hardware path for the whole evening.
+   *
+   * Re-checking is nearly free: a composite that is going to fail does so
+   * before producing a single block, so the wasted work is one short-lived
+   * ffmpeg. Paying that per clip is far cheaper than burning hours of
+   * episodes on the CPU because of a transient at the start.
+   *
+   * The per-clip flag still stands, so a clip that fails falls back once
+   * and does not loop.
+   */
+  _rearmGpu() {
+    if (this.profile?.swDecode) delete this.profile.swDecode;
+    if (!this._demoted) return;
+    if (this._demoted.barsFailed) delete this.profile.barsFailed;
+    if (this._demoted.gpuSubs) this.profile.gpuSubs = true;
+    this._demoted = null;
+    this._gpuSubsDemoted = false;
+  }
+
   /** Move to the next queued clip, or end the broadcast. */
   _advance() {
-    // One GPU-composite failure can be a transient — a broadcast started
-    // milliseconds after the previous one's processes were SIGKILLed can
-    // catch the device mid-teardown. Give the GPU one more chance on the
-    // next clip; a second failure latches CPU for the whole broadcast.
-    if (this.profile?.swDecode) delete this.profile.swDecode;
-    if (this._gpuSubsDemoted && (this._gpuSubFails ?? 0) < 2 && this._demoted) {
-      if (this._demoted.barsFailed) delete this.profile.barsFailed;
-      if (this._demoted.gpuSubs) this.profile.gpuSubs = true;
-      this._demoted = null;
-      this._gpuSubsDemoted = false;
-    }
+    this._rearmGpu();
     // A pinned item waits for its wall-clock time behind an interval card
     // rather than starting early. Peek, don't shift: the card's natural end
     // re-enters here, and by then the time has arrived.
