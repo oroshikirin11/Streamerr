@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { api, fmtTime } from '$lib/api.js';
+  import { api, fmtTime, audioLabel, subtitleLabel } from '$lib/api.js';
 
   let status = $state({ status: 'stopped', playing: null, queue: [] });
   let error = $state('');
@@ -24,6 +24,10 @@
         status: 'running',
         position: 201,
         playing: { title: "Frieren: Beyond Journey's End — S1E1", duration: 1563 },
+        tracks: {
+          audio: { language: 'jpn', title: null, codec: 'aac', channels: 2 },
+          subtitle: { language: 'eng', title: null, codec: 'ass', forced: false, external: false },
+        },
         queue: [
           { id: 'a', title: "Frieren — S1E2", duration: 1420 },
           { id: 'b', title: "Frieren — S1E3", duration: 1435 },
@@ -113,6 +117,21 @@
         <p class="muted small" style="margin: 2px 0 0;">
           {fmtTime(status.position ?? 0)}{#if status.playing?.duration} / {fmtTime(status.playing.duration)}{/if}
         </p>
+        <!-- Burned into the picture, so it is worth seeing at a glance:
+             viewers cannot switch this at their end. -->
+        <div class="chips">
+          <span class="chip" title="Audio track being broadcast">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                 stroke-width="1.8" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4zM16 9a4 4 0 0 1 0 6"/></svg>
+            {audioLabel(status.tracks?.audio)}
+          </span>
+          <span class="chip" class:off={!status.tracks?.subtitle}
+                title="Subtitle track burned into the picture">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                 stroke-width="1.8" aria-hidden="true"><path d="M3 5h18v14H3zM7 15h4M14 15h3"/></svg>
+            {subtitleLabel(status.tracks?.subtitle)}
+          </span>
+        </div>
       </div>
     </div>
     <div class="row">
@@ -203,6 +222,16 @@
   .wrap { max-width: 680px; margin: 0 auto; }
   .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   .onair-row { display: flex; gap: 14px; align-items: center; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px 2px 7px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    font-size: 12px; color: var(--text); max-width: 260px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chip svg { color: var(--muted); flex-shrink: 0; }
+  .chip.off { color: var(--muted); }
   .cover {
     width: 52px; height: 74px; object-fit: cover; border-radius: 6px;
     border: 1px solid var(--border); flex-shrink: 0;

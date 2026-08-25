@@ -117,3 +117,53 @@ export function fmtTime(seconds) {
     ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
     : `${m}:${String(sec).padStart(2, '0')}`;
 }
+
+/**
+ * Human names for the language codes that actually turn up in media files.
+ * ffprobe reports ISO-639-2/B ("ger", "jpn"); showing that raw in the panel
+ * reads like a debug dump.
+ */
+const LANGUAGE_NAMES = {
+  eng: 'English', jpn: 'Japanese', ger: 'German', deu: 'German',
+  fre: 'French', fra: 'French', spa: 'Spanish', ita: 'Italian',
+  por: 'Portuguese', rus: 'Russian', kor: 'Korean', chi: 'Chinese',
+  zho: 'Chinese', dut: 'Dutch', nld: 'Dutch', pol: 'Polish',
+  swe: 'Swedish', nor: 'Norwegian', dan: 'Danish', fin: 'Finnish',
+  ara: 'Arabic', hin: 'Hindi', tur: 'Turkish', cze: 'Czech',
+  ces: 'Czech', hun: 'Hungarian', gre: 'Greek', ell: 'Greek',
+  heb: 'Hebrew', tha: 'Thai', vie: 'Vietnamese', ukr: 'Ukrainian',
+  ron: 'Romanian', rum: 'Romanian', bul: 'Bulgarian', ind: 'Indonesian',
+};
+
+export function languageName(code) {
+  if (!code) return 'Unknown';
+  return LANGUAGE_NAMES[String(code).toLowerCase()] ?? String(code).toUpperCase();
+}
+
+/** Channel counts as people describe them, not as integers. */
+function channelName(n) {
+  if (!n) return null;
+  if (n === 1) return 'mono';
+  if (n === 2) return 'stereo';
+  return `${n - 1}.1`;
+}
+
+/** One-line description of the audio track being broadcast. */
+export function audioLabel(a) {
+  if (!a) return 'None';
+  const bits = [languageName(a.language)];
+  if (a.title) bits.push(a.title);
+  const ch = channelName(a.channels);
+  if (ch) bits.push(ch);
+  return bits.join(' · ');
+}
+
+/** One-line description of the subtitle track being burned in. */
+export function subtitleLabel(s) {
+  if (!s) return 'Off';
+  const bits = [languageName(s.language)];
+  if (s.title) bits.push(s.title);
+  if (s.forced) bits.push('forced');
+  if (s.external) bits.push('sidecar');
+  return bits.join(' · ');
+}

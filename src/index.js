@@ -165,6 +165,7 @@ function streamStatus() {
       : null,
     queue: s.queue.map((q) => ({ id: q.id, title: q.title })),
     position: s.position,
+    tracks: s.tracks ?? null,
   };
 }
 
@@ -189,6 +190,7 @@ function buildEngine({ profile, selection }) {
   e.on('nowplaying', () => broadcast('stream', streamStatus()));
   e.on('queue', () => broadcast('stream', streamStatus()));
   e.on('seeked', () => broadcast('stream', streamStatus()));
+  e.on('selection', () => broadcast('stream', streamStatus()));
   e.on('progress', (b) => broadcast('progress', {
     position: b.position, speed: b.speed, drops: b.drops,
   }));

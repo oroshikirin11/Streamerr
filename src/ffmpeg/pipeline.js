@@ -393,11 +393,31 @@ export class PipelinePlayout extends EventEmitter {
 
   snapshot() {
     const air = this._onAir();
+    const a = this.selection?.audio ?? null;
+    const sub = this.selection?.subtitle ?? null;
     return {
       status: this.status,
       playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: [...this.queue],
       position: air.position,
+      // What is actually being burned in, so the panel can show it without
+      // asking — the choice is baked into the stream and is not something a
+      // viewer can change at their end.
+      tracks: {
+        audio: a && {
+          language: a.language ?? null,
+          title: a.title ?? null,
+          codec: a.codec ?? null,
+          channels: a.channels ?? null,
+        },
+        subtitle: sub && {
+          language: sub.language ?? null,
+          title: sub.title ?? null,
+          codec: sub.codec ?? null,
+          forced: Boolean(sub.forced),
+          external: Boolean(sub.external),
+        },
+      },
     };
   }
 
