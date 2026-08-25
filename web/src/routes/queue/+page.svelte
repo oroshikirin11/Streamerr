@@ -136,14 +136,18 @@
   /**
    * "HH:MM" on the day this item was already going to air, so nudging an
    * episode that falls after midnight does not yank it back to today.
-   * Never resolves into the past.
+   *
+   * Deliberately does NOT roll an impossible time forward to the next day.
+   * Doing so turned a mistyped hour into a twenty-three hour gap filled
+   * with a test card — a silently absurd schedule instead of an error.
+   * An unreachable time is refused by repin(); moving something to another
+   * day is what the day-shift control is for.
    */
   function epochFor(hm, base) {
     const [h, m] = hm.split(':').map(Number);
     if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
     const d = new Date((base ?? Math.floor(Date.now() / 1000)) * 1000);
     d.setHours(h, m, 0, 0);
-    while (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
     return Math.floor(d.getTime() / 1000);
   }
 
@@ -152,17 +156,79 @@
     const q = status.queue.find((x) => x.id === id);
     const base = (q?.startAt ?? q?.at ?? Math.floor(Date.now() / 1000)) + days * 86400;
     if (base * 1000 <= Date.now()) return;
-    pinId = null;
-    await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: base } : e)));
+    await repin(id, base);
   }
 
-  async function savePin(id) {
-    const at = pinValue ? epochFor(pinValue, pinBase) : null;
+  /**
+   * Programme one item, carrying every later programmed time with it.
+   *
+   * A rundown moves as a block. Pushing episode 21 back ten minutes while
+   * 22 and 23 keep their old times strands those pins in the past, where
+   * they stop being programmed at all and quietly revert to whatever the
+   * running order produces — the times you set simply stop meaning
+   * anything. Unpinned items already cascade, so only the pins need
+   * carrying.
+   */
+  /**
+   * The earliest a row could possibly air: when everything ahead of it
+   * finishes. A time before that is not a schedule, it is a wish — the
+   * engine never starts a clip early, so the pin would simply be ignored
+   * and the row would sit there looking programmed while meaning nothing.
+   */
+  function earliestFor(i) {
+    const q = status.queue ?? [];
+    const now = Date.now() / 1000;
+    if (i <= 0) {
+      const dur = status.playing?.duration;
+      return dur ? now + Math.max(0, dur - (status.position ?? 0)) : now;
+    }
+    const prev = q[i - 1];
+    if (prev?.at == null) return now;
+    return prev.duration ? prev.at + prev.duration : prev.at;
+  }
+
+  async function repin(id, at) {
+    const q = status.queue ?? [];
+    const i = q.findIndex((x) => x.id === id);
+    if (i < 0) { pinId = null; return; }
+
+    // Refuse rather than accept a time the broadcast cannot honour. The
+    // editor stays open so the time can be corrected in place.
+    const earliest = earliestFor(i);
+    if (at != null && at < earliest - 30) {
+      const blocker = i === 0 ? (status.playing?.title ?? 'what is on air') : q[i - 1].title;
+      error = at < Date.now() / 1000
+        ? `That time has already passed. The earliest this can air is ${clock(earliest)}`
+          + `, when ${blocker} finishes — use the arrow to move it to another day.`
+        : `Cannot air before ${clock(earliest)} — ${blocker} is still running then.`;
+      setTimeout(() => {
+        if (error.startsWith('Cannot air before') || error.startsWith('That time has already')) error = '';
+      }, 7000);
+      return;
+    }
+
+    const from = q[i]?.startAt ?? q[i]?.at ?? null;
+    const delta = at != null && from != null ? at - from : 0;
+    const now = Date.now() / 1000;
+    let carried = 0;
     pinId = null;
     // An item that aired while this was open is simply gone from the list,
     // so the edit becomes a no-op instead of hitting the wrong episode.
-    await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: at } : e)));
+    await editQueue((es) => es.map((e, j) => {
+      if (e.id === id) return { ...e, startAt: at };
+      if (!delta || j <= i || e.startAt == null) return e;
+      const moved = e.startAt + delta;
+      if (moved <= now) return e;       // dragging it into the past helps nobody
+      carried++;
+      return { ...e, startAt: moved };
+    }));
+    if (carried) {
+      note = `Moved ${carried} later programmed time${carried > 1 ? 's' : ''} by the same amount.`;
+      setTimeout(() => { if (note.startsWith('Moved ')) note = ''; }, 6000);
+    }
   }
+
+  const savePin = (id) => repin(id, pinValue ? epochFor(pinValue, pinBase) : null);
   async function clearPin(id) {
     pinId = null;
     await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: null } : e)));
@@ -369,10 +435,13 @@
         <li>
           {#if pinId === item.id}
             {@const target = pinValue ? epochFor(pinValue, pinBase) : null}
+            {@const floor = earliestFor(i)}
             <span class="tcell edit">
               <input class="tin" type="time" bind:value={pinValue}
+                     class:bad={target != null && target < floor - 30}
                      onkeydown={(e) => { if (e.key === 'Enter') savePin(item.id); if (e.key === 'Escape') pinId = null; }}
-                     aria-label="Air time" />
+                     aria-label="Air time"
+                     title={`Not before ${clock(floor)} — what runs ahead of this is still going`} />
             </span>
             {#if target && !sameDay(target, Date.now() / 1000)}
               <span class="onday">{new Date(target * 1000)
@@ -506,6 +575,7 @@
     width: 74px; padding: 2px 4px; font-size: 13px;
     font-variant-numeric: tabular-nums;
   }
+  .tin.bad { border-color: var(--danger); color: var(--danger); }
 
   .q li.gap {
     display: flex; align-items: center; gap: 7px;
