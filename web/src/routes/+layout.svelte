@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { api, connectStatus, fmtTime, clockTime } from '$lib/api.js';
+  import { api, connectStatus, fmtTime, clockTime, subtitleChoice } from '$lib/api.js';
   import PreviewWindow from '$lib/PreviewWindow.svelte';
 
   let { children } = $props();
@@ -434,7 +434,7 @@
                 <button class="tr" class:pick={String(sub.key) === String(tracks.chosen.subtitleKey)}
                         disabled={busyCtl}
                         onclick={() => applyTrack(tracks.chosen.audioIndex, sub.key, 'always')}>
-                  {sub.language ?? '?'} · {sub.codec}{sub.forced ? ' · forced' : ''}{sub.external ? ' · sidecar' : ''}
+                  {subtitleChoice(sub)}
                 </button>
               {/each}
             </div>

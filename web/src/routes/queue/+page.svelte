@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { api, connectStatus, fmtTime, clockTime, clockDay, maskClock, parseClock, audioLabel, subtitleLabel } from '$lib/api.js';
+  import { api, connectStatus, fmtTime, clockTime, clockDay, maskClock, parseClock, audioLabel, subtitleLabel, subtitleChoice } from '$lib/api.js';
 
   let status = $state({ status: 'stopped', playing: null, queue: [] });
   let error = $state('');
@@ -536,7 +536,7 @@
           <button class="line" class:on={String(s.key) === String(tracks.chosen.subtitleKey)}
                   disabled={switching}
                   onclick={() => applyTracks(tracks.chosen.audioIndex, s.key, 'always')}>
-            {s.language ?? '?'} · {s.codec}{s.forced ? ' · forced' : ''}{s.external ? ' · sidecar' : ''}
+            {subtitleChoice(s)}
           </button>
         {/each}
       </div>

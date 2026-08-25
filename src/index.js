@@ -151,6 +151,7 @@ function trackPrefs() {
     prefs.subtitleLanguages = [trackIntent.subtitleLanguage, ...(prefs.subtitleLanguages ?? [])];
   }
   if (trackIntent.subtitleMode) prefs.subtitleMode = trackIntent.subtitleMode;
+  if (trackIntent.subtitleLike) prefs.subtitleLike = trackIntent.subtitleLike;
   return prefs;
 }
 
@@ -166,10 +167,25 @@ async function selectionFor(item, profile = null) {
 
 /** Remember a live switch as language + mode, for the clips that follow. */
 function rememberIntent(selection, subtitleMode) {
+  const sub = selection.subtitle ?? null;
   trackIntent = {
     audioLanguage: selection.audio?.language ?? null,
-    subtitleLanguage: selection.subtitle?.language ?? null,
+    subtitleLanguage: sub?.language ?? null,
     subtitleMode: subtitleMode ?? trackIntent.subtitleMode,
+    // Language alone does not identify a track. A release with a full
+    // English subtitle and a signs-only one offers two "eng" tracks, so
+    // switching to the good one only to have the next episode pick the
+    // other is the default behaviour unless the choice is remembered in
+    // enough detail to find its counterpart. Indices are useless across
+    // files; title and forced-ness travel.
+    subtitleLike: sub
+      ? {
+        title: sub.title ?? null,
+        forced: Boolean(sub.forced),
+        hearingImpaired: Boolean(sub.hearingImpaired),
+        codec: sub.codec ?? null,
+      }
+      : null,
   };
 }
 

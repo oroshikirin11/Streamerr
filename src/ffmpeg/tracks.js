@@ -221,6 +221,12 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
     subtitleMode = 'auto',
     audioIndex = null,
     subtitleId = null,
+    // What a live switch actually picked, so the next episode of the same
+    // series can find the counterpart track rather than the first one that
+    // happens to share a language. A release with two English subtitle
+    // tracks — a full one and a signs-only one — is the common case, and
+    // language alone cannot tell them apart.
+    subtitleLike = null,
   } = prefs;
 
   // ── audio ──
@@ -252,7 +258,7 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
       // prefer reading along.
       subtitle = pickByLanguage(
         subtitles.filter((s) => !s.hearingImpaired),
-        subtitleLanguages.map(normLang),
+        subtitleLanguages.map(normLang), subtitleLike,
       ) ?? subtitles.find((s) => !s.hearingImpaired) ?? subtitles[0] ?? null;
       if (!subtitle) skipped = 'this file has none';
     } else if (subtitleMode === 'forced') {
@@ -280,8 +286,8 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
       } else {
         subtitle = pickByLanguage(
           subtitles.filter((s) => !s.hearingImpaired),
-          wanted,
-        ) ?? pickByLanguage(subtitles, wanted);
+          wanted, subtitleLike,
+        ) ?? pickByLanguage(subtitles, wanted, subtitleLike);
       }
     }
   }
@@ -301,12 +307,55 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
   };
 }
 
-function pickByLanguage(list, languages) {
+/** Shared-word similarity between two track names, 0..1 (Dice). */
+function nameSimilarity(a, b) {
+  const words = (t) => String(t ?? '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+  const A = words(a);
+  const B = words(b);
+  if (!A.length || !B.length) return 0;
+  const inB = new Set(B);
+  const shared = A.filter((w) => inB.has(w)).length;
+  return (2 * shared) / (A.length + B.length);
+}
+
+/**
+ * How well a track matches the one the viewer actually chose.
+ *
+ * Deliberately not an exact-name match and never an index. Within one
+ * series a release names its tracks the same way every episode, so the
+ * name carries most of the weight. Across series the names share nothing,
+ * and matching on them would be worse than useless — but forced-ness
+ * still means the same thing everywhere, so it keeps a vote of its own.
+ * When nothing distinguishes the candidates the caller falls back to the
+ * ordinary default rather than picking arbitrarily.
+ */
+function matchScore(s, like) {
+  let score = nameSimilarity(s.title, like.title) * 3;
+  if (Boolean(s.forced) === Boolean(like.forced)) score += 1;
+  if (Boolean(s.hearingImpaired) === Boolean(like.hearingImpaired)) score += 0.25;
+  if (like.codec && s.codec === like.codec) score += 0.25;
+  return score;
+}
+
+function pickByLanguage(list, languages, like = null) {
   for (const lang of languages) {
-    // Prefer a non-forced full track, then anything in that language.
-    const exact = list.find((s) => s.language === lang && !s.forced)
-      ?? list.find((s) => s.language === lang);
-    if (exact) return exact;
+    const sameLang = list.filter((s) => s.language === lang);
+    if (!sameLang.length) continue;
+
+    if (like) {
+      const scored = sameLang
+        .map((s) => ({ s, score: matchScore(s, like) }))
+        .sort((a, b) => b.score - a.score);
+      // Only honour the memory when it actually discriminates; equal
+      // scores mean it told us nothing about these particular tracks.
+      if (scored.length === 1 || scored[0].score > scored[1].score) {
+        return scored[0].s;
+      }
+    }
+
+    // Otherwise prefer a full track over a signs-only one.
+    return sameLang.find((s) => !s.forced) ?? sameLang[0];
   }
   return null;
 }

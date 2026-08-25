@@ -223,7 +223,22 @@ export function subtitleLabel(s) {
   if (!s) return 'Off';
   const bits = [languageName(s.language)];
   if (s.title) bits.push(s.title);
-  if (s.forced) bits.push('forced');
+  // "signs only" rather than "forced" for the DISPOSITION. Releases label
+  // tracks freely, and one whose title is literally "Forced" while its
+  // disposition is not rendered as "English · Forced" against a genuinely
+  // forced "English · forced" — the same words, differing in case, for two
+  // tracks that behave completely differently.
+  if (s.forced) bits.push('signs only');
+  if (s.external) bits.push('sidecar');
+  return bits.join(' · ');
+}
+
+/** The same track as a one-line choice in a switcher list. */
+export function subtitleChoice(s) {
+  const bits = [languageName(s.language)];
+  if (s.title) bits.push(s.title);
+  bits.push(s.codec);
+  if (s.forced) bits.push('signs only');
   if (s.external) bits.push('sidecar');
   return bits.join(' · ');
 }
