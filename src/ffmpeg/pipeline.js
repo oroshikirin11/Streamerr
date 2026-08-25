@@ -358,11 +358,24 @@ export class PipelinePlayout extends EventEmitter {
     // silently "playing" to an empty stream is the worst outcome there is.
     if ((this._bankBytes ?? 0) > 0 && this._lastAiredAt
         && Date.now() - this._lastAiredAt > 20_000) {
-      this.emit('fatal', new Error(
-        'The stream stopped reaching the server: the encoder is still '
-        + 'producing, but nothing has been accepted for 20s. If the clip '
-        + 'has no audio track this is usually why.',
-      ));
+      // Distinguish "never got going" from "stopped mid-broadcast". A
+      // publisher whose RTMP open hangs is alive and looks healthy: it
+      // probes a little input, blocks writing the header, and never drains
+      // stdin again. That reads identically to a wedged mux from in here,
+      // but the thing to go and look at is the network, not the clip —
+      // and the server has no record of the session at all, so blaming the
+      // encoder sends you looking in the one place the fault is not.
+      const bytes = this._published ?? 0;
+      const everConnected = bytes > this._bankMax;
+      this.emit('fatal', new Error(everConnected
+        ? 'The stream stopped reaching the server: the encoder is still '
+          + 'producing, but nothing has been accepted for 20s. If the clip '
+          + 'has no audio track this is usually why.'
+        : 'Never reached the server: the publisher accepted '
+          + `${Math.round(bytes / 1024)} KB and then stopped, which is what `
+          + 'an RTMP connection that never completes looks like. The server '
+          + 'will have no record of the attempt. Check that the Owncast host '
+          + 'is reachable and that the stream key is right.'));
       this.stop();
       return;
     }
