@@ -82,6 +82,13 @@
    * their pin as well as their id, so reordering or removing an item never
    * silently drops the times someone programmed.
    */
+  /** Drop a whole sitting in one go — 43 rows is not a per-row workflow. */
+  async function removeBlock(b) {
+    const ids = new Set(b.rows.map((r) => r.item.id));
+    if (expanded.has(b.key)) toggleBlock(b.key);
+    await editQueue((es) => es.filter((e) => !ids.has(e.id)));
+  }
+
   /** Flip the break ahead of a pinned block between card and off-air. */
   const setBreakMode = (id, offline) => editQueue((es) =>
     es.map((e) => (e.id === id ? { ...e, breakOffline: offline } : e)));
@@ -651,6 +658,13 @@
               {/if}
               <span class="bm">{blockMeta(b)}</span>
             </button>
+            <span class="bctl">
+              <button class="ic rm" disabled={editing} onclick={() => removeBlock(b)}
+                      title={`Remove all ${b.count} episodes from the schedule`}
+                      aria-label={`Remove ${b.count} episodes`}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+              </button>
+            </span>
           </li>
           {#if expanded.has(b.key)}
             {#each b.rows as r (r.item.id)}
@@ -755,7 +769,8 @@
 
   /* A sitting: episodes with nothing between them, one card. */
   .q li.blkrow {
-    display: block; padding: 0; border: 1px solid var(--border);
+    display: flex; align-items: stretch; padding: 0;
+    border: 1px solid var(--border);
     border-left: 3px solid var(--success);
     background: var(--surface); margin: 2px 0;
   }
@@ -773,6 +788,13 @@
   .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bl strong { font-weight: 500; }
   .bm { color: var(--muted); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+  /* Sits outside the expand button: a button cannot nest inside a button. */
+  .bctl {
+    display: flex; align-items: center; padding-right: 8px;
+    opacity: 0; transition: opacity .12s ease;
+  }
+  .q li.blkrow:hover .bctl, .q li.blkrow:focus-within .bctl { opacity: 1; }
+
 
   /* Episodes inside an expanded block sit slightly inset. */
   .q li.ep { border-left: 3px solid transparent; }
