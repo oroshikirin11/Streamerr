@@ -573,6 +573,16 @@
               <input class="tin" type="text" inputmode="numeric" maxlength="5"
                      placeholder="HH:MM" bind:value={pinValue}
                      list={`ts-${item.id}`}
+                     class:bad={pinValue && !parseClock(pinValue)}
+                     {@attach (el) => {
+                       // Focus and offer the suggestions as soon as the
+                       // editor opens: waiting for a keystroke hides the
+                       // value help exactly when it is most useful.
+                       el.focus();
+                       el.select();
+                       try { el.showPicker?.(); } catch { /* needs a gesture */ }
+                     }}
+                     onfocus={(e) => { try { e.currentTarget.showPicker?.(); } catch { /* ignore */ } }}
                      oninput={(e) => { pinValue = maskClock(e.currentTarget.value); }}
                      onkeydown={(e) => {
                        if (e.key === 'Enter') savePin(item.id);
@@ -796,6 +806,8 @@
     width: 74px; padding: 2px 4px; font-size: 13px;
     font-variant-numeric: tabular-nums;
   }
+  /* Not a real 24-hour time — say so while it is typed, not on save. */
+  .tin.bad { border-color: var(--danger); color: var(--danger); }
 
   /* Break divider: the one thing allowed to interrupt the rundown. */
   .q li.brk {
