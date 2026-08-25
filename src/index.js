@@ -38,6 +38,33 @@ const WEB_DIR = resolve(__dirname, '../web/build');
 
 teeConsole();
 
+/**
+ * Never let one fault take the service down.
+ *
+ * Almost nothing here runs inside a request: the engine lives in timers,
+ * child-process events and promise chains, none of which the route wrapper
+ * covers. Node ends the process on an unhandled rejection, so a single
+ * throw in any of that killed the broadcast AND the panel at once — the
+ * browser was left showing a bare "NetworkError" with no way to find out
+ * what happened, because the log died with the process.
+ *
+ * Staying up is strictly better here: a wedged broadcast can be stopped
+ * and restarted from the panel, an absent server cannot.
+ */
+process.on('unhandledRejection', (err) => {
+  const msg = `unhandled rejection: ${err?.stack ?? err}`;
+  dpush('error', msg);
+  console.error(msg);
+});
+process.on('uncaughtException', (err) => {
+  const msg = `uncaught exception: ${err?.stack ?? err}`;
+  dpush('error', msg);
+  console.error(msg);
+  // The broadcast is the part most likely to be in an unknown state; end it
+  // so the panel shows the truth rather than a stream that is not running.
+  try { engine?.stop(); } catch { /* already down */ }
+});
+
 const app = express();
 const server = http.createServer(app);
 app.use(express.json({ limit: '1mb' }));
@@ -703,8 +730,16 @@ app.post('/api/stream/stop', (req, res) => {
 
 app.post('/api/stream/queue', wrap(async (req, res) => {
   if (!engine) return res.status(409).json({ error: 'Not streaming' });
+  // Resolving a long queue means dozens of round trips to the library, and
+  // the broadcast can end while they are in flight — pin the engine we
+  // started with rather than whatever the module variable holds by the
+  // time the loop finishes, which may be null.
+  const e = engine;
   const items = [];
   for (const id of req.body?.itemIds ?? []) {
+    if (engine !== e) {
+      return res.status(409).json({ error: 'The broadcast ended while the queue was being added' });
+    }
     const item = await library.item(id);
     items.push({
       id: item.id,
@@ -716,7 +751,10 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
       image: item.image ?? null,
     });
   }
-  engine.setQueue(items);
+  if (engine !== e) {
+    return res.status(409).json({ error: 'The broadcast ended while the queue was being added' });
+  }
+  e.setQueue(items);
   broadcast('stream', streamStatus());
   res.json(streamStatus());
 }));

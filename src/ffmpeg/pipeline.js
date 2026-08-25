@@ -473,7 +473,7 @@ export class PipelinePlayout extends EventEmitter {
       // broadcast. The switch lands a few seconds later instead; the
       // extraction is cached, so only the first change on a file pays it.
       const tok = (this._selToken = (this._selToken ?? 0) + 1);
-      this._extract(item).finally(() => {
+      this._detached(this._extract(item).finally(() => {
         if (this._stopping || this._selToken !== tok) return;
         if (this.current?.item !== item || this.status !== 'running') return;
         // Flush first — it rewinds the playhead to the last aired moment —
@@ -481,7 +481,7 @@ export class PipelinePlayout extends EventEmitter {
         // the picture is rather than where the encoder had run ahead to.
         this._bankFlush();
         this._play(item, this.position, { duration: dur });
-      });
+      }), 'changing tracks');
     }
     this.emit('selection', selection);
   }
@@ -706,7 +706,10 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     this._spawnSource(args, { kind: 'clip' });
-    if (this.queue[0]) { this._warm(this.queue[0]); this._extract(this.queue[0]); }
+    if (this.queue[0]) {
+      this._detached(this._warm(this.queue[0]), 'reading ahead');
+      this._detached(this._extract(this.queue[0]), 'extracting subtitles');
+    }
     this.emit('nowplaying', this.snapshot());
 
     this._fillDuration(item);
@@ -814,7 +817,7 @@ export class PipelinePlayout extends EventEmitter {
   async prepare(item) {
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
-    this._extract(item);
+    this._detached(this._extract(item), 'extracting subtitles');
   }
 
   /**
@@ -1075,6 +1078,21 @@ export class PipelinePlayout extends EventEmitter {
     });
   }
 
+  /**
+   * Report a fault from a detached promise instead of letting it end the
+   * process. Anything the engine kicks off outside a request — advancing a
+   * clip, warming a file, extracting subtitles — runs with no caller to
+   * catch it, and Node treats an unhandled rejection as fatal. Losing the
+   * broadcast AND the panel because one clip failed to start is the worst
+   * possible trade.
+   */
+  _detached(promise, what) {
+    Promise.resolve(promise).catch((err) => {
+      this.emit('warn', `${what} failed: ${err?.message ?? err}`);
+    });
+    return promise;
+  }
+
   /** Move to the next queued clip, or end the broadcast. */
   _advance() {
     const next = this.queue.shift();
@@ -1109,7 +1127,7 @@ export class PipelinePlayout extends EventEmitter {
     // exact stall that makes large files unplayable. Hold the pipe with a
     // card instead. The publisher keeps writing, so Owncast never notices,
     // and the wait is visible rather than a mystery.
-    withTracks().then(() => {
+    this._detached(withTracks().then(() => {
       if (stale()) return;
       if (this._needsExtraction(next)) {
         this.current = { item: next, offset: 0, duration: next.duration ?? null };
@@ -1118,19 +1136,19 @@ export class PipelinePlayout extends EventEmitter {
         this._spawnHold('Preparing subtitles');
         this.emit('status', this.status);
         this.emit('nowplaying', this.snapshot());
-        this._extract(next).finally(() => {
+        this._detached(this._extract(next).finally(() => {
           if (stale()) return;
           this.status = 'starting';
           this.emit('status', this.status);
           this._play(next, 0);
-        });
+        }), `preparing ${next.title ?? 'the next clip'}`);
         return;
       }
       this.prepare(next).finally(() => {
         if (stale()) return;
         this._play(next, 0);
       });
-    });
+    }), `starting ${next.title ?? 'the next clip'}`);
   }
 
   /**

@@ -4,12 +4,22 @@
  */
 
 async function request(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-    credentials: 'same-origin',
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
+    });
+  } catch {
+    // The browser's own wording for this is "NetworkError when attempting
+    // to fetch resource", which reads like a bug in the page rather than
+    // what it is: the server is not answering.
+    const err = new Error('Lost connection to Jellystreamerr — the server is not responding.');
+    err.offline = true;
+    throw err;
+  }
 
   if (res.status === 401) {
     const err = new Error('Not authenticated');
