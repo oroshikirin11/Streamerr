@@ -308,7 +308,13 @@ export class PipelinePlayout extends EventEmitter {
     // first 10s, and a cold Bluray over SMB can take longer than that to
     // open. Reading the head first means the source starts hot.
     await this._warm(first);
-    this._spawnPublisher();
+    // A chunked clip produces nothing until its first chunk has finished
+    // encoding, and then nothing again until the second one does. Opening
+    // the RTMP session before that cushion exists put the encode latency
+    // inside the live connection, and Owncast drops a session that goes
+    // quiet for 10s. Connect once there is something to send instead —
+    // _bankFeed spawns the publisher when the bank has enough.
+    if (startAt != null || this._chunkWorkers() <= 1) this._spawnPublisher();
     if (startAt != null && startAt - Date.now() / 1000 > 5) {
       // Scheduled start: broadcast the countdown card until the hour hits.
       // The first clip goes back on the queue — the card's natural end is a
@@ -1232,6 +1238,17 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     sched.on('warn', (m) => this.emit('warn', m));
+    // Two chunks encoded: one to send, one in hand. Only now is it safe to
+    // open the RTMP session — before this the publisher would consume the
+    // opening chunk at realtime and then sit silent through the next
+    // chunk's encode, which is what Owncast drops a connection for. Not a
+    // delay or a byte threshold: the condition is that the content
+    // actually exists.
+    sched.on('ready', () => {
+      if (this.publisher || this._stopping || this.scheduler !== sched) return;
+      this.emit('log', '[chunks] two chunks encoded — connecting\n');
+      this._spawnPublisher();
+    });
     // Chunk workers that keep failing must end the broadcast rather than
     // marching silently through the queue: the streaming path has this
     // guard (_deadClips) and lives in _spawnSource, which chunks never run.
@@ -1252,7 +1269,6 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     this.scheduler = sched;
-    if (!this.publisher?.stdin.writable) return;
 
     // Into the bank, not straight at the publisher — see _bankFeed. A
     // Writable keeps pipe() backpressure working, so a fast worker cannot

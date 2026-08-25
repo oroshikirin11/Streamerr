@@ -26,7 +26,14 @@ import { EventEmitter } from 'events';
 import { createReadStream, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
-/** Seconds in the opening chunk — small enough to beat Owncast's deadline. */
+/**
+ * Seconds in the opening chunk.
+ *
+ * Every chunk pays a fixed seek cost (ffmpeg backs the seek target off and
+ * decode-discards to the previous keyframe), so small chunks are wasteful
+ * — but the first one decides how soon the bank starts filling, and the
+ * broadcast waits on that. Short opener, full-size thereafter.
+ */
 const FIRST_CHUNK_SECONDS = 5;
 
 export class ChunkScheduler extends EventEmitter {
@@ -161,6 +168,17 @@ export class ChunkScheduler extends EventEmitter {
 
       record.done = true;
       record.failed = code !== 0 || !existsSync(out);
+      if (!record.failed) {
+        // Going on air is gated on this, not on a timer: the publisher
+        // consumes at exactly realtime once connected, so it must never be
+        // handed a chunk without the next one already encoded. Two
+        // finished chunks means one to send and one in hand.
+        this._encoded = (this._encoded ?? 0) + 1;
+        if (!this._announcedReady && (this._encoded >= 2 || this.finished)) {
+          this._announcedReady = true;
+          this.emit('ready');
+        }
+      }
       if (record.failed) {
         this.emit('warn', `chunk ${index} failed: ${lastLines(stderr, 2)}`);
       }
