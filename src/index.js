@@ -253,6 +253,7 @@ function streamStatus() {
     queue: s.queue.map((q) => ({
       id: q.id,
       title: q.title,
+      series: q.series ?? null,
       duration: q.duration ?? null,
       // Projected air time, and the pin that fixed it (both epoch seconds).
       at: q.at ?? null,
@@ -755,6 +756,9 @@ app.post('/api/stream/start', wrap(async (req, res) => {
       title: item.seriesName
         ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
         : item.title,
+      // Carried so the panel can group the schedule by show without
+      // having to parse it back out of the display title.
+      series: item.seriesName ?? null,
       srcPath: library.resolvePath(item),
       duration: item.duration ?? null,
       image: item.image ?? null,
@@ -945,6 +949,9 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
         title: item.seriesName
           ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
           : item.title,
+        // Carried so the panel can group the schedule by show without
+        // having to parse it back out of the display title.
+        series: item.seriesName ?? null,
         srcPath: library.resolvePath(item),
         duration: item.duration ?? null,
         image: item.image ?? null,

@@ -314,12 +314,33 @@
   // break separates sittings. Grouping the list that way makes the breaks
   // the loudest thing on the page, which is the point of a schedule.
 
+  /**
+   * What show a queued entry belongs to. The server sends `series` for
+   * episodes; a film has none, so it falls back to its own title and ends up
+   * a group of one, which is exactly right for a film.
+   */
+  const seriesOf = (item) => {
+    if (item?.series) return item.series;
+    const t = String(item?.title ?? '');
+    const i = t.lastIndexOf(' — ');
+    return i > 0 ? t.slice(0, i) : t;
+  };
+
   const blocks = $derived.by(() => {
     const q = status.queue ?? [];
     const out = [];
     q.forEach((item, i) => {
       const gap = gapBefore(i);
-      if (!out.length || gap > 30) out.push({ key: item.id, gap, rows: [] });
+      // A new series starts a new block even with no wait between them.
+      // Appending three shows into one collapsible list made a evening's
+      // programming unreadable; the run of episodes is the unit people
+      // think in, and it should be the unit on screen.
+      const changed = out.length
+        && seriesOf(item) !== seriesOf(out[out.length - 1].rows[0].item);
+      if (!out.length || gap > 30 || changed) {
+        const startedBy = !out.length ? 'first' : gap > 30 ? 'gap' : 'series';
+        out.push({ key: item.id, gap, startedBy, rows: [] });
+      }
       out[out.length - 1].rows.push({ item, i });
     });
     for (const b of out) {
@@ -662,6 +683,13 @@
       {/snippet}
 
       {#each blocks as b (b.key)}
+        {#if b.startedBy === 'series'}
+          <li class="seriesbrk">
+            <span class="ln"></span>
+            <span class="lbl">then</span>
+            <span class="ln"></span>
+          </li>
+        {/if}
         {#if b.gap > 30}
           <!-- A break is the only thing that separates two blocks, so it
                gets the full width: amber for a programmed interval, red
@@ -819,6 +847,19 @@
   .q li.brk:hover { background: transparent; }
   .q li.brk.bad { color: var(--danger); }
   .q li.brk.off { color: var(--muted); }
+
+  /* One series running straight into the next — a boundary, not a wait,
+     so it stays quiet where the break divider is loud. */
+  .q li.seriesbrk {
+    display: flex; align-items: center; gap: 10px;
+    border: none; padding: 5px 4px;
+  }
+  .q li.seriesbrk:hover { background: transparent; }
+  .q li.seriesbrk .ln { flex: 1; border-top: 1px solid var(--border); }
+  .q li.seriesbrk .lbl {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: .06em; text-transform: uppercase;
+  }
   .brkmode {
     padding: 1px 8px; font-size: 11.5px; border-radius: 999px;
     background: transparent; border: 1px solid color-mix(in srgb, currentColor 45%, transparent);

@@ -338,6 +338,13 @@ export class FilesystemLibrary {
       id: itemId,
       type: isEpisode ? 'Episode' : 'Movie',
       title: isEpisode || !folder || inSeason ? parsed.title : folder,
+      // The show this episode belongs to — one level up from a Season dir,
+      // otherwise the containing folder. Without it an episode queued
+      // straight from the grid went on air as a bare "Ep02", with no show
+      // name in the title and nothing to group the schedule by.
+      seriesName: isEpisode
+        ? basename(inSeason ? dirname(dirname(p)) : dirname(p))
+        : null,
       season: parsed.season, episode: parsed.episode,
       path: p, sourcePath: p,
     };
