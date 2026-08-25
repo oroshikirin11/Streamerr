@@ -55,8 +55,16 @@ export class ChunkScheduler extends EventEmitter {
   constructor({
     srcPath, startOffset = 0, duration = null,
     chunkSeconds = 20, workers = 3, workDir, buildArgs,
+    holdUntilReady = false,
   }) {
     super();
+    // Deliver nothing until two chunks are in hand ('ready'). Mid-broadcast
+    // a cover card feeds the publisher while chunks encode, and it dies at
+    // the first delivery — so delivering chunk 0 alone (the short opener)
+    // kills the card, airs ~5s, and then starves the publisher for the
+    // whole of chunk 1's encode. One to send and one in hand is the same
+    // rule going on air uses, for the same reason.
+    this.holdUntilReady = holdUntilReady;
     this.srcPath = srcPath;
     this.startOffset = startOffset;
     this.duration = duration;
@@ -242,6 +250,7 @@ export class ChunkScheduler extends EventEmitter {
    */
   _drain() {
     if (this._writing || !this.running) return;
+    if (this.holdUntilReady && !this._announcedReady) return;
 
     const next = this.chunks.get(this.nextToWrite);
     if (!next || !next.done) {

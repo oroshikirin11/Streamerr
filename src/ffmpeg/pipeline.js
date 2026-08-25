@@ -1256,12 +1256,18 @@ export class PipelinePlayout extends EventEmitter {
     this._clipBase = this.timeline;
     const chunkSeconds = Number(this.profile?.chunkSeconds ?? 20);
 
+    // Whether a cover card will feed the publisher while chunks encode —
+    // see below. The scheduler must know: with a card up it must not
+    // deliver until two chunks are in hand, or the card dies after the
+    // short opener and the publisher starves through chunk 1's encode.
+    const cover = flushed && Boolean(this.publisher) && !this._stopping;
     const sched = new ChunkScheduler({
       srcPath: item.srcPath,
       startOffset: offset,
       duration: this.current.duration,
       chunkSeconds,
       workers,
+      holdUntilReady: cover,
       workDir: join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`),
       buildArgs: ({ start, dur, out }) => buildChunkArgs({
         srcPath: item.srcPath,
@@ -1322,7 +1328,7 @@ export class PipelinePlayout extends EventEmitter {
     // fed for exactly that window; the sink kills it the moment real bytes
     // arrive. A natural episode advance never flushes, so it never shows a
     // card — the bank's tail of the previous episode covers it instead.
-    if (flushed && this.publisher && !this._stopping) {
+    if (cover) {
       this.holding = true;
       this._spawnSource(buildHoldArgs({
         profile: this.profile,
