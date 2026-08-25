@@ -8,7 +8,7 @@
  */
 
 import { readdirSync, statSync, existsSync } from 'fs';
-import { basename, extname, join } from 'path';
+import { basename, dirname, extname, join } from 'path';
 import { createHash } from 'crypto';
 
 const VIDEO_EXTS = new Set([
@@ -19,7 +19,7 @@ const POSTER_NAMES = ['poster.jpg', 'poster.png', 'folder.jpg', 'folder.png', 'c
 const id = (s) => createHash('sha1').update(s).digest('hex').slice(0, 16);
 
 /** Season/episode from the usual naming conventions. */
-export function parseEpisode(name) {
+export function parseEpisode(name, { allowBareNumber = true } = {}) {
   const stem = basename(name, extname(name));
 
   // S01E02, s01e02, 1x02, S01E02-E03
@@ -41,8 +41,11 @@ export function parseEpisode(name) {
       title: cleanTitle(stem, m[0]),
     };
   }
-  // Bare "- 05 -" or "Ep05", common in anime releases
-  m = /(?:[\s._-]|^)(?:[eE][pP]?)?(\d{1,3})(?:[\s._-]|$)/.exec(stem);
+  // Bare "- 05 -" or "Ep05", common in anime releases. Only trustworthy
+  // when the folder already says these are episodes; see the caller.
+  m = allowBareNumber
+    ? /(?:[\s._-]|^)(?:[eE][pP]?)?(\d{1,3})(?:[\s._-]|$)/.exec(stem)
+    : null;
   if (m && Number(m[1]) > 0 && Number(m[1]) < 999) {
     return { season: 1, episode: Number(m[1]), episodeEnd: null, title: cleanTitle(stem, m[0]) };
   }
@@ -59,6 +62,17 @@ function cleanTitle(stem, matched) {
     .replace(/[._]/g, ' ')
     .trim();
   return cleaned || stem;
+}
+
+/** Movies or shows, guessed from the folder name and what is inside. */
+function guessCollectionType(dir) {
+  const n = basename(dir).toLowerCase();
+  if (/movie|film/.test(n)) return 'movies';
+  if (/\btv\b|show|serie|anime/.test(n)) return 'tvshows';
+  const subs = listDirs(dir);
+  const withSeasons = subs.filter((c) => listDirs(join(dir, c)).some((x) => SEASON_DIR.test(x)));
+  if (subs.length && withSeasons.length > subs.length / 2) return 'tvshows';
+  return 'mixed';
 }
 
 function findPoster(dir) {
@@ -96,6 +110,56 @@ function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
+/** Folder names the arr stack uses for seasons, in a few languages. */
+const SEASON_DIR = /^(season|staffel|saison|temporada|s)[\s._-]*\d+$|^(specials|extras|ova|ovas)$/i;
+
+/** Every video under `dir`, at any sensible depth, with its folder. */
+function listVideosDeep(dir, maxDepth = 3, depth = 0) {
+  const out = [];
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const full = join(dir, e.name);
+    if (e.isFile()) {
+      if (VIDEO_EXTS.has(extname(e.name).toLowerCase())) out.push({ file: e.name, dir, full });
+    } else if (e.isDirectory() && depth < maxDepth) {
+      out.push(...listVideosDeep(full, maxDepth, depth + 1));
+    }
+  }
+  return out;
+}
+
+function hasVideosDeep(dir, maxDepth = 3) {
+  return listVideosDeep(dir, maxDepth).length > 0;
+}
+
+/**
+ * Does this folder hold ONE title — a film, or a show with its seasons?
+ *
+ * The distinction matters because a media tree has one more level than the
+ * poster grid does: `media/tv/Berserk/Season 1/*.mkv`. Pointing the library
+ * at `media` should still put Berserk on the grid, not "tv".
+ */
+function isTitleDir(dir) {
+  if (listVideos(dir).length) return true;
+  const subs = listDirs(dir);
+  if (subs.some((n) => SEASON_DIR.test(n))) return true;
+  return false;
+}
+
+/** A folder of collections (`media` holding `movies` and `tv`). */
+function isCollectionDir(dir) {
+  const subs = listDirs(dir);
+  if (!subs.length || listVideos(dir).length) return false;
+  if (subs.some((n) => isTitleDir(join(dir, n)))) return false;
+  return subs.some((n) => hasVideosDeep(join(dir, n)));
+}
+
 export class FilesystemLibrary {
   /** @param {object} opts @param {string[]} opts.roots */
   constructor({ roots = [] } = {}) {
@@ -116,10 +180,24 @@ export class FilesystemLibrary {
   }
 
   async libraries() {
-    return this.roots.map((r) => {
-      this._paths.set(id(r), r);
-      return { id: id(r), name: basename(r) || r, type: 'mixed', locations: [r] };
-    });
+    const out = [];
+    for (const r of this.roots) {
+      // A root that holds collections rather than titles (`media` with
+      // `movies` and `tv` inside) becomes one library per collection, so
+      // the grid shows films and shows instead of the words "movies" and
+      // "tv". Picking the obvious folder in the browser then just works.
+      const dirs = isCollectionDir(r) ? listDirs(r).map((n) => join(r, n)) : [r];
+      for (const d of dirs) {
+        this._paths.set(id(d), d);
+        out.push({
+          id: id(d),
+          name: basename(d) || d,
+          type: guessCollectionType(d),
+          locations: [d],
+        });
+      }
+    }
+    return out;
   }
 
   async items(libraryId, { startIndex = 0, limit = 100, search } = {}) {
@@ -137,12 +215,18 @@ export class FilesystemLibrary {
       this._paths.set(id(dir), dir);
       const poster = findPoster(dir);
       if (poster) this._paths.set(id(poster), poster);
+      const videos = listVideosDeep(dir);
+      // One file and no season folders is a film: the panel can queue it
+      // straight away instead of asking which episode.
+      const isMovie = videos.length === 1
+        && !listDirs(dir).some((n) => SEASON_DIR.test(n));
+      if (isMovie) this._paths.set(id(videos[0].full), videos[0].full);
       return {
-        id: id(dir),
+        id: isMovie ? id(videos[0].full) : id(dir),
         title: name,
         year: /\((\d{4})\)/.exec(name)?.[1] ?? null,
-        type: 'Series',
-        childCount: null,
+        type: isMovie ? 'Movie' : 'Series',
+        childCount: isMovie ? null : videos.length || null,
         image: poster ? `/api/library/image/${id(poster)}` : null,
       };
     });
@@ -154,7 +238,10 @@ export class FilesystemLibrary {
     const dir = this._paths.get(seriesId);
     if (!dir) throw new Error('Unknown item');
 
-    const subdirs = listDirs(dir);
+    // Only actual season folders. Any other subdirectory (extras, artwork,
+    // a stray sample) is not a season and listing it as one turned the
+    // season picker into a directory browser.
+    const subdirs = listDirs(dir).filter((n) => SEASON_DIR.test(n));
     if (!subdirs.length) return [];
 
     return subdirs.map((name) => {
@@ -179,28 +266,39 @@ export class FilesystemLibrary {
     const dir = this._paths.get(seasonId || seriesId);
     if (!dir) throw new Error('Unknown item');
 
-    const dirs = seasonId ? [dir] : [dir, ...listDirs(dir).map((d) => join(dir, d))];
+    const seriesDir = this._paths.get(seriesId) ?? dir;
     const out = [];
 
-    for (const d of dirs) {
-      for (const file of listVideos(d)) {
-        const full = join(d, file);
-        this._paths.set(id(full), full);
-        const parsed = parseEpisode(file);
-        out.push({
-          id: id(full),
-          type: 'Episode',
-          title: parsed.title,
-          seriesId,
-          seriesName: basename(dir),
-          season: parsed.season,
-          episode: parsed.episode,
-          duration: null, // ffprobe on every file would make browsing slow
-          path: full,
-          sourcePath: full,
-          image: null,
-        });
-      }
+    // Recursive: episodes live in `Show/Season 1/`, and a scan one level
+    // deep found nothing at all for every show organised that way.
+    for (const { file, dir: fileDir, full } of listVideosDeep(dir)) {
+      this._paths.set(id(full), full);
+      // A bare number is only an episode number inside a season folder.
+      // Applied to `Apocalypto 2006 2160p ... H265-BEN THE MEN.mkv` it
+      // matched a fragment of the release name and titled the film after
+      // whatever followed it.
+      const inSeason = SEASON_DIR.test(basename(fileDir));
+      const parsed = parseEpisode(file, { allowBareNumber: inSeason });
+      const isEpisode = parsed.episode != null;
+      // Films are named after their folder — `Backrooms (2026)` — because
+      // the filename is a release string, not a title.
+      const folder = basename(fileDir);
+      const title = isEpisode
+        ? parsed.title
+        : (folder && !SEASON_DIR.test(folder) ? folder : parsed.title);
+      out.push({
+        id: id(full),
+        type: isEpisode ? 'Episode' : 'Movie',
+        title,
+        seriesId,
+        seriesName: basename(seriesDir),
+        season: parsed.season,
+        episode: parsed.episode,
+        duration: null, // ffprobe on every file would make browsing slow
+        path: full,
+        sourcePath: full,
+        image: null,
+      });
     }
 
     // Season then episode, with unparsed names falling back to natural order.
@@ -217,9 +315,16 @@ export class FilesystemLibrary {
     if (st.isDirectory()) {
       return { id: itemId, title: basename(p), type: 'Series', path: p };
     }
-    const parsed = parseEpisode(basename(p));
+    // Same naming rules as the listing, or a film queued straight from the
+    // grid would go on air titled after its release string.
+    const folder = basename(dirname(p));
+    const inSeason = SEASON_DIR.test(folder);
+    const parsed = parseEpisode(basename(p), { allowBareNumber: inSeason });
+    const isEpisode = parsed.episode != null;
     return {
-      id: itemId, type: 'Episode', title: parsed.title,
+      id: itemId,
+      type: isEpisode ? 'Episode' : 'Movie',
+      title: isEpisode || !folder || inSeason ? parsed.title : folder,
       season: parsed.season, episode: parsed.episode,
       path: p, sourcePath: p,
     };
