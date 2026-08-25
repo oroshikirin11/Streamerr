@@ -336,7 +336,8 @@ export class PipelinePlayout extends EventEmitter {
           this.airedTimeline = c.tl;
           this.airedItem = c.item;
           p.stdin.write(c.data);
-          this.emit('data', c.data);
+          this._published = (this._published ?? 0) + c.data.length;
+          this._emitData(c.data);
         }
         // Closing stdin lets the publisher flush and close the RTMP session
         // cleanly rather than being cut off mid-packet.
@@ -495,6 +496,12 @@ export class PipelinePlayout extends EventEmitter {
   // ── publisher ────────────────────────────────────────────────────────
 
   _spawnPublisher() {
+    // Bytes actually handed to this publisher. The mpegts stream is a
+    // sequence of 188-byte packets, but the bank stores pipe reads, which
+    // land on arbitrary byte boundaries — this counter is what lets a
+    // flush cut the stream on a packet boundary instead of mid-packet.
+    this._published = 0;
+    this._drainGen = 0;
     const args = [
       '-hide_banner', '-nostdin',
       // The publisher sets the pace for everything. Sources run as fast as
@@ -575,7 +582,7 @@ export class PipelinePlayout extends EventEmitter {
     // not from what was encoded.
     this._bank.push({
       data: chunk, pos: this.position, tl: this.timeline,
-      item: this.current?.item ?? null,
+      item: this.current?.item ?? null, gen: this._srcGen ?? 0,
     });
     this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
     // Backpressure moves from the OS pipe to here: past the cap the source
@@ -606,12 +613,26 @@ export class PipelinePlayout extends EventEmitter {
         this.airedItem = c.item;
         this.emit('nowplaying', this.snapshot());
       }
+      // Seam between two source processes. A flush keeps this aligned (see
+      // _bankFlush), but a source that CRASHED can have ended its output
+      // anywhere in a packet — pad to the boundary so the next stream
+      // starts clean rather than gluing onto a torn packet.
+      if (c.gen !== this._drainGen) {
+        this._drainGen = c.gen;
+        const torn = (this._published ?? 0) % 188;
+        if (torn) {
+          const pad = Buffer.alloc(188 - torn);
+          try { w.write(pad); this._published += pad.length; } catch { break; }
+          this._emitData(pad);
+        }
+      }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
+      this._published = (this._published ?? 0) + c.data.length;
       // Mirror of the publisher's input for preview windows: the exact bytes
       // going out, tapped after the write so a dead publisher mirrors
       // nothing. With no listener this is a no-op.
-      this.emit('data', c.data);
+      this._emitData(c.data);
       if (!ok) {
         w.once('drain', () => {
           this._bankDraining = false;
@@ -651,7 +672,41 @@ export class PipelinePlayout extends EventEmitter {
    * the stream jump forward by however many seconds were buffered. That is
    * the "changing subtitles skips a few seconds" cut.
    */
+  /** A throwing preview listener must never take the drain loop down. */
+  _emitData(chunk) {
+    try { this.emit('data', chunk); } catch { /* listener's problem */ }
+  }
+
   _bankFlush() {
+    // Discarding the bank cuts the publisher's stream wherever the last
+    // drained PIPE READ happened to end — which is mid-packet essentially
+    // always, since reads are ~64KiB and packets are 188 bytes. The
+    // publisher's demuxer usually resyncs with a warning, but a torn
+    // packet can parse as a malformed one and kill the whole broadcast
+    // ("Error muxing a packet / Invalid data found"). Complete the
+    // in-flight packet with its true bytes from the head of the bank, so
+    // every splice lands exactly on a packet boundary.
+    const w = this.publisher?.stdin;
+    const torn = (this._published ?? 0) % 188;
+    if (torn && w?.writable) {
+      let need = 188 - torn;
+      const head = [];
+      for (const c of this._bank ?? []) {
+        if (need <= 0) break;
+        const take = c.data.subarray(0, need);
+        head.push(take);
+        need -= take.length;
+      }
+      // Bank ran out mid-packet (source died as it wrote): zeros keep the
+      // alignment; the demuxer drops one bad packet instead of desyncing.
+      if (need > 0) head.push(Buffer.alloc(need));
+      const fill = Buffer.concat(head);
+      try {
+        w.write(fill);
+        this._published += fill.length;
+        this._emitData(fill);
+      } catch { /* publisher already gone */ }
+    }
     this._bank = [];
     this._bankBytes = 0;
     // `aired` is a position WITHIN the clip it was recorded for. Straight
@@ -920,6 +975,10 @@ export class PipelinePlayout extends EventEmitter {
     // wedges on it silently — playback time keeps advancing over a frozen
     // picture. Announce it so preview clients get resynced instead.
     this.emit('discontinuity');
+    // Generation tag: lets the drain notice the seam between two source
+    // processes and repair packet alignment there if the old one ended
+    // mid-packet (a crash can cut its output anywhere).
+    this._srcGen = (this._srcGen ?? 0) + 1;
     // Backpressure state is per-process: carrying a stale `paused` flag into
     // a new source means the bank cap is never applied to it again.
     this._srcPaused = false;
