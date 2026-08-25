@@ -796,7 +796,6 @@
     width: 74px; padding: 2px 4px; font-size: 13px;
     font-variant-numeric: tabular-nums;
   }
-  .tin.bad { border-color: var(--danger); color: var(--danger); }
 
   /* Break divider: the one thing allowed to interrupt the rundown. */
   .q li.brk {

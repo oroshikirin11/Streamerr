@@ -215,7 +215,7 @@
   </header>
   <div class="folders">
     {#each libraries as l}
-      <button class="folder" onclick={() => enterLibrary(l)}>
+      <button class="folder" onclick={() => enterLibrary(l)} aria-label={l.name}>
         <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor"
              stroke-width="1.5" aria-hidden="true">
           {#if l.type === 'movies'}
@@ -250,11 +250,20 @@
   </header>
 
   {#if !items.length}
-    <p class="muted">Nothing here.</p>
+    {#if search}
+      <!-- An empty grid after a search reads as a broken library unless it
+           says which search emptied it. -->
+      <p class="muted">
+        Nothing matches “{search}”.
+        <button class="lnk inline" onclick={() => { search = ''; load(); }}>Clear the search</button>
+      </p>
+    {:else}
+      <p class="muted">Nothing here.</p>
+    {/if}
   {:else}
     <div class="grid">
       {#each items as item}
-        <button class="poster" onclick={() => openSeries(item)}>
+        <button class="poster" onclick={() => openSeries(item)} aria-label={item.title}>
           <div class="art">
             {#if item.image}
               <img src={item.image} alt="" loading="lazy" />
@@ -517,6 +526,10 @@
   .lnk {
     margin-left: auto; background: none; border: none; color: var(--muted);
     cursor: pointer; padding: 0 4px; font-size: 15px; line-height: 1;
+  }
+  .lnk.inline {
+    margin-left: 4px; padding: 0; font-size: inherit;
+    color: var(--accent); text-decoration: underline;
   }
 
   .selbar {

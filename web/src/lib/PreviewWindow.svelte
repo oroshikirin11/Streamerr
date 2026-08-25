@@ -151,11 +151,21 @@
     if (++wdStuck >= 2) { wdStuck = 0; retry(300); }
   }
 
+  /** Consecutive failed attempts, for the reconnect backoff. */
+  let attempts = 0;
+
   function retry(delay = 2000) {
     if (gone) return;
     connected = false;
     teardown();
-    retryTimer = setTimeout(connect, delay);
+    // A feed that cannot be played — server down, a proxy in the way, a
+    // browser without Media Source — used to be retried every two seconds
+    // indefinitely, each attempt logging a demuxer error. Back off to a
+    // slow poll so a broken preview stays quiet instead of flooding the
+    // console and the network.
+    const wait = Math.min(delay * 2 ** Math.min(attempts, 4), 30_000);
+    attempts += 1;
+    retryTimer = setTimeout(connect, wait);
   }
 
   function connect() {
@@ -228,7 +238,7 @@
   <!-- svelte-ignore a11y_media_has_caption -->
   <video bind:this={video} {muted} autoplay playsinline
          style:height="{height}px"
-         onplaying={() => { connected = true; needsGesture = false; }}
+         onplaying={() => { connected = true; needsGesture = false; attempts = 0; }}
          oncanplay={() => { if (video.paused) tryPlay(); }}></video>
 
   {#if needsGesture}

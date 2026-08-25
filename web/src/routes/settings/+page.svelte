@@ -232,6 +232,19 @@
         {#if tokenStored && !accessToken}A token is saved.{/if}
       </p>
 
+      {#if !cfg.owncast.apiUrl || (!tokenStored && !accessToken)}
+        <!-- The switch is on but the sync has nothing to talk to, and it
+             fails silently by design. Say so before it is relied on. -->
+        {@const missing = [
+          !cfg.owncast.apiUrl && 'address',
+          !tokenStored && !accessToken && 'token',
+        ].filter(Boolean)}
+        <p class="warnline">
+          Not active yet — the {missing.join(' and ')}
+          {missing.length > 1 ? 'are' : 'is'} still empty, so nothing is sent.
+        </p>
+      {/if}
+
       <div class="actions" style="margin-top:2px;">
         <button onclick={async () => {
           titleTest = null;
@@ -625,4 +638,8 @@
   .enc label.dim { color: var(--muted); }
   a { color: var(--accent); }
   code { font-family: ui-monospace, monospace; font-size: 12px; }
+  .warnline {
+    font-size: 12.5px; margin: 6px 0 0;
+    color: #c98a2e;
+  }
 </style>
