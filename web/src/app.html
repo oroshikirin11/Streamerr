@@ -1,5 +1,10 @@
 <!doctype html>
-<html lang="en">
+<!-- en-GB, not en: the language declared here is what the browser uses to
+     render native <input type="time"> controls, and "en" on a US locale
+     renders them as 12-hour with an AM/PM field. Every formatted string in
+     the panel pins hour12 explicitly (see clockTime in lib/api.js); this
+     covers the controls we do not format ourselves. -->
+<html lang="en-GB">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />

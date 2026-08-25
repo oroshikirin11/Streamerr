@@ -117,6 +117,56 @@ export function connectStatus(onMessage) {
   return () => { closed = true; ws?.close(); };
 }
 
+/**
+ * Wall-clock time, always 24-hour.
+ *
+ * Left to itself the browser picks by locale, and a US locale renders
+ * "8:15 PM". Times in a broadcast schedule are read against each other and
+ * against a clock on the wall, so they are pinned to 24-hour everywhere
+ * rather than inherited.
+ */
+export function clockTime(epoch) {
+  if (epoch == null) return null;
+  return new Date(epoch * 1000).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
+/** As clockTime, but carrying the weekday when it is not today. */
+export function clockDay(epoch) {
+  if (epoch == null) return null;
+  const d = new Date(epoch * 1000);
+  const today = new Date().toDateString() === d.toDateString();
+  return today
+    ? clockTime(epoch)
+    : `${d.toLocaleDateString([], { weekday: 'short' })} ${clockTime(epoch)}`;
+}
+
+/**
+ * Coerce typing into "HH:MM" as it goes.
+ *
+ * <input type="time"> would be the obvious control, but Chromium renders it
+ * from the BROWSER's locale and ignores both the element's lang and the
+ * document's — on a US locale it shows "06:12 PM" no matter what the page
+ * declares. A plain text field is the only way to guarantee 24-hour, so
+ * this does the masking the native control would have done.
+ */
+export function maskClock(raw) {
+  const d = String(raw ?? '').replace(/\D/g, '').slice(0, 4);
+  if (d.length <= 2) return d;
+  return `${d.slice(0, 2)}:${d.slice(2)}`;
+}
+
+/** "HH:MM" -> {h, m}, or null when it is not a real 24-hour time. */
+export function parseClock(raw) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(raw ?? '').trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return { h, m: min };
+}
+
 export function fmtTime(seconds) {
   if (!Number.isFinite(seconds)) return '--:--';
   const s = Math.max(0, Math.round(seconds));

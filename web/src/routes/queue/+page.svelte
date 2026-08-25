@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { api, connectStatus, fmtTime, audioLabel, subtitleLabel } from '$lib/api.js';
+  import { api, connectStatus, fmtTime, clockTime, clockDay, maskClock, parseClock, audioLabel, subtitleLabel } from '$lib/api.js';
 
   let status = $state({ status: 'stopped', playing: null, queue: [] });
   let error = $state('');
@@ -111,21 +111,13 @@
   let pinId = $state(null);
   let pinValue = $state('');
 
-  const hhmm = (epoch) => new Date(epoch * 1000)
-    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const hhmm = clockTime;
   const sameDay = (a, b) => new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
 
-  /**
-   * A long queue runs past midnight — 50 episodes is the best part of a
-   * day — so a bare HH:MM would make tomorrow 02:14 look like today's.
-   * Anything off today's date carries its weekday.
-   */
-  function clock(epoch) {
-    if (epoch == null) return null;
-    const now = Date.now() / 1000;
-    if (sameDay(epoch, now)) return hhmm(epoch);
-    return `${new Date(epoch * 1000).toLocaleDateString([], { weekday: 'short' })} ${hhmm(epoch)}`;
-  }
+  // A long queue runs past midnight — 50 episodes is the best part of a
+  // day — so a bare HH:MM would make tomorrow 02:14 look like today's.
+  // Anything off today's date carries its weekday. Both are 24-hour.
+  const clock = clockDay;
 
   /** The day a pin is being typed against — the row's own, not today's. */
   let pinBase = $state(null);
@@ -134,7 +126,7 @@
     pinId = q.id;
     pinBase = q.startAt ?? q.at ?? Math.floor(Date.now() / 1000);
     // Seed with the time it would air anyway, so nudging is the easy case.
-    pinValue = hhmm(pinBase);
+    pinValue = hhmm(pinBase);   // always 24-hour, whatever the browser locale
   }
 
   /**
@@ -148,12 +140,22 @@
    * day is what the day-shift control is for.
    */
   function epochFor(hm, base) {
-    const [h, m] = hm.split(':').map(Number);
-    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    const t = parseClock(hm);
+    if (!t) return null;
     const d = new Date((base ?? Math.floor(Date.now() / 1000)) * 1000);
-    d.setHours(h, m, 0, 0);
+    d.setHours(t.h, t.m, 0, 0);
     return Math.floor(d.getTime() / 1000);
   }
+
+  /**
+   * Is this time genuinely before the material ahead of it finishes?
+   *
+   * A typed time carries no seconds, so a row seeded with its own
+   * projected time lands up to 59s "early" and used to flag itself as
+   * impossible. Compare whole minutes: only reject when the entire minute
+   * is past.
+   */
+  const tooEarly = (at, floor) => at != null && at + 60 <= floor;
 
   /** Shift a programmed time a whole day, for a multi-day marathon. */
   async function nudgeDay(id, days) {
@@ -191,15 +193,20 @@
     return prev.duration ? prev.at + prev.duration : prev.at;
   }
 
-  async function repin(id, at) {
+  async function repin(id, at, typed = null) {
     const q = status.queue ?? [];
     const i = q.findIndex((x) => x.id === id);
     if (i < 0) { pinId = null; return; }
+    if (typed && at == null) {
+      error = `"${typed}" is not a time. Use 24-hour HH:MM, like 20:30.`;
+      setTimeout(() => { if (error.startsWith('"')) error = ''; }, 6000);
+      return;
+    }
 
     // Refuse rather than accept a time the broadcast cannot honour. The
     // editor stays open so the time can be corrected in place.
     const earliest = earliestFor(i);
-    if (at != null && at < earliest - 30) {
+    if (at != null && tooEarly(at, earliest)) {
       const blocker = i === 0 ? (status.playing?.title ?? 'what is on air') : q[i - 1].title;
       error = at < Date.now() / 1000
         ? `That time has already passed. The earliest this can air is ${clock(earliest)}`
@@ -232,7 +239,8 @@
     }
   }
 
-  const savePin = (id) => repin(id, pinValue ? epochFor(pinValue, pinBase) : null);
+  const savePin = (id) =>
+    repin(id, pinValue ? epochFor(pinValue, pinBase) : null, pinValue || null);
   async function clearPin(id) {
     pinId = null;
     await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: null } : e)));
@@ -524,10 +532,12 @@
             {@const target = pinValue ? epochFor(pinValue, pinBase) : null}
             {@const floor = earliestFor(i)}
             <span class="tcell edit">
-              <input class="tin" type="time" bind:value={pinValue}
-                     class:bad={target != null && target < floor - 30}
+              <input class="tin" type="text" inputmode="numeric" maxlength="5"
+                     placeholder="HH:MM" bind:value={pinValue}
+                     class:bad={target != null && tooEarly(target, floor)}
+                     oninput={(e) => { pinValue = maskClock(e.currentTarget.value); }}
                      onkeydown={(e) => { if (e.key === 'Enter') savePin(item.id); if (e.key === 'Escape') pinId = null; }}
-                     aria-label="Air time"
+                     aria-label="Air time (24-hour, HH:MM)"
                      title={`Not before ${clock(floor)} — what runs ahead of this is still going`} />
             </span>
             {#if target && !sameDay(target, Date.now() / 1000)}

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { api, connectStatus, fmtTime } from '$lib/api.js';
+  import { api, connectStatus, fmtTime, clockTime } from '$lib/api.js';
   import PreviewWindow from '$lib/PreviewWindow.svelte';
 
   let { children } = $props();
@@ -203,8 +203,7 @@
       : preparing && stream.playing
         ? `⏳ ${stream.playing.title}`
         : onBreak && stream.breakUntil
-          ? `⏳ Back at ${new Date(stream.breakUntil * 1000)
-            .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
+          ? `⏳ Back at ${clockTime(stream.breakUntil)}`
           : 'Jellystreamerr';
   });
 

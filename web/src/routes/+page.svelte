@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { api, fmtTime } from '$lib/api.js';
+  import { api, fmtTime , maskClock, parseClock } from '$lib/api.js';
 
   let libraries = $state([]);
   // Null = showing the folder cards. The grid only exists inside a library.
@@ -158,9 +158,10 @@
   }
   function startAtEpoch() {
     if (!scheduling || !startTime) return null;
-    const [h, m] = startTime.split(':').map(Number);
+    const t = parseClock(startTime);
+    if (!t) return null;
     const d = new Date();
-    d.setHours(h, m, 0, 0);
+    d.setHours(t.h, t.m, 0, 0);
     if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
     return Math.floor(d.getTime() / 1000);
   }
@@ -282,7 +283,10 @@
     {#if selected.size}
       {#if !live}
         {#if scheduling}
-          <input class="schedtime" type="time" bind:value={startTime}
+          <input class="schedtime" type="text" inputmode="numeric" maxlength="5"
+                 placeholder="HH:MM" bind:value={startTime}
+                 oninput={(e) => { startTime = maskClock(e.currentTarget.value); }}
+                 aria-label="Go live at (24-hour, HH:MM)"
                  title="The stream opens with a countdown card until this time" />
         {/if}
         <button class="sched" class:on={scheduling} onclick={toggleSchedule}
