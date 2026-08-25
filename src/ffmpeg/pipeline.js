@@ -350,10 +350,21 @@ export class PipelinePlayout extends EventEmitter {
     this.selection = selection;
     if (this.current && this.status === 'running') {
       const item = this.current.item;
-      const pos = this.position;
       const dur = this.current.duration;
-      this._bankFlush();
-      this.prepare(item).finally(() => this._play(item, pos, { duration: dur }));
+      // Extract BEFORE swapping, while the current source keeps the pipe
+      // fed. Swapping first meant the new source's subtitles filter re-read
+      // the whole container at init — on an unextracted file that starved
+      // the publisher 13s, past Owncast's 10s deadline, and killed a live
+      // broadcast. The switch lands a few seconds later instead; the
+      // extraction is cached, so only the first change on a file pays it.
+      const tok = (this._selToken = (this._selToken ?? 0) + 1);
+      this._extract(item).finally(() => {
+        if (this._stopping || this._selToken !== tok) return;
+        if (this.current?.item !== item || this.status !== 'running') return;
+        const pos = this.position;   // captured now — playback moved on
+        this._bankFlush();
+        this._play(item, pos, { duration: dur });
+      });
     }
     this.emit('selection', selection);
   }
@@ -843,9 +854,17 @@ export class PipelinePlayout extends EventEmitter {
         if (!this._sawBlock && this.profile?.gpuSubs && this.selection?.subtitle
             && !this._gpuSubsDemoted && this.current) {
           this._gpuSubsDemoted = true;
-          this.profile.gpuSubs = false;
+          // Scope the demotion to what actually failed: the pillarboxed
+          // composite failing says nothing about plain 16:9 clips, and
+          // demoting everything sent full-HD episodes to the CPU for the
+          // rest of the broadcast for no reason.
+          if (contentRect(this.selection?.video, this.profile).bars) {
+            this.profile.barsFailed = true;
+          } else {
+            this.profile.gpuSubs = false;
+          }
           this.emit('warn', 'GPU subtitle compositing failed on this driver — '
-            + `retrying with CPU burn-in. (${tail})`);
+            + `retrying this clip with CPU burn-in. (${tail})`);
           this._play(this.current.item, this.position,
             { duration: this.current.duration });
           return;
@@ -1021,7 +1040,10 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (profile.gpuSubs && sub.filter && !sub.needsComplex) {
+  if (profile.gpuSubs && sub.filter && !sub.needsComplex
+      // barsFailed: the pillarboxed composite died live on this driver, so
+      // only clips that need bars take the CPU path; 16:9 stays on the GPU.
+      && !(profile.barsFailed && contentRect(selection?.video, profile).bars)) {
     // The canvas is an infinite generated input. Without bounding it, the
     // process NEVER exits when the episode ends — it idles on the canvas
     // forever, _advance() never fires, and the next episode never starts.

@@ -114,6 +114,17 @@ function buildEngine({ profile, selection }) {
     if (engine === e) engine = null;
     broadcast('stream', streamStatus());
   });
+  // A publisher that dies mid-broadcast (Owncast hung up, network dropped)
+  // is just as terminal as 'fatal' — without releasing the engine here,
+  // every later start bounces off "Already streaming" until the service
+  // restarts.
+  e.on('crashed', ({ code, stderr }) => {
+    const msg = `The broadcast connection died (exit ${code}). ${stderr ?? ''}`;
+    dpush('error', msg);
+    broadcast('error', { message: redact(msg) });
+    if (engine === e) engine = null;
+    broadcast('stream', streamStatus());
+  });
 
   return e;
 }
