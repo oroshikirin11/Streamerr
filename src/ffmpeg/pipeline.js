@@ -982,6 +982,18 @@ export class PipelinePlayout extends EventEmitter {
     if (item?.countdown) {
       return this._playCountdown(item.until, { heading: item.heading });
     }
+    // A playhead past the end of the clip is never a real request: seeking
+    // there yields a clip a few seconds long that ends immediately and
+    // respawns, over and over. Treat it as "this clip is finished" and let
+    // the queue move on rather than grinding on the tail.
+    const known = duration ?? item?.duration ?? null;
+    if (known != null && offset > 0 && offset >= known - 1) {
+      this.emit('warn', `playhead ${offset.toFixed(0)}s is past the end of `
+        + `${item?.title ?? 'this clip'} (${known.toFixed(0)}s) — moving on`);
+      this.position = 0;
+      this._advance();
+      return;
+    }
     this._killSource();
     this.holding = false;
     this.current = { item, offset, duration: duration ?? item.duration ?? null };
@@ -1164,6 +1176,14 @@ export class PipelinePlayout extends EventEmitter {
     let lastLog = 0;
     const onProgress = (sec) => {
       if (this.status !== 'preparing' || this.current?.item !== item) return;
+      // Only before the broadcast exists. `position` is the live playhead
+      // once anything is on air, and extraction sweeps the WHOLE file in
+      // seconds — writing that here told the engine the viewer was at the
+      // end of the episode, so the next respawn seeked there: -ss 1523 on a
+      // 1547s file, a 24-second clip, another respawn, and the publisher
+      // fed a splice every few seconds until Owncast dropped the stream.
+      // The progress bar this drives only exists before going live anyway.
+      if (this.publisher) return;
       this.position = sec;
       const now = Date.now();
       if (now - lastBeat < 3000) return;
