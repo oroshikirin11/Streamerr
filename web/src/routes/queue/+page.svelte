@@ -82,11 +82,15 @@
    * their pin as well as their id, so reordering or removing an item never
    * silently drops the times someone programmed.
    */
+  /** Flip the break ahead of a pinned block between card and off-air. */
+  const setBreakMode = (id, offline) => editQueue((es) =>
+    es.map((e) => (e.id === id ? { ...e, breakOffline: offline } : e)));
+
   async function editQueue(fn) {
     editing = true; error = '';
     try {
       const entries = (status.queue ?? [])
-        .map((q) => ({ id: q.id, startAt: q.startAt ?? null }));
+        .map((q) => ({ id: q.id, startAt: q.startAt ?? null, breakOffline: q.breakOffline ?? false }));
       await api.setQueue(fn(entries));
       await refresh();
     } catch (err) { error = err.message; }
@@ -259,6 +263,56 @@
   /** A pre-show or interval card is on air, not an episode. */
   const card = $derived(Boolean(status.playing?.countdown));
 
+  // ── programme blocks ─────────────────────────────────────────────────
+  //
+  // Consecutive episodes with nothing between them are one sitting; only a
+  // break separates sittings. Grouping the list that way makes the breaks
+  // the loudest thing on the page, which is the point of a schedule.
+
+  const blocks = $derived.by(() => {
+    const q = status.queue ?? [];
+    const out = [];
+    q.forEach((item, i) => {
+      const gap = gapBefore(i);
+      if (!out.length || gap > 30) out.push({ key: item.id, gap, rows: [] });
+      out[out.length - 1].rows.push({ item, i });
+    });
+    for (const b of out) {
+      b.first = b.rows[0].item;
+      b.last = b.rows[b.rows.length - 1].item;
+      b.count = b.rows.length;
+      b.total = b.rows.every((r) => r.item.duration)
+        ? b.rows.reduce((t, r) => t + r.item.duration, 0) : null;
+      b.pinned = b.rows.some((r) => r.item.startAt != null);
+      b.end = b.first.at != null && b.total != null ? b.first.at + b.total : null;
+    }
+    return out;
+  });
+
+  /** "Show — S4E16 – E30" when a block is one series, else first … last. */
+  function blockLabel(b) {
+    const cut = (t) => {
+      const i = String(t).lastIndexOf(' — ');
+      return i > 0 ? [t.slice(0, i), t.slice(i + 3)] : [null, t];
+    };
+    const [s1, e1] = cut(b.first.title);
+    const [s2, e2] = cut(b.last.title);
+    if (s1 && s1 === s2) return { series: s1, range: `${e1} – ${e2}` };
+    return { series: null, range: `${b.first.title} … ${b.last.title}` };
+  }
+
+  let expanded = $state(new Set());
+  function toggleBlock(key) {
+    const next = new Set(expanded);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    expanded = next;
+  }
+  /** Editing a row inside a collapsed block must reveal it first. */
+  function openBlockPin(b) {
+    if (!expanded.has(b.key)) toggleBlock(b.key);
+    openPin(b.first);
+  }
+
   /** When the last queued item finishes — the end of the evening. */
   const endsAt = $derived.by(() => {
     const q = status.queue ?? [];
@@ -311,6 +365,38 @@
 
 {#if status.status === 'stopped'}
   <p class="muted">Nothing is streaming. Pick something from the library.</p>
+{:else if status.status === 'break'}
+  <div class="card">
+    <p class="muted small" style="margin: 0 0 2px;">Off air</p>
+    <p style="margin: 0;"><strong>Back at {clock(status.breakUntil)}</strong></p>
+    <p class="muted small" style="margin: 2px 0 0;">
+      {#if status.queue?.length}
+        The broadcast reconnects by itself and opens with {status.queue[0].title}.
+      {:else}
+        The broadcast reconnects by itself.
+      {/if}
+    </p>
+    <div class="row">
+      <button onclick={skipCurrent} disabled={skipping}>
+        {skipping ? 'Going live…' : 'Go live now'}
+      </button>
+      <div style="flex:1"></div>
+      <button class="danger" onclick={stop}>Stop broadcast</button>
+    </div>
+  </div>
+
+  <div class="uphead">
+    <h2>Up next</h2>
+  </div>
+  <ul class="q">
+    {#each status.queue as item (item.id)}
+      <li class="ep">
+        <span class="tcell" style="color:var(--muted)">{clock(item.at) ?? '—:—'}</span>
+        <span class="qt">{item.title}</span>
+        {#if item.duration}<span class="muted small dur">{fmtTime(item.duration)}</span>{/if}
+      </li>
+    {/each}
+  </ul>
 {:else}
   <div class="card">
     <div class="onair-row">
@@ -348,7 +434,7 @@
       </div>
     </div>
     <div class="row">
-      <button onclick={skipCurrent} disabled={skipping || !status.queue?.length}
+      <button onclick={skipCurrent} disabled={skipping || (!card && !status.queue?.length)}
               title={card
                 ? 'Start the show now instead of waiting'
                 : status.queue?.length ? `Skip to ${status.queue[0].title}` : 'Nothing queued to skip to'}>
@@ -416,23 +502,8 @@
     </p>
   {:else}
     <ul class="q">
-      {#each status.queue as item, i (item.id ?? i)}
-        {@const gap = gapBefore(i)}
-        {#if gap > 30}
-          <!-- A programmed time the previous item cannot reach: the engine
-               fills the wait with an interval card rather than starting
-               early, so say so instead of leaving an unexplained jump. -->
-          <li class="gap" class:long={gap > 1200}>
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                 stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>
-            interval card · {fmtGap(gap)}
-            {#if gap > 1200}
-              — viewers see a card for that long; consider stopping and
-              starting again nearer the time
-            {/if}
-          </li>
-        {/if}
-        <li>
+      {#snippet epRow(item, i)}
+        <li class="ep">
           {#if pinId === item.id}
             {@const target = pinValue ? epochFor(pinValue, pinBase) : null}
             {@const floor = earliestFor(i)}
@@ -499,6 +570,70 @@
             {/if}
           </span>
         </li>
+      {/snippet}
+
+      {#each blocks as b (b.key)}
+        {#if b.gap > 30}
+          <!-- A break is the only thing that separates two blocks, so it
+               gets the full width: amber for a programmed interval, red
+               for dead air long enough to lose the audience. -->
+          {@const offline = b.first.breakOffline && b.first.startAt != null}
+          <li class="brk" class:bad={!offline && b.gap > 1200} class:off={offline}>
+            <span class="ln"></span>
+            {#if offline}
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="1.7" aria-hidden="true"><path d="M18.4 5.6A9 9 0 1 1 5.6 5.6M12 2v8"/></svg>
+              off air · {fmtGap(b.gap)} · back {clock(b.first.at)}
+            {:else}
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>
+              {b.gap > 1200 ? 'dead air' : 'break'} · {fmtGap(b.gap)} of card
+            {/if}
+            {#if b.first.startAt != null}
+              <button class="brkmode" disabled={editing}
+                      onclick={() => setBreakMode(b.first.id, !offline)}
+                      title={offline
+                        ? 'Keep the stream up and show a countdown card instead'
+                        : 'Take the stream offline for this break — Owncast shows its offline page, and the broadcast comes back on its own'}>
+                {offline ? 'air a card instead' : 'go off air instead'}
+              </button>
+            {/if}
+            <span class="ln"></span>
+          </li>
+        {/if}
+
+        {#if b.count === 1}
+          {@render epRow(b.first, b.rows[0].i)}
+        {:else}
+          <li class="blkrow" class:pinned={b.first.startAt != null}>
+            <button class="bh" onclick={() => toggleBlock(b.key)}
+                    aria-expanded={expanded.has(b.key)}
+                    title={expanded.has(b.key) ? 'Collapse' : 'Show the episodes'}>
+              <svg class="chev" class:open={expanded.has(b.key)} viewBox="0 0 24 24" width="14" height="14"
+                   fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+              <span class="tcell bt" class:pin={b.first.startAt != null}>
+                {#if b.first.startAt != null}
+                  <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
+                       stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                {/if}
+                {clock(b.first.at) ?? '—:—'}
+              </span>
+              {#if blockLabel(b).series}
+                <span class="bl"><strong>{blockLabel(b).series}</strong> — {blockLabel(b).range}</span>
+              {:else}
+                <span class="bl">{blockLabel(b).range}</span>
+              {/if}
+              <span class="bm">
+                {b.count} episodes{#if b.total} · {fmtGap(b.total)}{/if}{#if b.end} · to {clock(b.end)}{/if}
+              </span>
+            </button>
+          </li>
+          {#if expanded.has(b.key)}
+            {#each b.rows as r (r.item.id)}
+              {@render epRow(r.item, r.i)}
+            {/each}
+          {/if}
+        {/if}
       {/each}
     </ul>
     <p class="muted small hint">
@@ -577,14 +712,46 @@
   }
   .tin.bad { border-color: var(--danger); color: var(--danger); }
 
-  .q li.gap {
-    display: flex; align-items: center; gap: 7px;
-    border: none; padding: 3px 10px 3px 116px;
-    font-size: 12px; color: var(--muted); font-style: italic;
+  /* Break divider: the one thing allowed to interrupt the rundown. */
+  .q li.brk {
+    display: flex; align-items: center; gap: 8px;
+    border: none; padding: 8px 4px; font-size: 12px;
+    color: #c98a2e;
   }
-  .q li.gap:hover { background: transparent; }
-  /* A gap this size is dead air, not a breather — say so plainly. */
-  .q li.gap.long { color: var(--danger); font-style: normal; }
+  .q li.brk .ln { flex: 1; border-top: 1px dashed color-mix(in srgb, currentColor 45%, transparent); }
+  .q li.brk:hover { background: transparent; }
+  .q li.brk.bad { color: var(--danger); }
+  .q li.brk.off { color: var(--muted); }
+  .brkmode {
+    padding: 1px 8px; font-size: 11.5px; border-radius: 999px;
+    background: transparent; border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    color: inherit; cursor: pointer; flex-shrink: 0;
+  }
+  .brkmode:hover:not(:disabled) { border-color: currentColor; }
+
+  /* A sitting: episodes with nothing between them, one card. */
+  .q li.blkrow {
+    display: block; padding: 0; border: 1px solid var(--border);
+    border-left: 3px solid var(--success);
+    background: var(--surface); margin: 2px 0;
+  }
+  .q li.blkrow.pinned { border-left-color: var(--accent); }
+  .q li.blkrow:hover { background: var(--surface-2); }
+  .bh {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 8px 12px 8px 8px; background: transparent; border: none;
+    font-size: 14px; color: var(--text); text-align: left; cursor: pointer;
+  }
+  .chev { color: var(--muted); flex-shrink: 0; transition: transform .15s ease; }
+  .chev.open { transform: rotate(90deg); }
+  .bt { color: var(--muted); }
+  .bt.pin { color: var(--accent); font-weight: 500; }
+  .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bl strong { font-weight: 500; }
+  .bm { color: var(--muted); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+
+  /* Episodes inside an expanded block sit slightly inset. */
+  .q li.ep { border-left: 3px solid transparent; }
 
   .qctl { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
   .q li:hover .qctl, .q li:focus-within .qctl, .qctl.open { opacity: 1; }

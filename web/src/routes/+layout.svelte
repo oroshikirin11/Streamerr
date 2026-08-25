@@ -33,6 +33,8 @@
   }
 
   const live = $derived(stream.status === 'running' || stream.status === 'paused');
+  /** Off-air break: engine alive, RTMP session deliberately closed. */
+  const onBreak = $derived(stream.status === 'break');
   /** First-time subtitle extraction before going live — can take minutes. */
   const preparing = $derived(
     stream.status === 'preparing' || stream.status === 'starting');
@@ -190,7 +192,7 @@
       document.head.appendChild(link);
     }
     link.type = 'image/svg+xml';
-    link.href = live ? favLive : preparing ? favPrep : favIdle;
+    link.href = live ? favLive : (preparing || onBreak) ? favPrep : favIdle;
   });
 
   // The tab title is what's on air, not which page is open: the playing
@@ -200,7 +202,10 @@
       ? `🟢 ${stream.playing.title}`
       : preparing && stream.playing
         ? `⏳ ${stream.playing.title}`
-        : 'Jellystreamerr';
+        : onBreak && stream.breakUntil
+          ? `⏳ Back at ${new Date(stream.breakUntil * 1000)
+            .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
+          : 'Jellystreamerr';
   });
 
   let devMode = $state(false);
@@ -263,7 +268,7 @@
       <div class="status">
         <span class="onair" class:live class:prep={preparing}>
           <span class="dot" class:live class:prep={preparing}></span>
-          {live ? 'On air' : preparing ? 'Preparing' : 'Offline'}
+          {live ? 'On air' : preparing ? 'Preparing' : onBreak ? 'On break' : 'Offline'}
         </span>
         {#if speed && live}
           <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>

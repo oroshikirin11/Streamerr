@@ -361,6 +361,17 @@ export class PipelinePlayout extends EventEmitter {
   stop({ graceful = false } = {}) {
     this._stopping = true;
     this._abort.abort();     // take background extractions down too
+    // Stopping during an off-air break: no publisher exists, so the close
+    // handler that normally finishes a broadcast will never run.
+    if (this._break) {
+      if (this._break.timer) clearTimeout(this._break.timer);
+      this._break = null;
+      this.status = 'stopped';
+      this.current = null;
+      this.emit('status', this.status);
+      this.emit('ended', { code: 0 });
+      return;
+    }
     this._killSource();
     if (this.publisher) {
       const p = this.publisher;
@@ -428,6 +439,8 @@ export class PipelinePlayout extends EventEmitter {
   hardStop() {
     this._stopping = true;
     this._abort.abort();
+    if (this._break?.timer) clearTimeout(this._break.timer);
+    this._break = null;
     this._bank = [];
     this._bankBytes = 0;
     if (this._watch) { clearInterval(this._watch); this._watch = null; }
@@ -446,6 +459,7 @@ export class PipelinePlayout extends EventEmitter {
     const sub = this.selection?.subtitle ?? null;
     return {
       status: this.status,
+      breakUntil: this._break?.until ?? null,
       playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: this.queue.map((q, i) => ({ ...q, at: sched[i] ?? null })),
       position: air.position,
@@ -652,6 +666,13 @@ export class PipelinePlayout extends EventEmitter {
       this.publisher = null;
       if (this._watch) { clearInterval(this._watch); this._watch = null; }
       this._killSource();
+
+      // An off-air break, not an ending: hold the engine and set the alarm.
+      if (this._break && !this._stopping) {
+        this.current = null;
+        this._breakWait();
+        return;
+      }
 
       const wasStopping = this._stopping;
       this.status = 'stopped';
@@ -883,6 +904,62 @@ export class PipelinePlayout extends EventEmitter {
       heading,
       nextTitle: this.queue[0]?.title ?? '',
     }), { kind: 'clip' });
+  }
+
+  /**
+   * Off-air break: drain what viewers are owed, let the publisher close
+   * its RTMP session cleanly, and come back with a fresh one at the hour.
+   * Owncast shows its offline page in between — honest, unlike hours of
+   * countdown card. The engine stays alive the whole time; the publisher
+   * close handler sees _break and flips to 'break' instead of ending.
+   */
+  _goOffline(until) {
+    this._killSource();
+    this._break = { until, timer: null };
+    this.current = null;
+    // The panel must not go on showing the clip that just ended.
+    this.aired = null;
+    this.airedTimeline = null;
+    this.airedItem = null;
+    const p = this.publisher;
+    if (!p) { this._breakWait(); return; }
+    try {
+      const tail = this._bank ?? [];
+      this._bank = [];
+      this._bankBytes = 0;
+      for (const c of tail) {
+        p.stdin.write(c.data);
+        this._published = (this._published ?? 0) + c.data.length;
+        this._emitData(c.data);
+      }
+      p.stdin.end();
+    } catch { /* already gone — close handler still runs */ }
+  }
+
+  _breakWait() {
+    if (!this._break || this._stopping) return;
+    this.status = 'break';
+    this.emit('status', this.status);
+    const delay = Math.max(0, this._break.until - Date.now() / 1000);
+    this._break.timer = setTimeout(
+      () => this._detached(this._resumeFromBreak(), 'resuming from break'),
+      delay * 1000);
+  }
+
+  /** Back on air: new publisher, new RTMP session, straight into the pin. */
+  async _resumeFromBreak() {
+    if (this._stopping || !this._break) return;
+    if (this._break.timer) clearTimeout(this._break.timer);
+    this._break = null;
+    this.status = 'starting';
+    this.emit('status', this.status);
+    const first = this.queue[0];
+    if (first) {
+      try { await this._warm(first); } catch { /* cold start, still fine */ }
+    }
+    if (this._stopping) return;
+    this._spawnPublisher();
+    this._advance();
   }
 
   /** Start (or restart) the source at a given offset within a clip. */
@@ -1370,7 +1447,11 @@ export class PipelinePlayout extends EventEmitter {
     const pinned = this.queue[0];
     if (pinned?.startAt != null && pinned.startAt - Date.now() / 1000 > 5) {
       this.emit('queue', this.snapshot());
-      this._playCountdown(pinned.startAt, { heading: 'UP NEXT' });
+      // Two kinds of break: a card keeps the stream up with a countdown,
+      // going offline actually ends the session until the hour — the right
+      // choice for a long pause, where hours of card is just dead air.
+      if (pinned.breakOffline) this._goOffline(pinned.startAt);
+      else this._playCountdown(pinned.startAt, { heading: 'UP NEXT' });
       return;
     }
 
@@ -1441,6 +1522,18 @@ export class PipelinePlayout extends EventEmitter {
    * @returns {boolean} whether the skip happened
    */
   skip() {
+    if (this._break) {
+      // "Go live now" means NOW: without clearing the pin, the resume
+      // advances, sees the same future time, and dives straight back
+      // offline — measured, not hypothetical.
+      const first = this.queue[0];
+      if (first) {
+        delete first.startAt;
+        delete first.breakOffline;
+      }
+      this._detached(this._resumeFromBreak(), 'going live from break');
+      return true;
+    }
     if (!this.publisher || this._stopping) return false;
     if (!this.current || !this.queue.length) return false;
 
@@ -1533,6 +1626,11 @@ export function buildSourceArgs({
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
   if (profile.gpuSubs && sub.filter && !sub.needsComplex
+      // The composite only wins when frames are already ON the GPU. A
+      // source the GPU cannot decode would pay two uploads (video + alpha
+      // canvas) per frame here; burning during the CPU decode chain and
+      // uploading once is measurably faster on exactly those files.
+      && gpuDecodable(selection?.video) && !profile.swDecode
       // barsFailed: the pillarboxed composite died live on this driver, so
       // only clips that need bars take the CPU path; 16:9 stays on the GPU.
       && !(profile.barsFailed && contentRect(selection?.video, profile).bars)) {

@@ -233,6 +233,7 @@ function streamStatus() {
         ...(s.playing.countdown ? { countdown: true } : {}),
       }
       : null,
+    breakUntil: s.breakUntil ?? null,
     queue: s.queue.map((q) => ({
       id: q.id,
       title: q.title,
@@ -240,6 +241,7 @@ function streamStatus() {
       // Projected air time, and the pin that fixed it (both epoch seconds).
       at: q.at ?? null,
       startAt: q.startAt ?? null,
+      breakOffline: q.breakOffline ?? false,
     })),
     position: s.position,
     tracks: s.tracks ?? null,
@@ -908,6 +910,7 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
     const id = typeof entry === 'string' ? entry : entry?.id;
     if (!id) continue;
     const pin = typeof entry === 'object' ? Number(entry.startAt) || null : null;
+    const offline = typeof entry === 'object' && Boolean(entry.breakOffline);
     if (engine !== e) {
       return res.status(409).json({ error: 'The broadcast ended while the queue was being added' });
     }
@@ -924,6 +927,7 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
       duration: known?.duration ?? item.duration ?? null,
       image: item.image ?? null,
       ...(pin ? { startAt: pin } : {}),
+      ...(pin && offline ? { breakOffline: true } : {}),
     });
   }
   if (engine !== e) {
