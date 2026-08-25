@@ -116,6 +116,10 @@
   const stopStream = () => ctl(() => api.stop());
   const togglePause = () => ctl(() => (paused ? api.resume() : api.pause()));
   const skip = (delta) => ctl(() => api.seek({ delta }));
+  const nextClip = () => ctl(async () => {
+    await api.next();
+    tracks = null;   // they describe the clip that just left the air
+  });
 
   async function openTracks() {
     if (tracks) { tracks = null; return; }
@@ -322,6 +326,11 @@
             </button>
             <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing} title="Forward 30 seconds" aria-label="Forward 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
+            </button>
+            <button class="ic" onclick={nextClip} disabled={busyCtl || !stream.queue?.length}
+                    title={stream.queue?.length ? `Skip to ${stream.queue[0].title}` : 'Nothing queued to skip to'}
+                    aria-label="Skip to next episode">
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
             </button>
           </div>
 

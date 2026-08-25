@@ -74,6 +74,7 @@ export const api = {
   pause: () => request('POST', '/api/stream/pause'),
   resume: () => request('POST', '/api/stream/resume'),
   seek: (body) => request('POST', '/api/stream/seek', body),
+  next: () => request('POST', '/api/stream/next'),
   setTracks: (body) => request('POST', '/api/stream/tracks', body),
 };
 

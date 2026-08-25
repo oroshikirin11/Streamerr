@@ -614,13 +614,14 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   /** Black card on the pipe, so a pause doesn't starve the publisher. */
-  _spawnHold() {
+  _spawnHold(label = 'Paused') {
     this._killSource();
     this.holding = true;
     this._spawnSource(buildHoldArgs({
       profile: this.profile,
       tsOffset: this.timeline,
       statsPeriodMs: this.statsPeriodMs,
+      label,
     }), { kind: 'hold' });
   }
 
@@ -748,8 +749,64 @@ export class PipelinePlayout extends EventEmitter {
       this.stop();
       return;
     }
-    this.prepare(next).finally(() => this._play(next, 0));
     this.emit('queue', this.snapshot());
+
+    // A second advance (or a stop) while this one waits must win.
+    const token = (this._advanceToken = (this._advanceToken ?? 0) + 1);
+    const stale = () => this._stopping || this._advanceToken !== token;
+
+    // Extraction for the next clip normally finishes during the previous
+    // one's playback — but a skip can arrive minutes before that, and
+    // playing anyway would burn subtitles straight from the container: the
+    // exact stall that makes large files unplayable. Hold the pipe with a
+    // card instead. The publisher keeps writing, so Owncast never notices,
+    // and the wait is visible rather than a mystery.
+    if (this._needsExtraction(next)) {
+      this.current = { item: next, offset: 0, duration: next.duration ?? null };
+      this.position = 0;
+      this.status = 'preparing';
+      this._spawnHold('Preparing subtitles');
+      this.emit('status', this.status);
+      this.emit('nowplaying', this.snapshot());
+      this._extract(next).finally(() => {
+        if (stale()) return;
+        this.status = 'starting';
+        this.emit('status', this.status);
+        this._play(next, 0);
+      });
+      return;
+    }
+
+    this.prepare(next).finally(() => {
+      if (stale()) return;
+      this._play(next, 0);
+    });
+  }
+
+  /**
+   * Abandon the clip on air and start the next one.
+   *
+   * Only the source restarts, exactly as at a normal clip boundary, so the
+   * RTMP connection and the viewers' session survive. Refused when nothing
+   * is queued — there is no "next" to skip to, and silently ending the
+   * broadcast is not what a skip button means.
+   *
+   * @returns {boolean} whether the skip happened
+   */
+  skip() {
+    if (!this.publisher || this._stopping) return false;
+    if (!this.current || !this.queue.length) return false;
+
+    this.emit('log', `[skip] ${this.current.item?.title ?? 'current clip'}\n`);
+    // Skipping while paused resumes on the next clip: leaving the engine
+    // "paused" while content actually plays would make every later control
+    // lie about what is happening.
+    if (this.status === 'paused') {
+      this.status = 'starting';
+      this.emit('status', this.status);
+    }
+    this._advance();
+    return true;
   }
 
   _redact(text) {

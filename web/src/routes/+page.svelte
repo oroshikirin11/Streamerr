@@ -266,14 +266,19 @@
 
   <ul class="eps">
     {#each episodes as ep}
-      <li class:sel={selected.has(ep.id)}
-          onclick={(e) => { if (!e.target.closest('button, input')) toggle(ep.id); }}>
-        <input type="checkbox" checked={selected.has(ep.id)} onchange={() => toggle(ep.id)} />
-        <span class="num">
-          {ep.season != null && ep.episode != null ? `S${String(ep.season).padStart(2,'0')}E${String(ep.episode).padStart(2,'0')}` : '—'}
-        </span>
-        <span class="t">{ep.title}</span>
-        {#if ep.duration}<span class="muted small">{fmtTime(ep.duration)}</span>{/if}
+      <li class:sel={selected.has(ep.id)}>
+        <input type="checkbox" id={`ep-${ep.id}`}
+               checked={selected.has(ep.id)} onchange={() => toggle(ep.id)} />
+        <!-- A label makes the whole row toggle the checkbox natively, so it
+             works from the keyboard too — a click handler on the <li> did
+             not. -->
+        <label class="rowlabel" for={`ep-${ep.id}`}>
+          <span class="num">
+            {ep.season != null && ep.episode != null ? `S${String(ep.season).padStart(2,'0')}E${String(ep.episode).padStart(2,'0')}` : '—'}
+          </span>
+          <span class="t">{ep.title}</span>
+          {#if ep.duration}<span class="muted small">{fmtTime(ep.duration)}</span>{/if}
+        </label>
         <button class="ghost small" onclick={() => showTracks(ep)}>Tracks</button>
         <button class="ghost small" onclick={() => selectFrom(ep.id)}>From here</button>
       </li>
@@ -402,6 +407,11 @@
   }
   .eps li:hover { background: var(--surface-2); }
   .eps li.sel { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  .rowlabel {
+    display: flex; align-items: center; gap: 12px;
+    flex: 1; min-width: 0; cursor: pointer;
+  }
+  .eps li:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
   .num { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 62px; }
   .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 4px 8px; }

@@ -8,14 +8,35 @@
   let switching = $state(false);
   let note = $state('');
   let editing = $state(false);
+  let skipping = $state(false);
   let timer;
 
+  // Dev-only (`npm run dev` + ?mock): these controls only exist during a
+  // broadcast, which would otherwise make them impossible to style or click
+  // through without one. Stripped from production builds.
+  const mock = import.meta.env.DEV
+    && typeof location !== 'undefined'
+    && new URLSearchParams(location.search).has('mock');
+
   async function refresh() {
+    if (mock) {
+      status = {
+        status: 'running',
+        position: 201,
+        playing: { title: "Frieren: Beyond Journey's End — S1E1", duration: 1563 },
+        queue: [
+          { id: 'a', title: "Frieren — S1E2", duration: 1420 },
+          { id: 'b', title: "Frieren — S1E3", duration: 1435 },
+          { id: 'c', title: "Frieren — S1E4", duration: 1418 },
+        ],
+      };
+      return;
+    }
     try { status = await api.streamStatus(); }
     catch (err) { error = err.message; }
   }
 
-  onMount(() => { refresh(); timer = setInterval(refresh, 4000); });
+  onMount(() => { refresh(); if (!mock) timer = setInterval(refresh, 4000); });
   onDestroy(() => clearInterval(timer));
 
   /** Every edit is a full replacement of the upcoming list, keyed by id. */
@@ -62,6 +83,15 @@
     try { await api.stop(); status = await api.streamStatus(); }
     catch (err) { error = err.message; }
   }
+
+  async function skipCurrent() {
+    skipping = true; error = ''; note = '';
+    try {
+      status = await api.next();
+      tracks = null;   // they describe the clip that just left the air
+    } catch (err) { error = err.message; }
+    finally { skipping = false; }
+  }
 </script>
 
 
@@ -86,8 +116,17 @@
       </div>
     </div>
     <div class="row">
-      <button class="danger" onclick={stop}>Stop broadcast</button>
+      <button onclick={skipCurrent} disabled={skipping || !status.queue?.length}
+              title={status.queue?.length
+                ? `Skip to ${status.queue[0].title}`
+                : 'Nothing queued to skip to'}>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"
+             style="vertical-align:-2px; margin-right:6px;"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
+        {skipping ? 'Skipping…' : 'Skip episode'}
+      </button>
       <button onclick={loadTracks} disabled={switching}>Change audio or subtitles</button>
+      <div style="flex:1"></div>
+      <button class="danger" onclick={stop}>Stop broadcast</button>
     </div>
 
     {#if tracks}

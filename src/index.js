@@ -475,6 +475,20 @@ app.post('/api/stream/resume', wrap(async (req, res) => {
   res.json({ ok: true, position: engine.position });
 }));
 
+/** Abandon the clip on air and start the next queued one. */
+app.post('/api/stream/next', wrap(async (req, res) => {
+  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+  if (!engine.skip()) {
+    return res.status(409).json({
+      error: engine.queue?.length
+        ? 'Cannot skip yet — the broadcast is still starting'
+        : 'Nothing queued to skip to',
+    });
+  }
+  broadcast('stream', streamStatus());
+  res.json(streamStatus());
+}));
+
 /** Skip within the current clip. The connection is not affected. */
 app.post('/api/stream/seek', wrap(async (req, res) => {
   if (!engine) return res.status(409).json({ error: 'Not streaming' });
