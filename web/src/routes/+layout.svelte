@@ -401,6 +401,8 @@
     --danger: #c0392b;
     --success: #2b8a5f;
     --radius: 8px;
+    /* The sidebar width; the toast column is pinned to it. */
+    --sidebar: 190px;
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
@@ -470,7 +472,7 @@
   /* Fixed viewport: the app never scrolls as a page. Long content scrolls
      inside <main>, so the transport bar stays put on every tab. */
   .app {
-    display: grid; grid-template-columns: 190px 1fr;
+    display: grid; grid-template-columns: var(--sidebar) 1fr;
     grid-template-rows: 1fr auto auto; height: 100vh;
   }
   aside {
@@ -626,17 +628,27 @@
     background: transparent; border-color: var(--border); font-size: 13px;
   }
   .tr.pick { border-color: var(--accent); color: var(--accent); }
+  /* Bottom-left, inside the sidebar's own column: that strip is empty below
+     the navigation, so a warning can sit there for its eight seconds
+     without covering the library, the queue or the transport bar — which
+     is exactly what it did in the bottom-right corner. */
   .toast {
-    position: fixed; bottom: 18px; right: 18px; max-width: 420px;
+    position: fixed; bottom: 10px; left: 10px;
+    width: calc(var(--sidebar) - 20px);
     background: var(--surface); border: 1px solid var(--border);
     border-left: 3px solid var(--muted);
-    border-radius: var(--radius); padding: 11px 14px; font-size: 13px;
-    box-shadow: 0 6px 24px rgba(0,0,0,.25);
+    border-radius: var(--radius); padding: 9px 11px;
+    font-size: 12px; line-height: 1.45;
+    /* Engine messages can be long; wrap and cap rather than grow up the
+       sidebar and cover the navigation. */
+    max-height: 40vh; overflow-y: auto; overflow-wrap: anywhere;
+    box-shadow: 0 6px 24px rgba(0,0,0,.3);
     animation: slidein .2s ease;
+    z-index: 30;
   }
   .toast.error { border-left-color: var(--danger); }
   @keyframes slidein {
-    from { opacity: 0; transform: translateY(8px); }
+    from { opacity: 0; transform: translateX(-8px); }
     to { opacity: 1; transform: none; }
   }
   @media (prefers-reduced-motion: reduce) {
