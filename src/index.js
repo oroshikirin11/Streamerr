@@ -26,7 +26,7 @@ import {
 } from './ffmpeg/probe.js';
 import { normalizeBitrate } from './ffmpeg/encoders.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
-import { PipelinePlayout, contentRect } from './ffmpeg/pipeline.js';
+import { PipelinePlayout, contentRect, effectiveFps } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
@@ -120,13 +120,17 @@ async function tuneProfile(profile, selection) {
   const rect = contentRect(selection.video, profile);
   if (!rect.bars) return;
 
-  const key = `${rect.w}x${rect.h}@${rect.x},${rect.y}`;
+  // Keyed by rate as well: the same geometry at a different frame rate is a
+  // different question for the driver, and caching across them is how a
+  // 30fps pass came to vouch for 23.976fps material.
+  const eff = effectiveFps(selection.video, profile);
+  const key = `${rect.w}x${rect.h}@${rect.x},${rect.y}#${eff.rate}`;
   globalThis.__barsGraph ??= {};
   if (globalThis.__barsGraph[key] === undefined) {
     globalThis.__barsGraph[key] = await pickPillarboxGraph({
       device: profile.device,
       width: profile.width, height: profile.height, rect,
-      profile,
+      profile, rate: eff.rate,
     });
     console.log(`pillarbox+subtitle graph for ${key}: `
       + `${globalThis.__barsGraph[key] ?? 'none — burning on the CPU'}`);

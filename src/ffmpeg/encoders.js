@@ -75,7 +75,7 @@ export const BACKENDS = {
       // Hardware encoders do fixed GOP with no scene-cut insertion by
       // default, which is exactly what HLS segmenting wants. -keyint_min
       // and -sc_threshold do not exist here and are silently ignored.
-      '-g', String(p.gopSeconds * p.fps),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-bf', '0',
     ],
   },
@@ -91,7 +91,7 @@ export const BACKENDS = {
       '-maxrate', p.videoBitrate,
       '-bufsize', bufsize(p.videoBitrate),
       '-low_delay_brc', '1',
-      '-g', String(p.gopSeconds * p.fps),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-adaptive_i', '0',
       // Without this, -force_key_frames emits plain I-frames rather than
       // IDRs, which segmenters cannot cut on.
@@ -113,7 +113,7 @@ export const BACKENDS = {
       '-b:v', p.videoBitrate,
       '-maxrate', p.videoBitrate,
       '-bufsize', bufsize(p.videoBitrate),
-      '-g', String(p.gopSeconds * p.fps),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-no-scenecut', '1',
       '-forced-idr', '1',
       '-bf', '0',
@@ -130,7 +130,7 @@ export const BACKENDS = {
       '-rc', 'cbr',
       '-quality', 'balanced',
       '-b:v', p.videoBitrate,
-      '-g', String(p.gopSeconds * p.fps),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-bf', '0',
     ],
   },
@@ -145,7 +145,7 @@ export const BACKENDS = {
       '-b:v', p.videoBitrate,
       '-maxrate', p.videoBitrate,
       '-bufsize', bufsize(p.videoBitrate),
-      '-g', String(p.gopSeconds * p.fps),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-bf', '0',
     ],
   },
@@ -164,7 +164,7 @@ export const BACKENDS = {
       '-x264-params', 'nal-hrd=cbr',
       // Only libx264 has these. Scene detection would otherwise insert
       // unscheduled keyframes and desynchronise HLS segment boundaries.
-      '-g', String(p.gopSeconds * p.fps),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-keyint_min', String(p.gopSeconds * p.fps),
       '-sc_threshold', '0',
       '-bf', '0',

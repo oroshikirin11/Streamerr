@@ -256,8 +256,15 @@ export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width 
  */
 export async function pickPillarboxGraph({
   device = '/dev/dri/renderD128', width = 1920, height = 1080, rect,
-  profile = null,
+  profile = null, rate = null,
 } = {}) {
+  // Production runs each clip at its own frame rate, so the probe must too:
+  // probing 23.976fps material at 30 asks the driver a question the
+  // broadcast never poses, and the GOP derived from it differs as well.
+  const r = rate || '30';
+  const fps = Number(String(r).includes('/')
+    ? Number(String(r).split('/')[0]) / Number(String(r).split('/')[1])
+    : r) || 30;
   // The probe must encode the way production encodes. Measured on the N100:
   // the pad-overlay shape passed a one-frame probe with default encoder
   // settings, then failed instantly in production with -22 — the difference
@@ -268,7 +275,7 @@ export async function pickPillarboxGraph({
     try {
       encArgs = [...BACKENDS.vaapi.encoderArgs({
         ...profile,
-        fps: Number(profile.fps) || 30,
+        fps,
         gopSeconds: Number(profile.gopSeconds) || 2,
       }), '-async_depth', '4'];
     } catch { /* fall back to the generic encode */ }
@@ -290,7 +297,7 @@ export async function pickPillarboxGraph({
   const madeSrc = await new Promise((res) => {
     const c = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-      '-f', 'lavfi', '-i', `color=c=green:s=${rect.w}x${rect.h}:r=30`,
+      '-f', 'lavfi', '-i', `color=c=green:s=${rect.w}x${rect.h}:r=${r}`,
       '-frames:v', '3', '-c:v', 'libx264', '-preset', 'ultrafast',
       '-pix_fmt', 'yuv420p', src,
     ], { stdio: 'ignore' });
@@ -303,7 +310,7 @@ export async function pickPillarboxGraph({
   const padPart = `pad_vaapi=${width}:${height}:${rect.x}:${rect.y}:color=black`;
   // Half-white so a driver that ignores alpha (opaque white) is caught too.
   const canvas = (w, h, extra = '') =>
-    ['-f', 'lavfi', '-i', `color=c=white@0.5:s=${w}x${h}:r=30${extra},format=rgba`];
+    ['-f', 'lavfi', '-i', `color=c=white@0.5:s=${w}x${h}:r=${r}${extra},format=rgba`];
 
   const CANDIDATES = [
     {
@@ -342,7 +349,7 @@ export async function pickPillarboxGraph({
       id: 'bg-composite',
       inputs: [
         ...canvas(rect.w, rect.h),
-        '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=30,format=nv12`,
+        '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=${r},format=nv12`,
       ],
       graph: `[1:v]hwupload[ov];[0:v]${scalePart}[b];[b][ov]overlay_vaapi[vs];`
         + `[2:v]hwupload[bg];[bg][vs]overlay_vaapi=x=${rect.x}:y=${rect.y}[v]`,
