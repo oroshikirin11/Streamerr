@@ -999,6 +999,11 @@ export class PipelinePlayout extends EventEmitter {
     }
     this._bank = [];
     this._bankBytes = 0;
+    // The mark a flush leaves behind: whoever plays next starts against an
+    // EMPTY pipe, unlike a natural episode advance where the bank still
+    // carries the previous clip's tail. The chunked path reads this to
+    // decide whether the publisher needs covering while chunks encode.
+    this._flushed = true;
     // `aired` is a position WITHIN the clip it was recorded for. Straight
     // after an episode boundary it still refers to the previous episode,
     // and rewinding the new episode's playhead to it would drop playback
@@ -1156,9 +1161,11 @@ export class PipelinePlayout extends EventEmitter {
     // Several encodes at once when one process cannot keep up. Only worth it
     // when subtitles are being burned — that is what pins the pipeline to a
     // single core.
+    const flushed = this._flushed === true;
+    this._flushed = false;
     const workers = this._chunkWorkers();
     if (workers > 1 && this.selection?.subtitle) {
-      this._playChunked(item, offset, cached, workers);
+      this._playChunked(item, offset, cached, workers, flushed);
       this.emit('nowplaying', this.snapshot());
       this._fillDuration(item);
       return;
@@ -1245,7 +1252,7 @@ export class PipelinePlayout extends EventEmitter {
     return Math.max(1, availableCores() - 1);
   }
 
-  _playChunked(item, offset, cached, workers) {
+  _playChunked(item, offset, cached, workers, flushed = false) {
     this._clipBase = this.timeline;
     const chunkSeconds = Number(this.profile?.chunkSeconds ?? 20);
 
@@ -1306,6 +1313,25 @@ export class PipelinePlayout extends EventEmitter {
 
     this.scheduler = sched;
 
+    // A flush emptied the pipe, and nothing reaches it again until the
+    // first chunk at the new offset finishes encoding — ~6s per seek on an
+    // N100, and spammed seeks or pause/resume cycles stack those gaps past
+    // the ~10s of silence after which Owncast hangs up. That is why seeking
+    // worked on the streaming path (sub-second source respawn) and died on
+    // the chunked one. A card at the current timeline keeps the publisher
+    // fed for exactly that window; the sink kills it the moment real bytes
+    // arrive. A natural episode advance never flushes, so it never shows a
+    // card — the bank's tail of the previous episode covers it instead.
+    if (flushed && this.publisher && !this._stopping) {
+      this.holding = true;
+      this._spawnSource(buildHoldArgs({
+        profile: this.profile,
+        tsOffset: this.timeline,
+        statsPeriodMs: this.statsPeriodMs,
+        label: 'Loading',
+      }), { kind: 'hold' });
+    }
+
     // Into the bank, not straight at the publisher — see _bankFeed. A
     // Writable keeps pipe() backpressure working, so a fast worker cannot
     // outrun the bank cap.
@@ -1320,6 +1346,19 @@ export class PipelinePlayout extends EventEmitter {
         // overflow then frozen picture seen when skipping mid-clip.
         // _bankPush has always had this guard; the chunk sink had not.
         if (this.scheduler !== sched || this._stopping) return cb();
+        // Real content has arrived — the cover card has done its job. Kill
+        // it without touching the scheduler, and bump the generation so
+        // the drain pads the card's final partial packet instead of
+        // splicing chunk bytes into the middle of it.
+        if (this.holding && this.source) {
+          const h = this.source;
+          this.source = null;
+          this.holding = false;
+          this._srcGen = (this._srcGen ?? 0) + 1;
+          h.stdout?.removeAllListeners?.('data');
+          try { h.stdout?.resume?.(); } catch { /* gone */ }
+          try { h.kill('SIGKILL'); } catch { /* gone */ }
+        }
         if (this.status === 'starting') {
           // Same moment the streaming path claims 'running': the first
           // bytes on their way out. Until this the watchdog stays off.
