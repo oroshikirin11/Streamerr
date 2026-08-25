@@ -551,6 +551,38 @@ app.post('/api/check/owncast', async (req, res) => {
     : { ok: false, error: redact(result.error) });
 });
 
+// Proves the title sync end to end: same endpoint, same auth the live sync
+// uses, so a green result here means episode titles will reach the watch
+// page. Uses the on-air title when live, a labelled test value otherwise.
+app.post('/api/check/owncast-title', async (req, res) => {
+  const apiUrl = String(req.body?.apiUrl ?? config.owncast.apiUrl ?? '').replace(/\/+$/, '');
+  const token = req.body?.accessToken && req.body.accessToken !== '__SET__'
+    ? req.body.accessToken
+    : config.owncast.accessToken;
+  if (!apiUrl) return res.status(400).json({ ok: false, error: 'Owncast address is required' });
+  if (!token) return res.status(400).json({ ok: false, error: 'Access token is required' });
+  const value = streamStatus().playing?.title ?? 'Jellystreamerr — title sync test';
+  try {
+    const r = await fetch(`${apiUrl}/api/integrations/streamtitle`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) {
+      return res.json({
+        ok: false,
+        error: r.status === 401
+          ? 'Owncast rejected the token (HTTP 401) — check it has the "change stream title" permission'
+          : `Owncast answered HTTP ${r.status}`,
+      });
+    }
+    res.json({ ok: true, value });
+  } catch (err) {
+    res.json({ ok: false, error: `Could not reach ${apiUrl}: ${err.cause?.message ?? err.message}` });
+  }
+});
+
 app.get('/api/check/encoders', async (req, res) => {
   const results = await probeAll(config.encoder.device);
   const caps = await probeConcatCapabilities();

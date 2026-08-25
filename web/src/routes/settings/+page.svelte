@@ -13,6 +13,9 @@
   // Secrets are write-only: the server returns a sentinel, never the value.
   let keyStored = $state(false);
   let streamKey = $state('');
+  let tokenStored = $state(false);
+  let accessToken = $state('');
+  let titleTest = $state(null);
   let jfKeyStored = $state(false);
   let jellyfinKey = $state('');
 
@@ -59,6 +62,8 @@
     try {
       cfg = await api.config();
       keyStored = cfg.owncast.streamKey === '__SET__';
+      tokenStored = cfg.owncast.accessToken === '__SET__';
+      accessToken = '';
       jfKeyStored = cfg.library.jellyfin?.apiKey === '__SET__';
       streamKey = '';
       jellyfinKey = '';
@@ -98,6 +103,7 @@
           apiUrl: cfg.owncast.apiUrl,
           syncTitle: cfg.owncast.syncTitle !== false,
           ...(streamKey ? { streamKey } : {}),
+          ...(accessToken ? { accessToken } : {}),
         };
       }
       if (section === 'encoder') {
@@ -124,6 +130,7 @@
       }
       await api.saveConfig(patch);
       if (streamKey) { keyStored = true; streamKey = ''; }
+      if (accessToken) { tokenStored = true; accessToken = ''; }
       if (jellyfinKey) { jfKeyStored = true; jellyfinKey = ''; }
       saved = section;
       setTimeout(() => { if (saved === section) saved = ''; }, 2500);
@@ -207,9 +214,42 @@
       Update the Owncast stream title as episodes change
     </label>
     <p class="muted small">
-      Viewers see the episode on air ("Show — S1E4") on the watch page.
-      Needs the Owncast API address and access token from setup.
+      Viewers see the episode on air ("Show — S1E4") in the header of the
+      watch page while you are live.
     </p>
+
+    {#if cfg.owncast.syncTitle !== false}
+      <label>Owncast address (web)</label>
+      <input bind:value={cfg.owncast.apiUrl} spellcheck="false"
+             placeholder="https://stream.example.com" />
+
+      <label>Access token</label>
+      <input type="password" bind:value={accessToken}
+             placeholder={tokenStored ? 'leave blank to keep the saved token' : 'Owncast admin → Integrations → Access Tokens'} />
+      <p class="muted small">
+        Create it in the Owncast admin under Integrations, with the
+        "can change stream title" permission.
+        {#if tokenStored && !accessToken}A token is saved.{/if}
+      </p>
+
+      <div class="actions" style="margin-top:2px;">
+        <button onclick={async () => {
+          titleTest = null;
+          try { titleTest = await api.post('/api/check/owncast-title', {
+            apiUrl: cfg.owncast.apiUrl,
+            ...(accessToken ? { accessToken } : {}),
+          }); }
+          catch (err) { titleTest = { ok: false, error: err.message }; }
+        }} disabled={!!testing}>Test title sync</button>
+      </div>
+      {#if titleTest}
+        <div class="result" class:bad={!titleTest.ok}>
+          {titleTest.ok
+            ? `Owncast accepted the title — check the header of your watch page`
+            : titleTest.error}
+        </div>
+      {/if}
+    {/if}
 
     <div class="actions">
       <button class="primary" onclick={() => save('owncast')}>Save</button>
