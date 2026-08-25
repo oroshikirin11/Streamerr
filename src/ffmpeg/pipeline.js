@@ -29,9 +29,9 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { Writable } from 'stream';
-import { cpus } from 'os';
+import { availableParallelism, cpus } from 'os';
 import { EventEmitter } from 'events';
 import { join } from 'path';
 import { ProgressParser } from './progress.js';
@@ -76,6 +76,59 @@ export function effectiveFps(video, profile) {
  * Decoding on the CPU and uploading keeps filters and encode on the GPU,
  * which is where nearly all of the win is.
  */
+/**
+ * How many cores this process may actually use.
+ *
+ * NOT `cpus().length` — that reports the HOST's processors, and this
+ * service runs in Docker inside an LXC container, so it would happily
+ * count cores a cgroup will never let it touch and then start that many
+ * encoders. Three sources, whichever is tightest:
+ *
+ *   - `availableParallelism()`, which follows CPU affinity (cpuset)
+ *   - cgroup v2 `cpu.max`  — "quota period", or "max" for unlimited
+ *   - cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`
+ *
+ * A quota is a rate, not a count: 250000/100000 means two and a half
+ * cores' worth of time, so it floors to 2. Read once — it cannot change
+ * without the container being recreated.
+ */
+let cachedCores = null;
+export function availableCores() {
+  if (cachedCores != null) return cachedCores;
+  let n = 2;
+  try {
+    n = typeof availableParallelism === 'function'
+      ? availableParallelism()
+      : (cpus()?.length || 2);
+  } catch { /* keep the floor */ }
+
+  const quota = (text, period) => {
+    const q = Number(text);
+    const p = Number(period);
+    if (!Number.isFinite(q) || !Number.isFinite(p) || q <= 0 || p <= 0) return null;
+    return Math.max(1, Math.floor(q / p));
+  };
+
+  try {                                   // cgroup v2
+    const [q, p] = readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/);
+    if (q !== 'max') {
+      const lim = quota(q, p);
+      if (lim) n = Math.min(n, lim);
+    }
+  } catch { /* not v2, or not readable */ }
+
+  try {                                   // cgroup v1
+    const lim = quota(
+      readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'utf8'),
+      readFileSync('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'utf8'),
+    );
+    if (lim) n = Math.min(n, lim);
+  } catch { /* not v1, or unlimited */ }
+
+  cachedCores = Math.max(1, n);
+  return cachedCores;
+}
+
 export function gpuDecodable(video) {
   if (!video) return true;
   const codec = String(video.codec ?? '').toLowerCase();
@@ -1137,8 +1190,11 @@ export class PipelinePlayout extends EventEmitter {
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
     if (gpuComposite) return 1;
 
-    const cores = cpus()?.length || 2;
-    return Math.max(1, Math.min(4, cores - 1));
+    // One core stays free for the publisher, the audio encode and Node
+    // itself; the rest may burn subtitles. No ceiling beyond that — the
+    // scheduler only ever has as many encodes in flight as the clip has
+    // chunks left, so a large machine self-limits without a magic number.
+    return Math.max(1, availableCores() - 1);
   }
 
   _playChunked(item, offset, cached, workers) {
