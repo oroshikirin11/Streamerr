@@ -1158,10 +1158,18 @@ export function buildSourceArgs({
   // Subtitles must be burned between scale and pad — on the padded frame,
   // positioned subs for narrow content drift toward the bars.
   const rect = contentRect(selection?.video, profile);
+  // Input-side -ss resets frame timestamps to zero, and the subtitles
+  // filter picks events by timestamp — without re-shifting, every restart
+  // mid-episode (seek, track change, watchdog respawn) burned subtitles
+  // from the episode's BEGINNING over video at the restart position. The
+  // GPU path has always carried this shift on its canvas; this is the CPU
+  // path's equivalent.
   const cpuChain = sub.filter
     ? [
       `scale=${rect.w}:${rect.h},setsar=1`,
+      ...(offset > 0 ? [`setpts=PTS+${Number(offset).toFixed(3)}/TB`] : []),
       `${sub.filter}:alpha=0`,
+      ...(offset > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
       upload,
@@ -1239,10 +1247,14 @@ export function buildChunkArgs({
   // Subtitles must be burned between scale and pad — on the padded frame,
   // positioned subs for narrow content drift toward the bars.
   const rect = contentRect(selection?.video, profile);
+  // Same timestamp correction as the streaming path: chunks start at -ss
+  // `start`, so subtitle timestamps must be shifted to match.
   const cpuChain = sub.filter
     ? [
       `scale=${rect.w}:${rect.h},setsar=1`,
+      ...(start > 0 ? [`setpts=PTS+${Number(start).toFixed(3)}/TB`] : []),
       `${sub.filter}:alpha=0`,
+      ...(start > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
       upload,
