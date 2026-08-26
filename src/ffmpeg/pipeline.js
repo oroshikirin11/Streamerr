@@ -1623,6 +1623,18 @@ export class PipelinePlayout extends EventEmitter {
     });
     sink.on('error', () => { /* publisher gone; close handler deals with it */ });
     sched.start(sink);
+
+    // Before the publisher exists nothing else emits progress, so the
+    // panel's pre-live chip and cache band froze at their first values
+    // while the cushion silently grew. Tick once a second until connect.
+    const preTick = setInterval(() => {
+      if (this.publisher || this.scheduler !== sched || this._stopping) {
+        clearInterval(preTick);
+        return;
+      }
+      this.emit('progress', { position: 0, speed: sched.speed(), drops: 0 });
+    }, 1000);
+    preTick.unref?.();
   }
 
   /**
