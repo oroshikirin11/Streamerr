@@ -667,7 +667,7 @@ export class PipelinePlayout extends EventEmitter {
         this.position = next;
         this.emit('log', `[cache] seek to ${next.toFixed(0)}s served from the `
           + `run-ahead cache — no re-encode\n`);
-        this.emit('discontinuity');
+        this.emit('seam');
         this.emit('seeked', { position: next });
         return next;
       }
@@ -715,7 +715,7 @@ export class PipelinePlayout extends EventEmitter {
         this.position = at;
         this.status = 'running';
         this.emit('log', '[cache] resumed from the retained window — no re-encode\n');
-        this.emit('discontinuity');
+        this.emit('seam');
         this.emit('status', this.status);
         return;
       }
@@ -1481,7 +1481,12 @@ export class PipelinePlayout extends EventEmitter {
         sched.setShift(onAudioGrid(
           Math.max(0, this.timeline - this._clipBase) + 0.576,
         ));
-        this.emit('discontinuity');
+        // A SOFT seam: IDR-aligned, exact-forward, headers resent. The
+        // preview is not cut for these — measured, Chrome's decoder reads
+        // straight through them, and cutting cost two player rebuilds per
+        // seek. Hard discontinuities (source respawns, card swaps with
+        // timestamp jumps) still cut.
+        this.emit('seam');
         this.emit('log', '[cover] card released — content shifted '
           + `${sched.shift.toFixed(3)}s to follow it\n`);
       }
