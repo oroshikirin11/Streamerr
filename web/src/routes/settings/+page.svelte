@@ -70,6 +70,7 @@
       cfg.library.pathMap ??= [];
       cfg.preview ??= { enabled: true };
       cfg.runAhead ??= { enabled: true, ramMB: 'auto' };
+      cfg.library.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: true };
       cfg.tracks ??= {};
       cfg.tracks.languages ??= ['eng'];
       cfg.tracks.audioMode ??= 'original';
@@ -80,18 +81,34 @@
   }
 
   const parseList = (s) => s.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+  let smbPassword = $state('');
 
   function libraryPayload() {
-    return cfg.library.provider === 'jellyfin'
-      ? {
-          provider: 'jellyfin',
-          jellyfin: {
-            url: cfg.library.jellyfin.url,
-            ...(jellyfinKey ? { apiKey: jellyfinKey } : {}),
-          },
-          pathMap: cfg.library.pathMap,
-        }
-      : { provider: 'filesystem', filesystem: { roots: parseList(fsRoots) } };
+    if (cfg.library.provider === 'jellyfin') {
+      return {
+        provider: 'jellyfin',
+        jellyfin: {
+          url: cfg.library.jellyfin.url,
+          ...(jellyfinKey ? { apiKey: jellyfinKey } : {}),
+        },
+        pathMap: cfg.library.pathMap,
+      };
+    }
+    if (cfg.library.provider === 'smb') {
+      return {
+        provider: 'smb',
+        smb: {
+          host: cfg.library.smb.host,
+          share: cfg.library.smb.share,
+          path: cfg.library.smb.path,
+          guest: cfg.library.smb.guest,
+          username: cfg.library.smb.guest ? '' : cfg.library.smb.username,
+          ...(cfg.library.smb.guest ? { password: '' }
+            : smbPassword ? { password: smbPassword } : {}),
+        },
+      };
+    }
+    return { provider: 'filesystem', filesystem: { roots: parseList(fsRoots) } };
   }
 
   async function save(section) {
@@ -404,6 +421,8 @@
               onclick={() => (cfg.library.provider = 'jellyfin')}>Jellyfin</button>
       <button class:on={cfg.library.provider === 'filesystem'}
               onclick={() => (cfg.library.provider = 'filesystem')}>A folder</button>
+      <button class:on={cfg.library.provider === 'smb'}
+              onclick={() => (cfg.library.provider = 'smb')}>SMB share</button>
     </div>
 
     {#if cfg.library.provider === 'jellyfin'}
@@ -412,6 +431,29 @@
       <label>API key</label>
       <input type="password" bind:value={jellyfinKey}
              placeholder={jfKeyStored ? 'leave blank to keep the saved key' : 'Dashboard → API Keys'} />
+    {:else if cfg.library.provider === 'smb'}
+      <label>Server (hostname or IP)</label>
+      <input bind:value={cfg.library.smb.host} spellcheck="false" placeholder="nas.local" />
+      <label>Share name</label>
+      <input bind:value={cfg.library.smb.share} spellcheck="false" placeholder="media" />
+      <label>Folder within the share (optional)</label>
+      <input bind:value={cfg.library.smb.path} spellcheck="false" placeholder="anime" />
+      <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+        <input type="checkbox" bind:checked={cfg.library.smb.guest} style="width:auto" />
+        No password (guest share)
+      </label>
+      {#if !cfg.library.smb.guest}
+        <label>Username</label>
+        <input bind:value={cfg.library.smb.username} spellcheck="false" />
+        <label>Password</label>
+        <input type="password" bind:value={smbPassword}
+               placeholder={cfg.library.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
+      {/if}
+      <p class="muted small" style="margin-top:6px;">
+        The share is mounted read-only by the service itself. In Docker this
+        needs <code>cap_add: [SYS_ADMIN]</code>; the Test button will say so
+        if it is missing.
+      </p>
     {:else}
       <label>Folders, one per line</label>
       <textarea rows="3" bind:value={fsRoots} spellcheck="false"></textarea>

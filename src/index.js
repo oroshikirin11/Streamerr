@@ -490,6 +490,10 @@ function redactedConfig() {
         ...config.library.jellyfin,
         apiKey: config.library.jellyfin?.apiKey ? '__SET__' : '',
       },
+      smb: {
+        ...config.library.smb,
+        password: config.library.smb?.password ? '__SET__' : '',
+      },
     },
   };
 }
@@ -536,6 +540,7 @@ app.put('/api/config', (req, res) => {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
   }
   if (patch.library?.jellyfin?.apiKey === '__SET__') delete patch.library.jellyfin.apiKey;
+  if (patch.library?.smb?.password === '__SET__') delete patch.library.smb.password;
   delete patch.auth; // password changes go through their own endpoint
 
   // ffmpeg reads a bare number as BITS per second, so a stored "12000"

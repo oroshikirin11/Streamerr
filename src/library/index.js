@@ -8,6 +8,7 @@
 
 import { JellyfinLibrary } from './jellyfin.js';
 import { FilesystemLibrary } from './filesystem.js';
+import { SmbLibrary } from './smb.js';
 
 export function makeLibrary(cfg) {
   const lib = cfg?.library ?? {};
@@ -18,6 +19,9 @@ export function makeLibrary(cfg) {
       apiKey: lib.jellyfin?.apiKey,
       pathMap: lib.pathMap ?? [],
     });
+  }
+  if (lib.provider === 'smb') {
+    return new SmbLibrary(lib.smb ?? {}, cfg?.paths?.run ?? '/tmp');
   }
   return new FilesystemLibrary({ roots: lib.filesystem?.roots ?? [] });
 }

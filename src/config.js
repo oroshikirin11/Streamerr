@@ -30,6 +30,9 @@ const DEFAULTS = {
     provider: 'filesystem',
     jellyfin: { url: '', apiKey: '' },
     filesystem: { roots: [] },
+    // A local SMB/CIFS share, mounted by the service itself. guest:true
+    // covers passwordless NAS shares; credentials otherwise.
+    smb: { host: '', share: '', path: '', username: '', password: '', guest: true },
     pathMap: [],
   },
   encoder: {
