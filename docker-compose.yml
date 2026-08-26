@@ -15,6 +15,11 @@ services:
     ports:
       - "8099:8099"
 
+    # Run-ahead cache: encoded-ahead video lives in RAM (/dev/shm) so seeks
+    # are instant. Docker's default 64MB shm disables it — it never falls
+    # back to disk. The engine sizes its budget on its own; 2GB is safe.
+    shm_size: "2gb"
+
     devices:
       # Only the render node. card0 is for modesetting and would be an
       # unnecessary privilege bump.

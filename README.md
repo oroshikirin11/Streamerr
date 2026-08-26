@@ -1,10 +1,11 @@
 # Jellystreamerr
 
-Web-controlled playout for [Owncast](https://owncast.online). Browse your media
+**Turn your media library into a live TV channel.** Jellystreamerr is
+web-controlled playout for [Owncast](https://owncast.online): browse your
 library in the browser, click an episode, and it goes live — subtitles burned
-in, the right dub selected, and the rest of the season following automatically.
+in, the right dub selected, the rest of the season following automatically.
 
-Runs headless in a container. No OBS, no desktop, no capture card.
+Runs headless in Docker. No OBS, no desktop, no capture card.
 
 ```
 your library  →  Jellystreamerr  →  Owncast  →  viewers
@@ -82,11 +83,16 @@ services:
     ports:
       - "8099:8099"                 # web UI
 
+    shm_size: "2gb"                 # RAM for the run-ahead cache — see below
+
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128   # hardware encoding
 
     group_add:
       - "989"                       # NUMERIC gid of the render group — see below
+
+    environment:
+      - JELLYSTREAMERR_CONFIG=/config/config.json
 
     volumes:
       - ./config:/config            # settings + your stream key
@@ -104,6 +110,11 @@ Put that number in `group_add`, quoted. It must be the numeric gid as the
 *host* sees it — the image is a different distro, so the group *name* will not
 match and doesn't need to. If `privileged: true` appears to fix a permission
 problem, this value is wrong; fix the number instead.
+
+**Why `shm_size`:** the run-ahead cache keeps encoded-ahead video in RAM
+(`/dev/shm`). Docker's default 64MB disables it — it never falls back to disk.
+The engine sizes its budget to the container's memory on its own; `2gb` is a
+safe value.
 
 **4. Build and start:**
 
@@ -206,6 +217,18 @@ That last detail is why a mid-episode subtitle change is seamless: the new
 encoder resumes at the *aired* position, not the encoder's position, so nothing
 is skipped or repeated.
 
+### The run-ahead cache
+
+On CPU-encoded content the encoders keep working ahead of the broadcast, and
+the finished video is held in RAM. The panel shows that cushion as a band
+around the playhead: seeks inside it are **instant**, in both directions, and
+pause/resume re-encodes nothing. A spinner chip in the corner shows whenever
+the cache is building.
+
+RAM-only by design — never disk (see `shm_size` in the quick start). Settings
+has an on/off toggle and a size override; by default the budget fits itself to
+the container's memory.
+
 ## Subtitles and audio
 
 **Tracks are chosen per file, not once per broadcast.** Track indices are
@@ -292,6 +315,17 @@ layout:
 Durations aren't shown in folder mode — probing every file would make browsing
 crawl.
 
+**An SMB share** — a NAS share, spoken directly: no mount, no extra container
+privileges. Guest (passwordless) shares work out of the box, and you choose
+the folder *inside* the share, since the share root is rarely where the media
+is. One caveat: the **first** playback of each file is slower than local disk,
+because subtitle extraction reads it once in full over the network. After
+that it starts as fast as local media.
+
+There is also `smbmount`, a kernel-mount variant for shares the built-in
+client can't handle. It needs privileges (`SYS_ADMIN` in Docker, or
+`--features mount=cifs` on a Proxmox LXC) — prefer plain `smb`.
+
 ## Settings
 
 Everything the wizard configures is editable later, grouped in the UI:
@@ -300,9 +334,10 @@ Everything the wizard configures is editable later, grouped in the UI:
 |---|---|
 | **Owncast** | RTMP address, stream key, connection test, 30s watch test |
 | **Output** | resolution preset or custom, framerate (auto/fixed), bitrates, keyframe interval, encoder, render device |
-| **Library** | Jellyfin or folder, with a directory browser |
+| **Library** | Jellyfin, folder, or SMB share, with a directory browser |
 | **Path mapping** | only when Jellyfin's paths differ from this container's |
 | **Languages** | languages you understand, original vs dubbed, subtitle policy |
+| **Run-ahead cache** | on/off, RAM budget (auto-recommended from the machine) |
 | **Live preview** | the floating preview window (on by default) |
 | **Developer** | read-only log console |
 
@@ -338,6 +373,9 @@ documentation recommends; changing it can break segmenting.
 - **First broadcast of a big file sits in *Preparing* for minutes.** Normal —
   it's the one-time subtitle extraction, which reads the file once. It's cached
   afterwards, and the progress bar tracks it.
+- **Log says "run-ahead cache off: /dev/shm too small".** Docker's default shm
+  is 64MB. Set `shm_size: "2gb"` in your compose file. The cache never uses
+  disk instead.
 - **Speed sits below 1.0× on subtitled content.** Subtitle rendering is
   single-threaded; heavy typesetting is the expensive case. Run
   `cli.js benchmark <that file>` — if the *no-subtitles* number is also poor,
