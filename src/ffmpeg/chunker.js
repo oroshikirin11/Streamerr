@@ -362,8 +362,18 @@ export class ChunkScheduler extends EventEmitter {
     // seek needs still encoding. Decline and let the caller rebuild.
     if (!c || !c.done || c.failed) return null;
 
-    // Abort an in-flight delivery.
-    if (this._rs) { try { this._rs.destroy(); } catch { /* gone */ } }
+    // Abort an in-flight delivery. UNPIPE before destroying: destroy alone
+    // lets slices already queued in the pipe land in the sink afterwards —
+    // a partial tail of the old chunk arriving BEHIND the seek's aligned
+    // flush. That knocked the preview mirror off its 188-byte phase
+    // permanently: every client joining after a cache seek computed the
+    // wrong packet boundary and its demuxer never locked (the frozen
+    // preview after seeking). The sink's supersession guard cannot catch
+    // this case — a jump keeps the scheduler.
+    if (this._rs) {
+      try { this._rs.unpipe(this._sink); } catch { /* gone */ }
+      try { this._rs.destroy(); } catch { /* gone */ }
+    }
     this._writing = false;
     if (i >= this.nextToWrite) {
       // Forward: what lies between playhead and target moves to the

@@ -1476,7 +1476,15 @@ export class PipelinePlayout extends EventEmitter {
     // Writable keeps pipe() backpressure working, so a fast worker cannot
     // outrun the bank cap.
     const sink = new Writable({
-      highWaterMark: 1 << 20,
+      // Small on purpose. Everything the sink QUEUES is beyond the reach
+      // of a flush — the bank can be emptied and the source unpiped, but
+      // slices already inside this buffer still arrive afterwards, and
+      // after a cache seek that was up to 1MB of the OLD chunk landing
+      // behind the seek's aligned cut: the preview mirror lost its
+      // 188-byte phase permanently and every client joining after a seek
+      // showed a frozen picture. Kept tiny, backpressure parks data in
+      // the readable side instead, which a destroy actually discards.
+      highWaterMark: 16 * 1024,
       write: (chunk, _enc, cb) => {
         // Superseded mid-flight. A skip flushes the bank and then starts
         // the next clip, but this scheduler keeps writing until it is
