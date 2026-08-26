@@ -1940,7 +1940,14 @@ export class PipelinePlayout extends EventEmitter {
       }
 
       this.emit('progress', {
-        position: this._onAir().position, speed, drops: b.dropFrames,
+        position: this._onAir().position,
+        // While a scheduler is working, ITS throughput is the only honest
+        // ratio. A cover card is a live source too, and its own encode
+        // speed (~1x for black frames) alternated with the scheduler's
+        // real number on the panel — 1x and 0.7x blinking in quick
+        // succession through every rebuild.
+        speed: this.scheduler ? (this.scheduler.speed?.() ?? speed) : speed,
+        drops: b.dropFrames,
         // Bank reserve in seconds — how much stall the broadcast can absorb.
         buffer: (this._bankBytes ?? 0) / (this._kbps * 125),
         bufferMax: this._bankMax / (this._kbps * 125),
