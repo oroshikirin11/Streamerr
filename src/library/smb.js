@@ -108,9 +108,12 @@ export function ensureSmbMount(target, runDir) {
         if (!err) { resolve(root); return; }
         const detail = String(stderr ?? '').trim().split('\n').pop() ?? '';
         let hint = '';
-        if (/permission denied|operation not permitted/i.test(detail + err.message)) {
-          hint = ' Mounting needs privileges: run as root, or give the container '
-            + 'CAP_SYS_ADMIN (docker compose: cap_add: [SYS_ADMIN]).';
+        if (/permission denied|operation not permitted|failed mount system call/i.test(detail + err.message)) {
+          hint = ' Mounting needs privileges. Docker: cap_add: [SYS_ADMIN]. '
+            + 'Inside a Proxmox LXC the container additionally needs the CIFS '
+            + 'mount feature from the HOST: pct set <ctid> --features mount=cifs '
+            + '(then restart the container) — without it the kernel refuses '
+            + 'even root.';
         } else if (/No such device|unknown filesystem/i.test(detail + err.message)) {
           hint = ' The kernel is missing CIFS support (install cifs-utils on the host).';
         } else if (/error.13|NT_STATUS_ACCESS_DENIED|NT_STATUS_LOGON_FAILURE/i.test(detail)) {
