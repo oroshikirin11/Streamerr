@@ -1300,6 +1300,11 @@ export class PipelinePlayout extends EventEmitter {
       this._fillDuration(item);
       return;
     }
+    // Exactly buildChunkArgs' composite conditions, so routing and the
+    // args builder can never disagree about which graph a clip gets.
+    const gpuComposite = Boolean(this.profile?.gpuSubs) && this.selection?.subtitle
+      && !this.profile?.swDecode && gpuDecodable(this.selection?.video)
+      && !(this.profile?.barsFailed && contentRect(this.selection?.video, this.profile).bars);
     // Clips with no subtitle burn chunk for the CACHE, not for parallelism:
     // one worker, sequential — an encoder that runs above realtime banks the
     // surplus, and one that dips below realtime spends it, which is exactly
@@ -1308,7 +1313,7 @@ export class PipelinePlayout extends EventEmitter {
     // hwupload, encode on the GPU). Subtitle-composite clips are untouched:
     // their streaming path stays exactly as it was. A chunk failure demotes
     // this clip AND the rest of the broadcast back to streaming.
-    if (!this.selection?.subtitle && this._chunkPlan().ramBytes
+    if ((!this.selection?.subtitle || gpuComposite) && this._chunkPlan().ramBytes
         && !this._noSubChunkOff) {
       this._playChunked(item, offset, cached, 1, flushed, { noSubCache: true });
       this.emit('nowplaying', this.snapshot());
@@ -2462,6 +2467,89 @@ export function buildChunkArgs({
   const profEff = { ...profile, fps: effAll.fps };
   const base = scaleFilter(profEff).replace(`fps=${effAll.fps}`, `fps=${effAll.rate}`);
   const upload = be.uploadFilter(profEff);
+
+  // The GPU composite, in chunk form: the same probed graph shapes the
+  // streaming path trusts (see buildSourceArgs — the shape is chosen by
+  // the caller's driver probe, not guessed here), bounded by -ss/-t and
+  // placed by -output_ts_offset. This is what lets subtitle-burning
+  // GPU clips build a cache instead of being pinned to realtime.
+  if (profile.gpuSubs && sub.filter && !sub.needsComplex
+      && gpuDecodable(selection?.video) && !profile.swDecode
+      && !(profile.barsFailed && contentRect(selection?.video, profile).bars)) {
+    const rect = contentRect(selection?.video, profile);
+    const shift = Number(start).toFixed(3);
+    const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
+    const scalePart = selection?.video?.hdr
+      ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
+        + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
+      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
+    const pad = `pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`;
+    const at = `=x=${rect.x}:y=${rect.y}`;
+    const widePad = `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`;
+    let canvasPad = '';
+    let bgInput = [];
+    let videoChain;
+    let composite;
+    if (!rect.bars) {
+      videoChain = scalePart;
+      composite = '[b][ov]overlay_vaapi[v]';
+    } else {
+      switch (profile.barsGraph) {
+        case 'wide-canvas':
+          canvasPad = widePad;
+          videoChain = `${scalePart},${pad}`;
+          composite = '[b][ov]overlay_vaapi[v]';
+          break;
+        case 'overlay-pad':
+          videoChain = scalePart;
+          composite = `[b][ov]overlay_vaapi,${pad}[v]`;
+          break;
+        case 'overlay-scale-pad':
+          videoChain = scalePart;
+          composite = `[b][ov]overlay_vaapi,${scalePart},${pad}[v]`;
+          break;
+        case 'bg-composite':
+          videoChain = scalePart;
+          composite = `[b][ov]overlay_vaapi[vs];[2:v]hwupload[bg];`
+            + `[bg][vs]overlay_vaapi${at}[v]`;
+          bgInput = ['-f', 'lavfi', '-i',
+            `color=c=black:s=${profile.width}x${profile.height}:r=${effAll.rate},format=nv12`];
+          break;
+        case 'pad-overlay':
+        default:
+          videoChain = `${scalePart},${pad}`;
+          composite = `[b][ov]overlay_vaapi${at}[v]`;
+          break;
+      }
+    }
+    const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+      + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
+      + `[0:v]${videoChain}[b];${composite}`;
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
+      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      '-extra_hw_frames', '8',
+      ...(start > 0 ? ['-ss', shift] : []),
+      '-i', srcPath,
+      // The canvas is infinite; -t below bounds every input's contribution,
+      // so no canvasCap/-shortest dance is needed in chunk form.
+      '-f', 'lavfi', '-i',
+      `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${effAll.rate},format=rgba`,
+      ...bgInput,
+      '-t', Number(dur).toFixed(3),
+      '-filter_complex', graph,
+      '-map', '[v]', '-map', `0:a:${audioIdx}?`,
+      ...be.encoderArgs(profEff),
+      '-async_depth', '4',
+      ...audioArgs(profile, { trimTo: dur, head: Number(start) <= 0 }),
+      '-r', effAll.rate, '-fps_mode', 'cfr',
+      '-output_ts_offset', Number(tsOffset).toFixed(3),
+      '-muxdelay', '0', '-muxpreload', '0',
+      '-mpegts_flags', '+resend_headers+initial_discontinuity',
+      '-f', 'mpegts', out,
+    ];
+  }
 
   // Subtitles must be burned between scale and pad — on the padded frame,
   // positioned subs for narrow content drift toward the bars.
