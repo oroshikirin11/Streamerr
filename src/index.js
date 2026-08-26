@@ -1003,7 +1003,17 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
 // ── static UI ──────────────────────────────────────────────────────────
 
 if (existsSync(WEB_DIR)) {
-  app.use(express.static(WEB_DIR));
+  app.use(express.static(WEB_DIR, {
+    // The bundle's chunks are content-hashed — safe to cache forever. The
+    // HTML that points at them must never be cached: express served it
+    // with no policy, the browser heuristically kept it, and every deploy
+    // needed a hard refresh to stop the stale HTML loading the old app.
+    setHeaders: (res, path) => {
+      res.setHeader('Cache-Control', path.includes('/immutable/')
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache');
+    },
+  }));
   // SPA fallback: any non-API path serves the app shell so client routing works.
   app.get(/^(?!\/api).*/, (req, res) => res.sendFile(join(WEB_DIR, 'index.html')));
 } else {
