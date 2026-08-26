@@ -269,8 +269,25 @@ export class ChunkScheduler extends EventEmitter {
       record.done = true;
       record.failed = code !== 0 || !existsSync(out);
       if (!record.failed) {
-        try { record.bytes = statSync(out).size; this._cacheBytes += record.bytes; }
-        catch { record.bytes = 0; }
+        try { record.bytes = statSync(out).size; } catch { record.bytes = 0; }
+        if (record.skipped) {
+          // Finished after a forward seek already jumped past it: retire
+          // straight into the retained window, never into the queue.
+          record.skipped = false;
+          if (this.keepBytes) {
+            record.delivered = true;
+            this._keptBytes += record.bytes;
+            this._evictKept();
+          } else {
+            this.chunks.delete(index);
+            safeUnlink(out);
+          }
+        } else {
+          this._cacheBytes += record.bytes;
+        }
+      } else if (record.skipped) {
+        this.chunks.delete(index);
+        safeUnlink(out);
       }
       if (!record.failed) {
         // Going on air is gated on this, not on a timer: the publisher
@@ -386,6 +403,12 @@ export class ChunkScheduler extends EventEmitter {
         if (this.keepBytes && drop.done && !drop.failed) {
           drop.delivered = true;
           this._keptBytes += drop.bytes ?? 0;
+        } else if (!drop.done) {
+          // Still encoding. Deleting it here left a HOLE in the retention
+          // window — the encode completed into a record nothing knew, and
+          // every backward jump across the gap declined forever after.
+          // Its close handler retires it into the retained window instead.
+          drop.skipped = true;
         } else {
           safeUnlink(drop.out);
           this.chunks.delete(k);
@@ -398,7 +421,14 @@ export class ChunkScheduler extends EventEmitter {
       // survives untouched. The round trip costs zero re-encoding.
       for (let k = i; k < this.nextToWrite; k++) {
         const c = this.chunks.get(k);
-        if (!c || !c.delivered) return null;   // hole in the window — rebuild
+        if (!c || !c.delivered) {
+          if (process.env.JSR_TRACE) {
+            this.emit('warn', `[trace] back-jump declined at k=${k}: `
+              + `${!c ? 'missing' : `delivered=${c.delivered} done=${c.done} failed=${c.failed}`}`
+              + ` (i=${i} nextToWrite=${this.nextToWrite})`);
+          }
+          return null;   // hole in the window — rebuild
+        }
       }
       for (let k = i; k < this.nextToWrite; k++) {
         const c = this.chunks.get(k);
