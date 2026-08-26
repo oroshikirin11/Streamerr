@@ -1545,14 +1545,24 @@ export class PipelinePlayout extends EventEmitter {
     try {
       const st = statfsSync('/dev/shm');
       const free = st.bavail * st.bsize;
-      if (budget && free > budget * 1.2) {
-        plan = { dir: shm, ramBytes: budget };
+      // What the tmpfs can actually carry, with headroom for the transient
+      // remux copies made at delivery. A budget larger than reality is
+      // clamped, not refused — the whole point of 'auto' is fitting what
+      // the machine has, and 4GB of shm serving a 4.9GB ask by switching
+      // OFF was the opposite of that.
+      const usable = Math.floor(free / 1.3);
+      if (budget && usable >= 128 * 1024 ** 2) {
+        plan = { dir: shm, ramBytes: Math.min(budget, usable) };
+        if (usable < budget) {
+          this.emit('log', `[cache] budget clamped to ${Math.round(usable / 1024 ** 2)}MB — `
+            + `/dev/shm holds ${Math.round(free / 1024 ** 2)}MB (raise shm_size for the full `
+            + `${Math.round(budget / 1024 ** 2)}MB)\n`);
+        }
       } else if (free > 256 * 1024 ** 2) {
         plan = { dir: shm, ramBytes: null };
         if (budget) {
-          this.emit('warn', `run-ahead cache off: /dev/shm has ${Math.round(free / 1024 ** 2)}MB free `
-            + `but the budget needs ${Math.round((budget * 1.2) / 1024 ** 2)}MB — raise shm_size `
-            + 'or lower the cache limit. Not falling back to disk.');
+          this.emit('warn', 'run-ahead cache off: /dev/shm too small to be worth using '
+            + `(${Math.round(free / 1024 ** 2)}MB free). Not falling back to disk.`);
         }
       } else if (budget) {
         this.emit('warn', 'run-ahead cache off: no usable /dev/shm. Not falling back to disk.');
