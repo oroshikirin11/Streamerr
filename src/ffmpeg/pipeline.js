@@ -1432,9 +1432,10 @@ export class PipelinePlayout extends EventEmitter {
     });
     sched.on('chunk', ({ start }) => {
       if (this.scheduler !== sched) return;   // superseded mid-delivery
-      // Position is where the newest delivered chunk begins; the publisher is
-      // still paying it out, so this leads the viewer by up to one chunk.
-      this.position = start;
+      // Never backwards: the within-chunk interpolation has already walked
+      // the playhead to this chunk's end, and rewinding to its start here
+      // made the timeline visibly jump back at every delivery.
+      this.position = Math.max(this.position, start);
       this.timeline = this._clipBase + (start - offset) + chunkSeconds
         + (sched.shift || 0);
       this.emit('progress', {
