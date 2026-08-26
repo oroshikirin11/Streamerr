@@ -200,10 +200,7 @@
       },
     );
     player.attachMediaElement(video);
-    // 500ms base: a cut landing mid-load surfaces as ERROR, and with a
-    // 2s base a burst of quick seeks kept the player perpetually mid-wait.
-    // Genuine repeated failures still back off exponentially via attempts.
-    player.on(mpegts.Events.ERROR, () => retry(500));
+    player.on(mpegts.Events.ERROR, () => retry(2000));
     // The stream parsed — this connection reached real data, so the next
     // resync is not a failure to back off from. onplaying alone cannot be
     // the reset: autoplay policy can hold playback while data flows, and a
@@ -235,28 +232,9 @@
     );
   }
 
-  // A seam splice changed the stream underneath this player. Measured:
-  // mpegts.js sometimes reads straight through a seam and sometimes stops
-  // appending entirely — silently, with bytes still arriving — and the
-  // only escape was the 20-second stall-watchdog path. Reliability beats
-  // occasional luck: every seam triggers a fast deliberate rebuild
-  // (~1.5-2s, consistent), through the same resync machinery every other
-  // splice uses.
-  function onSeam() {
-    // The server cut the socket; the ordinary clean-close path reconnects
-    // in 300ms into a keyframe-aligned stream. The only thing worth doing
-    // here is forgiving the backoff — a splice is not an error — so a cut
-    // landing mid-recovery cannot ratchet the retry delay. An aggressive
-    // teardown-and-reconnect from here was tried and lost a race against
-    // the autoplay gate, leaving the player paused for good.
-    attempts = 0;
-  }
-
   onMount(() => {
-    window.addEventListener('jsr-seam', onSeam);
     connect();
-    return () => {
-      window.removeEventListener('jsr-seam', onSeam); gone = true; teardown(); };
+    return () => { gone = true; teardown(); };
   });
 </script>
 

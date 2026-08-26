@@ -137,8 +137,6 @@
           if (msg.payload.bufferMax) bufMax = msg.payload.bufferMax;
           bufPts = [...bufPts.slice(-89), msg.payload.buffer];
         }
-      } else if (msg.type === 'seam') {
-        window.dispatchEvent(new CustomEvent('jsr-seam'));
       } else if (msg.type === 'error' || msg.type === 'warn') {
         toast = { kind: msg.type, message: msg.payload.message };
         setTimeout(() => { toast = null; }, 8000);

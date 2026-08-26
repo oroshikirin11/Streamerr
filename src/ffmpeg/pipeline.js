@@ -667,7 +667,7 @@ export class PipelinePlayout extends EventEmitter {
         this.position = next;
         this.emit('log', `[cache] seek to ${next.toFixed(0)}s served from the `
           + `run-ahead cache — no re-encode\n`);
-        this.emit('seam');
+        this.emit('discontinuity');
         this.emit('seeked', { position: next });
         return next;
       }
@@ -715,7 +715,7 @@ export class PipelinePlayout extends EventEmitter {
         this.position = at;
         this.status = 'running';
         this.emit('log', '[cache] resumed from the retained window — no re-encode\n');
-        this.emit('seam');
+        this.emit('discontinuity');
         this.emit('status', this.status);
         return;
       }
@@ -1300,26 +1300,6 @@ export class PipelinePlayout extends EventEmitter {
       this._fillDuration(item);
       return;
     }
-    // Exactly buildChunkArgs' composite conditions, so routing and the
-    // args builder can never disagree about which graph a clip gets.
-    const gpuComposite = Boolean(this.profile?.gpuSubs) && this.selection?.subtitle
-      && !this.profile?.swDecode && gpuDecodable(this.selection?.video)
-      && !(this.profile?.barsFailed && contentRect(this.selection?.video, this.profile).bars);
-    // Clips with no subtitle burn chunk for the CACHE, not for parallelism:
-    // one worker, sequential — an encoder that runs above realtime banks the
-    // surplus, and one that dips below realtime spends it, which is exactly
-    // the smoothing a machine that hovers around 1.0x needs. The chunk args
-    // already build every backend's graph (for vaapi: decode on the CPU,
-    // hwupload, encode on the GPU). Subtitle-composite clips are untouched:
-    // their streaming path stays exactly as it was. A chunk failure demotes
-    // this clip AND the rest of the broadcast back to streaming.
-    if ((!this.selection?.subtitle || gpuComposite) && this._chunkPlan().ramBytes
-        && !this._noSubChunkOff) {
-      this._playChunked(item, offset, cached, 1, flushed, { noSubCache: true });
-      this.emit('nowplaying', this.snapshot());
-      this._fillDuration(item);
-      return;
-    }
 
     const args = buildSourceArgs({
       srcPath: item.srcPath,
@@ -1405,8 +1385,7 @@ export class PipelinePlayout extends EventEmitter {
     return Math.max(1, availableCores());
   }
 
-  _playChunked(item, offset, cached, workers, flushed = false,
-    { noSubCache = false } = {}) {
+  _playChunked(item, offset, cached, workers, flushed = false) {
     this._clipBase = this.timeline;
     const chunkSeconds = Number(this.profile?.chunkSeconds ?? 20);
 
@@ -1414,11 +1393,7 @@ export class PipelinePlayout extends EventEmitter {
     // see below. The scheduler must know: with a card up it must not
     // deliver until two chunks are in hand, or the card dies after the
     // short opener and the publisher starves through chunk 1's encode.
-    // GPU-class (cache-mode) clips also cover the INITIAL connect, so a
-    // fresh broadcast or an out-of-cache seek goes on air instantly on
-    // real content instead of waiting behind the encode gate.
-    const cover = (flushed && Boolean(this.publisher) && !this._stopping)
-      || (noSubCache && !this._stopping);
+    const cover = flushed && Boolean(this.publisher) && !this._stopping;
     const sched = new ChunkScheduler({
       srcPath: item.srcPath,
       startOffset: offset,
@@ -1481,12 +1456,7 @@ export class PipelinePlayout extends EventEmitter {
         sched.setShift(onAudioGrid(
           Math.max(0, this.timeline - this._clipBase) + 0.576,
         ));
-        // A SOFT seam: IDR-aligned, exact-forward, headers resent. The
-        // preview is not cut for these — measured, Chrome's decoder reads
-        // straight through them, and cutting cost two player rebuilds per
-        // seek. Hard discontinuities (source respawns, card swaps with
-        // timestamp jumps) still cut.
-        this.emit('seam');
+        this.emit('discontinuity');
         this.emit('log', '[cover] card released — content shifted '
           + `${sched.shift.toFixed(3)}s to follow it\n`);
       }
@@ -1499,17 +1469,6 @@ export class PipelinePlayout extends EventEmitter {
     // guard (_deadClips) and lives in _spawnSource, which chunks never run.
     sched.on('fatal', (err) => {
       if (this.scheduler !== sched || this._stopping) return;
-      if (noSubCache) {
-        // The cache mode is an optimization, never a reason to lose the
-        // broadcast: fall back to the streaming path this clip would have
-        // used before the cache existed, and stay there.
-        this._noSubChunkOff = true;
-        this.emit('warn', 'run-ahead chunking failed for this clip — '
-          + `continuing on the streaming path. (${String(err?.message ?? err).slice(0, 120)})`);
-        this._killSource();
-        this._play(item, this.position, { duration: this.current?.duration });
-        return;
-      }
       this.emit('fatal', err);
       this.stop();
     });
@@ -1546,35 +1505,12 @@ export class PipelinePlayout extends EventEmitter {
     // card — the bank's tail of the previous episode covers it instead.
     if (cover) {
       this.holding = true;
-      if (noSubCache) {
-        // These clips stream at or above realtime by definition — that is
-        // why they are in cache mode at all. So the cover is not a card:
-        // it is the STREAMING SOURCE playing the real content at the
-        // target, instantly, exactly like the pre-cache path — while the
-        // chunker rebuilds behind it. The ready handler kills it and
-        // splices to chunks the same way it killed the card. Viewers see
-        // content within a second everywhere on the timeline; the card
-        // remains only for CPU-burn clips, whose streaming path cannot
-        // keep up (which is why THEY are chunked).
-        this._spawnSource(buildSourceArgs({
-          srcPath: item.srcPath,
-          offset,
-          profile: this.profile,
-          selection: this.selection,
-          tsOffset: this.timeline,
-          statsPeriodMs: this.statsPeriodMs,
-          extractedPath: cached?.path ?? null,
-          fontsDir: cached?.fontsDir ?? null,
-          duration: this.current.duration,
-        }), { kind: 'hold' });
-      } else {
-        this._spawnSource(buildHoldArgs({
-          profile: this.profile,
-          tsOffset: this.timeline,
-          statsPeriodMs: this.statsPeriodMs,
-          label: 'Loading',
-        }), { kind: 'hold' });
-      }
+      this._spawnSource(buildHoldArgs({
+        profile: this.profile,
+        tsOffset: this.timeline,
+        statsPeriodMs: this.statsPeriodMs,
+        label: 'Loading',
+      }), { kind: 'hold' });
     }
 
     // Into the bank, not straight at the publisher — see _bankFeed. A
@@ -2499,89 +2435,6 @@ export function buildChunkArgs({
   const profEff = { ...profile, fps: effAll.fps };
   const base = scaleFilter(profEff).replace(`fps=${effAll.fps}`, `fps=${effAll.rate}`);
   const upload = be.uploadFilter(profEff);
-
-  // The GPU composite, in chunk form: the same probed graph shapes the
-  // streaming path trusts (see buildSourceArgs — the shape is chosen by
-  // the caller's driver probe, not guessed here), bounded by -ss/-t and
-  // placed by -output_ts_offset. This is what lets subtitle-burning
-  // GPU clips build a cache instead of being pinned to realtime.
-  if (profile.gpuSubs && sub.filter && !sub.needsComplex
-      && gpuDecodable(selection?.video) && !profile.swDecode
-      && !(profile.barsFailed && contentRect(selection?.video, profile).bars)) {
-    const rect = contentRect(selection?.video, profile);
-    const shift = Number(start).toFixed(3);
-    const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
-    const scalePart = selection?.video?.hdr
-      ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
-        + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
-      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
-    const pad = `pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`;
-    const at = `=x=${rect.x}:y=${rect.y}`;
-    const widePad = `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`;
-    let canvasPad = '';
-    let bgInput = [];
-    let videoChain;
-    let composite;
-    if (!rect.bars) {
-      videoChain = scalePart;
-      composite = '[b][ov]overlay_vaapi[v]';
-    } else {
-      switch (profile.barsGraph) {
-        case 'wide-canvas':
-          canvasPad = widePad;
-          videoChain = `${scalePart},${pad}`;
-          composite = '[b][ov]overlay_vaapi[v]';
-          break;
-        case 'overlay-pad':
-          videoChain = scalePart;
-          composite = `[b][ov]overlay_vaapi,${pad}[v]`;
-          break;
-        case 'overlay-scale-pad':
-          videoChain = scalePart;
-          composite = `[b][ov]overlay_vaapi,${scalePart},${pad}[v]`;
-          break;
-        case 'bg-composite':
-          videoChain = scalePart;
-          composite = `[b][ov]overlay_vaapi[vs];[2:v]hwupload[bg];`
-            + `[bg][vs]overlay_vaapi${at}[v]`;
-          bgInput = ['-f', 'lavfi', '-i',
-            `color=c=black:s=${profile.width}x${profile.height}:r=${effAll.rate},format=nv12`];
-          break;
-        case 'pad-overlay':
-        default:
-          videoChain = `${scalePart},${pad}`;
-          composite = `[b][ov]overlay_vaapi${at}[v]`;
-          break;
-      }
-    }
-    const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
-      + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
-      + `[0:v]${videoChain}[b];${composite}`;
-    return [
-      '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-      '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
-      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
-      '-extra_hw_frames', '8',
-      ...(start > 0 ? ['-ss', shift] : []),
-      '-i', srcPath,
-      // The canvas is infinite; -t below bounds every input's contribution,
-      // so no canvasCap/-shortest dance is needed in chunk form.
-      '-f', 'lavfi', '-i',
-      `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${effAll.rate},format=rgba`,
-      ...bgInput,
-      '-t', Number(dur).toFixed(3),
-      '-filter_complex', graph,
-      '-map', '[v]', '-map', `0:a:${audioIdx}?`,
-      ...be.encoderArgs(profEff),
-      '-async_depth', '4',
-      ...audioArgs(profile, { trimTo: dur, head: Number(start) <= 0 }),
-      '-r', effAll.rate, '-fps_mode', 'cfr',
-      '-output_ts_offset', Number(tsOffset).toFixed(3),
-      '-muxdelay', '0', '-muxpreload', '0',
-      '-mpegts_flags', '+resend_headers+initial_discontinuity',
-      '-f', 'mpegts', out,
-    ];
-  }
 
   // Subtitles must be burned between scale and pad — on the padded frame,
   // positioned subs for narrow content drift toward the bars.
