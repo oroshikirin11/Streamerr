@@ -18,14 +18,17 @@
   let position = $state(0);
 
   // The clock ticks LOCALLY at exactly one second per second, like any
-  // video player. Server positions arrive at uneven cadence — on the
-  // chunked path they ride chunk deliveries and drain heartbeats — and a
-  // clock built directly on them lurches. The server value only corrects
-  // the local one when they genuinely drift apart (seek, stall, resync);
-  // small disagreements never touch a running clock.
-  const syncPosition = (server) => {
+  // video player. The rule that keeps it from rubberbanding: a PERIODIC
+  // estimate never moves a running clock — the server's position stamps
+  // swing around true airtime by up to the bank depth, and letting them
+  // correct the clock yanked it forward and back. Only EVENTS move it:
+  // a seek, a skip, a broadcast starting — those arrive as stream
+  // messages, which are authoritative. Progress ticks keep a gross
+  // safety net for a genuinely lost clock, far beyond any stamp swing.
+  const syncPosition = (server, { authoritative = false } = {}) => {
     if (server == null) return;
-    if (Math.abs(server - position) > 2.5) position = server;
+    const gap = Math.abs(server - position);
+    if (authoritative ? gap > 1.5 : gap > 20) position = server;
   };
   let speed = $state(null);
   let toast = $state(null);
@@ -123,7 +126,7 @@
           setTimeout(() => { toast = null; }, 12000);
         }
         stream = msg.payload;
-        syncPosition(msg.payload.position);
+        syncPosition(msg.payload.position, { authoritative: true });
         if (msg.payload.status === 'stopped') bufPts = [];
       } else if (msg.type === 'progress') {
         syncPosition(msg.payload.position);
