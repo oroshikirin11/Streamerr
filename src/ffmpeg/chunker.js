@@ -213,7 +213,11 @@ export class ChunkScheduler extends EventEmitter {
       last: this._isLast(index),
     });
 
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    // Niced below the publisher: the encoders may use every core, but
+    // never at the expense of the process that holds the live connection.
+    const proc = process.platform === 'linux'
+      ? spawn('nice', ['-n', '10', 'ffmpeg', ...args], { stdio: ['ignore', 'ignore', 'pipe'] })
+      : spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     this._procs.add(proc);
 
     let stderr = '';

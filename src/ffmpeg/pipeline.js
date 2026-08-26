@@ -1333,11 +1333,14 @@ export class PipelinePlayout extends EventEmitter {
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
     if (gpuComposite) return 1;
 
-    // One core stays free for the publisher, the audio encode and Node
-    // itself; the rest may burn subtitles. No ceiling beyond that — the
-    // scheduler only ever has as many encodes in flight as the clip has
-    // chunks left, so a large machine self-limits without a magic number.
-    return Math.max(1, availableCores() - 1);
+    // Every core burns subtitles. The old rule reserved one for the
+    // publisher — but the publisher is a copy remux costing a few percent
+    // of a core, and on a 4-core N100 that reservation was the difference
+    // between 0.96x sustained (measured: cushion drained over six minutes,
+    // then Owncast hung up) and ~1.28x. The publisher is protected by
+    // PRIORITY instead: chunk encoders run niced below it, so its tiny
+    // share is always served first and the workers soak up the rest.
+    return Math.max(1, availableCores());
   }
 
   _playChunked(item, offset, cached, workers, flushed = false) {
