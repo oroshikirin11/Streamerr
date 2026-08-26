@@ -327,6 +327,15 @@
                if (e.key === 'ArrowRight') skip(30);
                if (e.key === 'ArrowLeft') skip(-30);
              }}>
+          {#if stream.cachedAhead > 0 && stream.playing.duration}
+            <!-- The run-ahead cushion: everything in here is already
+                 encoded, so a seek into it comes back fastest. Rendered
+                 under the fill so the played part stays accent-colored. -->
+            <div class="cached"
+                 style:left="{Math.min(100, (position / stream.playing.duration) * 100)}%"
+                 style:width="{Math.min(100 - Math.min(100, (position / stream.playing.duration) * 100),
+                   (stream.cachedAhead / stream.playing.duration) * 100)}%"></div>
+          {/if}
           <div class="fill" style:width="{stream.playing.duration
             ? Math.min(100, (position / stream.playing.duration) * 100)
             : 0}%"></div>
@@ -628,6 +637,13 @@
     transform: translateY(-50%);
     background: var(--surface-2);
     transition: height .12s ease;
+  }
+  .seek .cached {
+    position: absolute; top: 0; height: 100%;
+    /* A shade between track and fill: visibly "more" than unplayed,
+       clearly not "played". */
+    background: color-mix(in srgb, var(--accent) 28%, var(--surface-2));
+    transition: width .4s linear, left .4s linear;
   }
   .seek .fill {
     height: 100%; background: var(--accent);

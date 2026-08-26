@@ -1333,10 +1333,10 @@ export class PipelinePlayout extends EventEmitter {
       chunkSeconds,
       workers,
       holdUntilReady: cover,
-      workDir: this._chunkDir(),
-      ...(this.runAhead?.ramBytes ? {
-        aheadBytes: this.runAhead.ramBytes,
-        aheadSeconds: this.runAhead.ramBytes / streamBytesPerSecond(this.profile),
+      workDir: this._chunkPlan().dir,
+      ...(this._chunkPlan().ramBytes ? {
+        aheadBytes: this._chunkPlan().ramBytes,
+        aheadSeconds: this._chunkPlan().ramBytes / streamBytesPerSecond(this.profile),
       } : {}),
       tsOffsetOf: (start) => this._clipBase + (start - offset),
       buildArgs: ({ start, dur, out }) => buildChunkArgs({
@@ -1494,24 +1494,37 @@ export class PipelinePlayout extends EventEmitter {
    * too small for the budget (a Docker default of 64MB shm is the common
    * case — raising shm_size fixes it).
    */
-  _chunkDir() {
-    if (this._chunkDirPick) return this._chunkDirPick;
-    let dir = join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`);
-    const budget = this.runAhead?.ramBytes;
-    if (budget) {
-      try {
-        const st = statfsSync('/dev/shm');
-        const free = st.bavail * st.bsize;
-        if (free > budget * 1.2) {
-          dir = `/dev/shm/jellystreamerr-${process.pid}`;
-        } else {
-          this.emit('warn', `run-ahead cache on disk: /dev/shm has ${Math.round(free / 1024 ** 2)}MB free `
-            + `but the budget needs ${Math.round((budget * 1.2) / 1024 ** 2)}MB (raise shm_size)`);
+  _chunkPlan() {
+    if (this._chunkPlanPick) return this._chunkPlanPick;
+    const disk = join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`);
+    const shm = `/dev/shm/jellystreamerr-${process.pid}`;
+    const budget = this.runAhead?.ramBytes ?? null;
+    let plan = { dir: disk, ramBytes: null };
+    // The cache NEVER falls back to disk — a cushion of minutes churning
+    // gigabytes through a drive is exactly the wear the RAM cache exists
+    // to avoid, and the cinema box's disk is already dying. No room in
+    // RAM means no cushion: the legacy near-sighted bound, whose handful
+    // of transient chunks still prefer tmpfs when any is available.
+    try {
+      const st = statfsSync('/dev/shm');
+      const free = st.bavail * st.bsize;
+      if (budget && free > budget * 1.2) {
+        plan = { dir: shm, ramBytes: budget };
+      } else if (free > 256 * 1024 ** 2) {
+        plan = { dir: shm, ramBytes: null };
+        if (budget) {
+          this.emit('warn', `run-ahead cache off: /dev/shm has ${Math.round(free / 1024 ** 2)}MB free `
+            + `but the budget needs ${Math.round((budget * 1.2) / 1024 ** 2)}MB — raise shm_size `
+            + 'or lower the cache limit. Not falling back to disk.');
         }
-      } catch { /* no /dev/shm — disk it is */ }
+      } else if (budget) {
+        this.emit('warn', 'run-ahead cache off: no usable /dev/shm. Not falling back to disk.');
+      }
+    } catch {
+      if (budget) this.emit('warn', 'run-ahead cache off: no /dev/shm. Not falling back to disk.');
     }
-    this._chunkDirPick = dir;
-    return dir;
+    this._chunkPlanPick = plan;
+    return plan;
   }
 
   /**

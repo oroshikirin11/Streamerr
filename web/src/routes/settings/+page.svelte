@@ -69,6 +69,7 @@
       jellyfinKey = '';
       cfg.library.pathMap ??= [];
       cfg.preview ??= { enabled: true };
+      cfg.runAhead ??= { enabled: true, ramMB: 'auto' };
       cfg.tracks ??= {};
       cfg.tracks.languages ??= ['eng'];
       cfg.tracks.audioMode ??= 'original';
@@ -509,6 +510,43 @@
       <button class="primary" onclick={() => save('tracks')}>Save</button>
       {#if saved === 'tracks'}<span class="ok small">Saved</span>{/if}
     </div>
+  </section>
+
+  <!-- Run-ahead cache -->
+  <section class="card">
+    <h3>Run-ahead cache</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.runAhead.enabled} style="width:auto"
+             onchange={async () => {
+               await api.saveConfig({ runAhead: { enabled: cfg.runAhead.enabled } });
+               saved = 'runahead';
+               setTimeout(() => { if (saved === 'runahead') saved = ''; }, 2500);
+             }} />
+      Encode ahead of the broadcast when there is spare horsepower
+      {#if saved === 'runahead'}<span class="ok small">Saved</span>{/if}
+    </label>
+    {#if cfg.runAhead.enabled}
+      <div style="margin-top:10px; max-width: 320px;">
+        <label>RAM limit (MB)</label>
+        <input type="number" min="64" step="64"
+               placeholder={`auto — recommended ${cfg.recommendedCacheMB ?? '?'} MB`}
+               value={cfg.runAhead.ramMB === 'auto' ? '' : cfg.runAhead.ramMB}
+               onchange={async (e) => {
+                 const v = e.currentTarget.value.trim();
+                 cfg.runAhead.ramMB = v === '' ? 'auto' : Number(v);
+                 await api.saveConfig({ runAhead: { ramMB: cfg.runAhead.ramMB } });
+                 saved = 'runahead';
+                 setTimeout(() => { if (saved === 'runahead') saved = ''; }, 2500);
+               }} />
+        <p class="muted small" style="margin-top:6px;">
+          Leave empty for auto: {cfg.recommendedCacheMB ?? '?'} MB recommended on
+          this machine, computed from the memory the container actually has.
+          The cache lives in RAM only — if /dev/shm cannot hold it, caching
+          switches off rather than touching a disk. Applies from the next
+          broadcast.
+        </p>
+      </div>
+    {/if}
   </section>
 
   <!-- Live preview -->
