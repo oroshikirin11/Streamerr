@@ -1,8 +1,7 @@
 # Jellystreamerr
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE.md)
-<!-- TODO: replace # with your Buy Me a Coffee link -->
-[![Buy me a coffee](https://img.shields.io/badge/☕-Buy%20me%20a%20coffee-ffdd00)](#)
+[![Buy me a coffee](https://img.shields.io/badge/☕-Buy%20me%20a%20coffee-ffdd00)](https://buymeacoffee.com/oroshikirin11)
 
 **Turn your media library into a live TV channel.** Jellystreamerr is
 web-controlled playout for [Owncast](https://owncast.online): browse your
