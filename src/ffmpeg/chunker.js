@@ -579,14 +579,15 @@ export class ChunkScheduler extends EventEmitter {
   speed(windowMs = 30_000) {
     const now = Date.now();
     const win = this._done.filter((d) => d.at >= now - windowMs);
-    // Falling back to the full history when the window runs dry is what
-    // keeps this readable in steady state. Once the bank is full,
-    // backpressure stops the workers and chunks stop completing, so a
-    // short window empties and would report nothing precisely when the
-    // stream is healthiest. Measuring across the paused time instead lets
-    // the figure settle toward 1.0, which is both true and the same thing
-    // the single-process path shows.
-    const recent = win.length >= 2 ? win : this._done;
+    // When the window runs dry, EXTEND it to the last two completions
+    // rather than switching to a different dataset. On hardware where
+    // chunks complete at roughly the window length, the sample count
+    // oscillated across the threshold every tick and the figure blinked
+    // between the window rate and the lifetime average — 0.6x/1.0x in
+    // quick succession on the panel. The last-two form is continuous at
+    // the boundary (the sets coincide there) and decays smoothly toward
+    // truth as the pause lengthens.
+    const recent = win.length >= 2 ? win : this._done.slice(-2);
     // The oldest sample marks where measuring starts, so its own content
     // finished before that point and must not be counted inside the span.
     if (recent.length < 2) return null;
