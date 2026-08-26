@@ -529,25 +529,12 @@ node src/index.js                 # panel on :8099
 
 `JELLYSTREAMERR_CONFIG` sets the config path (default `./config.json`).
 
-## License
-
-[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, run, and modify for
-any **noncommercial** purpose. Forks and derived versions are welcome, but
-they inherit the same noncommercial terms: nobody can take this and sell it.
-(That makes it source-available rather than OSI "open source" — a deliberate
-choice.)
-
-If Jellystreamerr runs your channel and you want to say thanks:
-
-<a href="https://buymeacoffee.com/oroshikirin11"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>
-
 ## Built with AI
 
 Developed in close collaboration with Claude (Anthropic). The design
 decisions, testing on real hardware, and everything that ships are reviewed
 by a human — but a large share of the code and documentation was written by
 the model.
-
 ## Development
 
 ```bash
@@ -564,3 +551,15 @@ Before committing engine changes:
 ```bash
 node src/cli.js pipetest      # publisher survives seek/pause/resume
 ```
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, run, and modify for
+any **noncommercial** purpose. Forks and derived versions are welcome, but
+they inherit the same noncommercial terms: nobody can take this and sell it.
+(That makes it source-available rather than OSI "open source" — a deliberate
+choice.)
+
+If Jellystreamerr runs your channel and you want to say thanks:
+
+<a href="https://buymeacoffee.com/oroshikirin11"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>
