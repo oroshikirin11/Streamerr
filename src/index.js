@@ -70,6 +70,38 @@ process.on('uncaughtException', (err) => {
 
 const app = express();
 const server = http.createServer(app);
+
+/**
+ * Baseline response headers.
+ *
+ * The one with real teeth here is `frame-ancestors 'none'`: the panel has
+ * buttons that start and stop a live broadcast, and nothing otherwise stopped
+ * a page from framing it invisibly and borrowing the operator's clicks.
+ *
+ * The script/style directives have to allow 'unsafe-inline' — SvelteKit's
+ * static build inlines its hydration bootstrap, and Svelte injects component
+ * styles — so CSP is not the XSS backstop here; the frontend having no
+ * raw-HTML sink is. img-src stays wide because Jellyfin posters are fetched
+ * straight from whatever host the user configured.
+ */
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: http: https:",
+    "media-src 'self' blob:",
+    "connect-src 'self' ws: wss:",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; '));
+  next();
+});
+
 app.use(express.json({ limit: '1mb' }));
 
 // ── state ──────────────────────────────────────────────────────────────
@@ -1210,6 +1242,33 @@ if (existsSync(WEB_DIR)) {
     + 'The API is available under /api.\n',
   ));
 }
+
+/**
+ * Terminal error handler. MUST stay last — Express picks the four-argument
+ * handler by arity, and only ever the first one registered after the failing
+ * route.
+ *
+ * Without this, Express's built-in handler runs, and outside NODE_ENV
+ * =production it puts err.stack in the RESPONSE BODY. Malformed JSON on the
+ * public login endpoint was enough to hand an anonymous caller the absolute
+ * install path, the account name and the dependency layout. Setting
+ * NODE_ENV alone would fix that container-side, but this service is also run
+ * straight from source, where nothing sets it — so the guarantee belongs
+ * here, not in the environment.
+ */
+// eslint-disable-next-line no-unused-vars -- arity is what marks this a handler
+app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || 500;
+  // Body parser failures are the client's fault and safe to name; anything
+  // else is ours, and the detail belongs in the log, not the reply.
+  const message = err.type === 'entity.parse.failed' ? 'Malformed JSON body'
+    : err.type === 'entity.too.large' ? 'Request body too large'
+      : status < 500 ? 'Bad request'
+        : 'Internal error';
+  if (status >= 500) console.error('[unhandled]', redact(err.stack ?? String(err)));
+  if (res.headersSent) return res.end();
+  res.status(status).json({ error: message });
+});
 
 // ── websocket ──────────────────────────────────────────────────────────
 
