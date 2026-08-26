@@ -601,6 +601,7 @@ export class PipelinePlayout extends EventEmitter {
       // player timeline shades ahead of the playhead. Zero on the
       // streaming path, where nothing encodes ahead.
       cachedAhead: this.scheduler?.cachedSeconds?.() ?? 0,
+      cachedBehind: this.scheduler?.keptSeconds?.() ?? 0,
       // What is actually being burned in, so the panel can show it without
       // asking — the choice is baked into the stream and is not something a
       // viewer can change at their end.
@@ -1360,9 +1361,13 @@ export class PipelinePlayout extends EventEmitter {
       workers,
       holdUntilReady: cover,
       workDir: this._chunkPlan().dir,
+      // A quarter of the budget retains what has already aired, so a
+      // backward seek is served as cheaply as a forward one; the rest
+      // runs ahead.
       ...(this._chunkPlan().ramBytes ? {
-        aheadBytes: this._chunkPlan().ramBytes,
-        aheadSeconds: this._chunkPlan().ramBytes / streamBytesPerSecond(this.profile),
+        aheadBytes: Math.ceil(this._chunkPlan().ramBytes * 0.75),
+        aheadSeconds: (this._chunkPlan().ramBytes * 0.75) / streamBytesPerSecond(this.profile),
+        keepBytes: Math.floor(this._chunkPlan().ramBytes * 0.25),
       } : {}),
       tsOffsetOf: (start) => this._clipBase + (start - offset),
       buildArgs: ({ start, dur, out }) => buildChunkArgs({

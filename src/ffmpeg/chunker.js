@@ -56,7 +56,7 @@ export class ChunkScheduler extends EventEmitter {
     srcPath, startOffset = 0, duration = null,
     chunkSeconds = 20, workers = 3, workDir, buildArgs,
     holdUntilReady = false, tsOffsetOf = null,
-    aheadSeconds = null, aheadBytes = null,
+    aheadSeconds = null, aheadBytes = null, keepBytes = null,
   }) {
     super();
     // Deliver nothing until two chunks are in hand ('ready'). Mid-broadcast
@@ -83,7 +83,16 @@ export class ChunkScheduler extends EventEmitter {
      */
     this.aheadSeconds = aheadSeconds;
     this.aheadBytes = aheadBytes;
+    /**
+     * Retention budget for DELIVERED chunks. A backward seek is usually
+     * the cheapest intent there is — "I missed a line" — and was the most
+     * expensive operation in the system: everything behind the playhead
+     * was deleted, so it rebuilt from scratch AND destroyed the forward
+     * cushion doing it. Retained chunks make it a jump like any other.
+     */
+    this.keepBytes = keepBytes;
     this._cacheBytes = 0;
+    this._keptBytes = 0;
     this.srcPath = srcPath;
     this.startOffset = startOffset;
     this.duration = duration;
@@ -194,10 +203,34 @@ export class ChunkScheduler extends EventEmitter {
     return true;
   }
 
+  /** Drop the oldest retained chunks once the keep budget is exceeded. */
+  _evictKept() {
+    if (!this.keepBytes || this._keptBytes <= this.keepBytes) return;
+    const kept = [...this.chunks.entries()]
+      .filter(([, c]) => c.delivered)
+      .sort(([a], [b]) => a - b);
+    for (const [i, c] of kept) {
+      if (this._keptBytes <= this.keepBytes) break;
+      if (i >= this.nextToWrite) break;   // never evict undelivered ground
+      safeUnlink(c.out);
+      this._keptBytes -= c.bytes ?? 0;
+      this.chunks.delete(i);
+    }
+  }
+
   /** Encoded-but-unaired content, in seconds — the cushion the UI shows. */
   cachedSeconds() {
     let sum = 0;
-    for (const [i, c] of this.chunks) if (c.done && !c.failed) sum += this._durOf(i);
+    for (const [i, c] of this.chunks) {
+      if (c.done && !c.failed && !c.delivered) sum += this._durOf(i);
+    }
+    return sum;
+  }
+
+  /** Retained already-aired content, in seconds — the band BEHIND the playhead. */
+  keptSeconds() {
+    let sum = 0;
+    for (const [i, c] of this.chunks) if (c.delivered) sum += this._durOf(i);
     return sum;
   }
 
@@ -304,8 +337,13 @@ export class ChunkScheduler extends EventEmitter {
    * back to a full rebuild).
    */
   jumpTo(seconds, head) {
+    // Backward targets scan the retained window; forward ones the queue.
+    // Retention makes the two symmetric: a kept chunk re-delivers exactly
+    // like a pending one, re-stamped fresh at the current head.
+    const lowest = Math.min(this.nextToWrite,
+      ...[...this.chunks.keys()].filter((k) => this.chunks.get(k)?.delivered));
     let i = null;
-    for (let k = this.nextToWrite; ; k++) {
+    for (let k = lowest; ; k++) {
       const st = this._startOf(k);
       if (this.duration != null && st >= this.duration - 0.05) break;
       if (seconds >= st && seconds < st + this._durOf(k)) { i = k; break; }
@@ -324,15 +362,40 @@ export class ChunkScheduler extends EventEmitter {
     // seek needs still encoding. Decline and let the caller rebuild.
     if (!c || !c.done || c.failed) return null;
 
-    // Abort an in-flight delivery and discard everything before the target.
+    // Abort an in-flight delivery.
     if (this._rs) { try { this._rs.destroy(); } catch { /* gone */ } }
     this._writing = false;
-    for (let k = this.nextToWrite; k < i; k++) {
-      const drop = this.chunks.get(k);
-      if (drop) {
-        safeUnlink(drop.out);
+    if (i >= this.nextToWrite) {
+      // Forward: what lies between playhead and target moves to the
+      // retained window (it aired conceptually — the viewer skipped it),
+      // or is dropped when retention is off.
+      for (let k = this.nextToWrite; k < i; k++) {
+        const drop = this.chunks.get(k);
+        if (!drop) continue;
         if (drop.bytes) this._cacheBytes -= drop.bytes;
-        this.chunks.delete(k);
+        if (this.keepBytes && drop.done && !drop.failed) {
+          drop.delivered = true;
+          this._keptBytes += drop.bytes ?? 0;
+        } else {
+          safeUnlink(drop.out);
+          this.chunks.delete(k);
+        }
+      }
+      this._evictKept();
+    } else {
+      // Backward: wake the retained chunks from target to the old
+      // playhead — they re-deliver, and everything already queued AHEAD
+      // survives untouched. The round trip costs zero re-encoding.
+      for (let k = i; k < this.nextToWrite; k++) {
+        const c = this.chunks.get(k);
+        if (!c || !c.delivered) return null;   // hole in the window — rebuild
+      }
+      for (let k = i; k < this.nextToWrite; k++) {
+        const c = this.chunks.get(k);
+        c.delivered = false;
+        c.trimmed = 0;
+        this._keptBytes -= c.bytes ?? 0;
+        this._cacheBytes += c.bytes ?? 0;
       }
     }
     this.nextToWrite = i;
@@ -483,12 +546,25 @@ export class ChunkScheduler extends EventEmitter {
       return;
     }
 
-    this.chunks.delete(this.nextToWrite);
     this.nextToWrite += 1;
-    if (next.bytes) { this._cacheBytes -= next.bytes; next.bytes = 0; }
+    if (next.bytes) {
+      this._cacheBytes -= next.bytes;
+      if (this.keepBytes && !next.failed) {
+        // Retained for backward seeks rather than deleted.
+        next.delivered = true;
+        this._keptBytes += next.bytes;
+        this._evictKept();
+      } else {
+        this.chunks.delete(next.index);
+        next.bytes = 0;
+      }
+    } else {
+      this.chunks.delete(next.index);
+    }
     this._fill();   // budget freed — the encoders may move again
 
     if (next.failed) {
+      this.chunks.delete(next.index);
       safeUnlink(next.out);
       // Dropping a bad chunk quietly and carrying on means a broken
       // filtergraph plays an entire queue as silence. The streaming path
@@ -523,7 +599,10 @@ export class ChunkScheduler extends EventEmitter {
       } catch { /* stat raced a cleanup — interpolation just skips */ }
       const rs = createReadStream(path);
       this._rs = rs;
-      const cleanup = () => { safeUnlink(path); if (path !== next.out) safeUnlink(next.out); };
+      const cleanup = () => {
+        if (path !== next.out) safeUnlink(path);          // derived remux copy
+        if (!next.delivered) safeUnlink(next.out);        // retained ones stay
+      };
       rs.on('error', () => { this._writing = false; cleanup(); this._drain(); });
       rs.on('end', () => {
         this._writing = false;

@@ -327,6 +327,14 @@
                if (e.key === 'ArrowRight') skip(30);
                if (e.key === 'ArrowLeft') skip(-30);
              }}>
+          {#if stream.cachedBehind > 0 && stream.playing.duration}
+            <!-- Retained behind the playhead: a backward seek into this
+                 lands instantly. Same tone as the ahead band. -->
+            <div class="cached"
+                 style:left="{Math.max(0, ((position - stream.cachedBehind) / stream.playing.duration) * 100)}%"
+                 style:width="{Math.min((stream.cachedBehind / stream.playing.duration) * 100,
+                   (position / stream.playing.duration) * 100)}%"></div>
+          {/if}
           {#if stream.cachedAhead > 0 && stream.playing.duration}
             <!-- The run-ahead cushion: everything in here is already
                  encoded, so a seek into it comes back fastest. Rendered

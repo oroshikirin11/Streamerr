@@ -262,6 +262,7 @@ function streamStatus() {
     })),
     position: s.position,
     cachedAhead: s.cachedAhead ?? 0,
+    cachedBehind: s.cachedBehind ?? 0,
     tracks: s.tracks ?? null,
     preview: previewEnabled(),
   };
