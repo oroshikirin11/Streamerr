@@ -68,7 +68,11 @@
   .log {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 10px 12px;
-    height: calc(100vh - 190px); overflow: auto;
+    /* Everything around the box: header and filter row above (~112px),
+       the transport bar and page padding below (~90px), plus slack so no
+       browser's font metrics or scrollbar tips the page into scrolling —
+       the page must never scroll; only the log itself does. */
+    height: calc(100vh - 250px); min-height: 240px; overflow: auto;
     font: 12px/1.55 ui-monospace, "Cascadia Code", monospace;
   }
   .line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-all; }
