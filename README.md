@@ -12,7 +12,13 @@ your library  →  Jellystreamerr  →  Owncast  →  viewers
  (any format)     (one clean stream)
 ```
 
+Owncast is our choice, not a requirement — the output is one standard RTMP
+stream (H.264 + AAC), so **any RTMP ingest works**: MediaMTX, nginx-rtmp,
+even Twitch or YouTube. Only the Owncast extras (title sync, the *Send 30s to
+watch* test link) are Owncast-specific.
+
 **Contents:** [What it's for](#what-its-for) · [Quick start](#quick-start-docker)
+· [Owncast setup](#owncast-setup)
 · [Hardware and encoders](#hardware-and-encoders) · [How it works](#how-it-works)
 · [Subtitles and audio](#subtitles-and-audio) · [Performance](#performance)
 · [Library providers](#library-providers) · [Settings](#settings)
@@ -59,6 +65,14 @@ disqualifying**:
 So transcoding isn't overhead that could be switched off — it's the price of
 admission. The engineering effort went into making it *cheap enough to run
 live*, which is what the GPU paths below are about.
+
+### Why the receiver lives on a VPS
+
+Jellystreamerr runs at home, next to the media. Owncast runs on a cheap VPS.
+That split is the point: your home connection carries **one** outgoing stream
+no matter how many people watch — the VPS's bandwidth fans it out to the
+viewers. Five viewers pulling directly from a home upload line would kill it;
+one stream to a VPS doesn't.
 
 ## Quick start (Docker)
 
@@ -156,6 +170,30 @@ dev0: /dev/dri/renderD128,gid=104,mode=0666
 
 Restart with `pct stop <id> && pct start <id>` — rebooting from inside does not
 re-read the config.
+
+## Owncast setup
+
+On the VPS, in this order:
+
+1. **Install Owncast** — [their quickstart](https://owncast.online/quickstart/)
+   is a one-liner or a small compose file.
+2. **Log into the admin** at `http://<vps>:8080/admin` and change the default
+   admin password.
+3. **Set a stream key** under *Configuration → Server Setup → Stream Keys*.
+4. **Video settings**: leave the segment/latency defaults. Jellystreamerr
+   already sends stream-ready H.264 + AAC with 2-second keyframes, so give the
+   output variant a low CPU setting or passthrough — the VPS should not
+   re-encode what is already encoded for it.
+5. **Optional, for title sync**: create an access token under
+   *Integrations* and put it with the server URL into Jellystreamerr's
+   Owncast settings. The watch page then shows what's playing.
+6. **Network**: RTMP sends the stream key in plaintext. Keep port 1935 closed
+   to the internet and send the stream over a VPN or tailnet; only the watch
+   page (HTTP/S) is public.
+
+Then run the Jellystreamerr wizard — step 1 asks for the RTMP address and the
+key from step 3, and its *Send 30s to watch* button confirms video actually
+arrives.
 
 ## Hardware and encoders
 
@@ -295,8 +333,10 @@ comfortably absorbed. If quality ever looks lacking, raise the bitrate.
 
 ## Library providers
 
-**Jellyfin** — reads the posters, seasons and episode order Jellyfin already
-scraped. Create a key under *Dashboard → API Keys*.
+**Jellyfin** — the preferred source: posters, seasons, titles and episode
+order come from the metadata Jellyfin already scraped. Create a key under
+*Dashboard → API Keys*. The other providers play files just as well — they
+simply lack the visual metadata.
 
 **A folder** — no Jellyfin needed. Point it at a directory and it reads the
 layout:
