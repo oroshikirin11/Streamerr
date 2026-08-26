@@ -410,6 +410,23 @@ export class PipelinePlayout extends EventEmitter {
     // would have gone live. Encode failures are the scheduler's `fatal` to
     // report, not this one's.
     if (!this.publisher) return;
+    // Chunked delivery wedge: a finished chunk is WAITING while nothing
+    // reaches the publisher — seen live on the N100 after an in-cushion
+    // seek, where delivery stalled 16s and the next seek killed the
+    // broadcast. Content that exists but is not flowing is never a reason
+    // to die: rebuild at the aired position instead. Six seconds is three
+    // watchdog ticks — far beyond any legitimate delivery pause, well
+    // inside Owncast's patience.
+    if (this.scheduler && !this.holding && !this.source
+        && (this._bankBytes ?? 0) === 0 && this._lastAiredAt
+        && Date.now() - this._lastAiredAt > 6_000
+        && this.scheduler.chunks?.get?.(this.scheduler.nextToWrite)?.done) {
+      this.emit('warn', 'chunk delivery wedged with content in hand — rebuilding in place');
+      this._flushed = true;
+      this._play(this.current?.item ?? null, this.aired ?? this.position,
+        { duration: this.current?.duration });
+      return;
+    }
     if ((this._bankBytes ?? 0) > 0 && this._lastAiredAt
         && Date.now() - this._lastAiredAt > 20_000) {
       // Distinguish "never got going" from "stopped mid-broadcast". A
