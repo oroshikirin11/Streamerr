@@ -640,15 +640,25 @@ export class PipelinePlayout extends EventEmitter {
       next = Math.min(next, Math.max(0, this.current.duration - 2));
     }
 
-    // NOT YET: serving an in-cushion seek straight from the run-ahead
-    // cache (ChunkScheduler.jumpTo + a negative delivery shift). The
-    // machinery exists and passes in isolation, but two things bar it
-    // from the live path: jumpTo lands on the CHUNK START, up to a whole
-    // chunk before the requested position, and under live conditions it
-    // declined a target the isolation test accepts — undiagnosed. Until
-    // both are settled a seek rebuilds like it always has; the cache
-    // still pays for itself in steady-state resilience and instant
-    // recovery after the rebuild.
+    // A target already in the run-ahead cache needs no rebuild: the
+    // scheduler trims the containing chunk's head to the target (keyframe
+    // snap, so at most one GOP early — like any player) and places it at
+    // the stream head; every later chunk follows the trimmed chunk's
+    // MEASURED end. No cover card, no re-encode. Declined when that one
+    // chunk is not encoded yet — a big cushion says nothing about the
+    // specific chunk, since workers finish out of order.
+    if (this.scheduler) {
+      const head = onAudioGrid(this.timeline + 0.064);
+      const at = this.scheduler.jumpTo(next, head);
+      if (at != null) {
+        this.position = next;
+        this.emit('log', `[cache] seek to ${next.toFixed(0)}s served from the `
+          + `run-ahead cache — no re-encode\n`);
+        this.emit('discontinuity');
+        this.emit('seeked', { position: next });
+        return next;
+      }
+    }
 
     // Restart only the source; the publisher and its connection are untouched.
     this._play(this.current.item, next, { duration: this.current.duration });

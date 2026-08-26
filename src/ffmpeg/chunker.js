@@ -244,12 +244,17 @@ export class ChunkScheduler extends EventEmitter {
         this._encodedSeconds = (this._encodedSeconds ?? 0) + this._durOf(index);
         this._done.push({ at: Date.now(), content: this._durOf(index) });
         if (this._done.length > 64) this._done.shift();
-        // Ready means a full chunkSeconds of CONTENT is in hand — however
-        // many chunks that took. The old two-chunk rule measured the same
-        // cushion, but through one full-size chunk whose encode time no
-        // amount of parallelism could shorten.
+        if (this._durOf(index) >= this.chunkSeconds - 0.001) this._fullDone = true;
+        // Ready needs a full chunkSeconds of content AND one full-size
+        // chunk in hand. The cushion alone is not enough: with few
+        // workers the short opening ramp monopolizes the pool, the first
+        // full chunk starts late and lands long after the ramp has been
+        // paid out — measured on the N100 as the publisher airing exactly
+        // the ramp (24.93s) and then starving to death. A finished full
+        // chunk is the proof the post-ramp cadence can hold.
         if (!this._announcedReady
-            && (this._encodedSeconds >= this.chunkSeconds || this.finished)) {
+            && ((this._encodedSeconds >= this.chunkSeconds && this._fullDone)
+              || this.finished)) {
           this._announcedReady = true;
           this.emit('ready');
         }
@@ -294,7 +299,7 @@ export class ChunkScheduler extends EventEmitter {
    * start position, or null when the target is not in hand (caller falls
    * back to a full rebuild).
    */
-  jumpTo(seconds) {
+  jumpTo(seconds, head) {
     let i = null;
     for (let k = this.nextToWrite; ; k++) {
       const st = this._startOf(k);
@@ -303,7 +308,16 @@ export class ChunkScheduler extends EventEmitter {
       if (st > seconds) break;
     }
     if (i == null) return null;
+    // A target within the last second of a chunk means trimming nearly all
+    // of it — the remux of a near-empty tail fails, and the viewer would
+    // not notice a sub-second difference anyway. Serve the next chunk from
+    // its start instead.
+    let trim = Math.max(0, seconds - this._startOf(i));
+    if (this._durOf(i) - trim < 1) { i += 1; trim = 0; }
     const c = this.chunks.get(i);
+    // The cushion total says nothing about THIS chunk: workers finish out
+    // of order, so a 2-minute cushion can coexist with the one chunk the
+    // seek needs still encoding. Decline and let the caller rebuild.
     if (!c || !c.done || c.failed) return null;
 
     // Abort an in-flight delivery and discard everything before the target.
@@ -318,33 +332,95 @@ export class ChunkScheduler extends EventEmitter {
       }
     }
     this.nextToWrite = i;
+    // Consumed by _deliverable: trim the chunk's head to the target and
+    // place it at `head`. The shift for everything AFTER it is computed
+    // from the trimmed chunk's MEASURED duration, because the input seek
+    // snaps to a keyframe at or before the target and the exact cut is
+    // only known after the remux.
+    this._jump = { index: i, head, trim };
+    this.shift = 0;
     this._fill();
     this._drain();
     return this._startOf(i);
   }
 
-  /** Deliverable path for a chunk: re-stamped when a shift is set. */
+  /** Deliverable path for a chunk: re-stamped when a shift or jump is set. */
   _deliverable(record, cb) {
-    if (!this.shift || typeof this.tsOffsetOf !== 'function') return cb(record.out);
-    const base = this.tsOffsetOf(this._startOf(record.index));
+    const jump = this._jump?.index === record.index ? this._jump : null;
+    if (!jump && (!this.shift || typeof this.tsOffsetOf !== 'function')) {
+      return cb(record.out);
+    }
     const shifted = record.out.replace(/\.ts$/, '.shift.ts');
-    execFile('ffmpeg', [
+    const run = (trimRel, offset) => execFile('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+      ...(trimRel > 0.02 ? ['-ss', trimRel.toFixed(3)] : []),
       '-i', record.out,
       '-c', 'copy', '-muxdelay', '0', '-muxpreload', '0',
-      '-output_ts_offset', (base + this.shift).toFixed(3),
+      '-output_ts_offset', offset.toFixed(3),
       '-mpegts_flags', '+resend_headers+initial_discontinuity',
       '-f', 'mpegts', shifted,
-    ], (err) => {
+    ], (err) => after(err));
+    let after;
+
+    if (jump) {
+      // Two passes, because single-pass placement means juggling three
+      // timestamp bases (the file's baked absolutes, seek-relative, and
+      // output) and ffmpeg's rebase rules differ between them — measured
+      // wrong twice. Pass 1 only trims: input seek, keyframe snap, base
+      // irrelevant. Pass 2 re-bases the trimmed file to zero and places
+      // it at the head — the exact code path every other re-stamp in
+      // this engine already trusts.
+      // The chunk's effective start moved to the trim point — the pos
+      // stamps on its bytes must say so, or the playbar rewinds to the
+      // chunk boundary the moment the jump chunk finishes delivering.
+      record.trimmed = jump.trim;
+      const cutFile = record.out.replace(/\.ts$/, '.cut.ts');
+      execFile('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        ...(jump.trim > 0.02 ? ['-ss', jump.trim.toFixed(3)] : []),
+        '-i', record.out, '-c', 'copy',
+        '-muxdelay', '0', '-muxpreload', '0', '-f', 'mpegts', cutFile,
+      ], (terr) => {
+        if (terr) { after(terr); return; }
+        execFile('ffmpeg', [
+          '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+          '-i', cutFile, '-c', 'copy',
+          '-muxdelay', '0', '-muxpreload', '0',
+          '-output_ts_offset', jump.head.toFixed(3),
+          '-mpegts_flags', '+resend_headers+initial_discontinuity',
+          '-f', 'mpegts', shifted,
+        ], (err) => { safeUnlink(cutFile); after(err); });
+      });
+    } else {
+      run(0, this.tsOffsetOf(this._startOf(record.index)) + this.shift);
+    }
+
+    after = (err) => {
       if (err) {
         // Deliver unshifted rather than not at all: a backwards seam
         // stalls the pacer for the card period, but silence kills the
         // broadcast outright.
+        this._jump = null;
         this.emit('warn', `restamp of chunk ${record.index} failed — delivering as baked`);
         return cb(record.out);
       }
-      cb(shifted);
-    });
+      if (!jump) return cb(shifted);
+      // Everything after the trimmed chunk continues from where it
+      // actually ends — measured, not assumed, because the keyframe snap
+      // decides the true cut.
+      execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'csv=p=0', shifted], (perr, out) => {
+        const dur = Number(String(out ?? '').trim());
+        this._jump = null;
+        if (perr || !Number.isFinite(dur) || dur <= 0) {
+          this.emit('warn', `probe of trimmed chunk ${record.index} failed — seams may stall once`);
+        } else if (typeof this.tsOffsetOf === 'function') {
+          const nextBase = this.tsOffsetOf(this._startOf(record.index + 1));
+          this.shift = jump.head + dur - nextBase;
+        }
+        cb(shifted);
+      });
+    };
   }
 
   /**
@@ -441,7 +517,10 @@ export class ChunkScheduler extends EventEmitter {
         // from these, and a stale one lands with the NEXT scheduler's
         // base, inflating the timeline by roughly the seek distance.
         if (!this.running) return;
-        this.emit('chunk', { index: next.index, start: this._startOf(next.index) });
+        this.emit('chunk', {
+          index: next.index,
+          start: this._startOf(next.index) + (next.trimmed ?? 0),
+        });
         this._fill();
         this._drain();
       });
