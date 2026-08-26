@@ -14,13 +14,13 @@ import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 import {
-  config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact,
-  normalizeStoredBitrates, ROOT,
+  config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, assertRtmpUrl,
+  normalizeStoredBitrates, normalizeStoredEncoder, ROOT,
 } from './config.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
-  throttleCheck, throttleFail, throttleReset,
+  throttleCheck, throttleFail, throttleReset, destroyOtherSessions,
 } from './auth.js';
 import {
   probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
@@ -484,9 +484,17 @@ app.post('/api/auth/logout', (req, res) => {
 /** First-run only: refuses once a password exists, so it can't be reset anonymously. */
 app.post('/api/auth/setup', async (req, res) => {
   if (passwordHash()) return res.status(409).json({ error: 'Already configured' });
+  // Hashing is as expensive here as at login, and this route is reachable
+  // before any credential exists.
+  const setupIp = clientIp(req);
+  if (throttleCheck(setupIp)) {
+    return res.status(429).json({ error: 'Too many attempts. Try again later.' });
+  }
+  throttleFail(setupIp);
   try {
     const hash = await hashPassword(req.body?.password ?? '');
     saveConfig({ auth: { passwordHash: hash } });
+    throttleReset(setupIp);
     const token = createSession();
     res.setHeader('Set-Cookie', sessionCookie(token, { secure: isSecure(req) }));
     res.json({ ok: true });
@@ -506,6 +514,10 @@ app.post('/api/auth/password', async (req, res) => {
   }
   try {
     saveConfig({ auth: { passwordHash: await hashPassword(next ?? '') } });
+    // Changing the password is how someone reacts to a suspected compromise,
+    // so it has to end every OTHER session — keeping this one, or the user
+    // would be logged out of the tab they just used.
+    destroyOtherSessions(tokenFromRequest(req));
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -580,10 +592,13 @@ app.get('/smbmedia/*', async (req, res) => {
     return res.status(403).end();
   }
   if (typeof library?.stream !== 'function') return res.status(404).end();
-  const expected = library.bridgeToken ?? '';
-  const given = String(req.query.t ?? '');
-  if (!expected || given.length !== expected.length
-      || !timingSafeEqual(Buffer.from(given), Buffer.from(expected))) {
+  const expected = Buffer.from(library.bridgeToken ?? '');
+  const given = Buffer.from(String(req.query.t ?? ''));
+  // Byte length, not string length: one multi-byte character makes those two
+  // differ, and timingSafeEqual then THROWS — out of this handler, past
+  // Express 4, leaving the request hanging and the socket leaked.
+  if (!expected.length || given.length !== expected.length
+      || !timingSafeEqual(given, expected)) {
     return res.status(403).end();
   }
   let rel;
@@ -758,7 +773,12 @@ app.post('/api/check/owncast', async (req, res) => {
   if (!url || !key) return res.status(400).json({ error: 'Address and stream key are required' });
   if (engine) return res.status(409).json({ error: 'Stop the current broadcast first' });
 
-  const target = `${String(url).replace(/\/+$/, '')}/${key}`;
+  let target;
+  try {
+    target = `${assertRtmpUrl(url)}/${key}`;
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
   // Two different questions. "Does it accept us" only needs a few seconds and
   // no pacing. "Can I watch it appear" needs realtime pacing AND enough
   // content for Owncast to build a playable HLS playlist — it buffers several
@@ -1200,15 +1220,37 @@ if (existsSync(WEB_DIR)) {
 const wss = new WebSocketServer({ noServer: true });
 const previewWss = new WebSocketServer({ noServer: true });
 
+/**
+ * A WebSocket handshake is not protected by SameSite the way fetch is — some
+ * engines never applied it, and a page served from the SAME host on another
+ * port is same-site anyway, which is an ordinary homelab shape. Without this
+ * check such a page could open /ws/preview and watch the broadcast. Same
+ * origin or no origin (native clients, ffmpeg) only.
+ */
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;                 // not a browser
+  try {
+    const o = new URL(origin);
+    return o.host === req.headers.host;
+  } catch { return false; }
+}
+
 server.on('upgrade', (req, socket, head) => {
   const path = (req.url ?? '').split('?')[0];
   const target = path === '/ws' ? wss : path === '/ws/preview' ? previewWss : null;
   if (!target) { socket.destroy(); return; }
+  if (!originAllowed(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
 });
 
 wss.on('connection', (ws, req) => {
-  if (passwordHash() && !validSession(tokenFromRequest(req))) {
+  // No `passwordHash() &&`: an unconfigured panel must be closed, not open.
+  if (!validSession(tokenFromRequest(req))) {
     ws.close(4401, 'unauthorized');
     return;
   }
@@ -1219,7 +1261,7 @@ wss.on('connection', (ws, req) => {
 });
 
 previewWss.on('connection', (ws, req) => {
-  if (passwordHash() && !validSession(tokenFromRequest(req))) {
+  if (!validSession(tokenFromRequest(req))) {
     ws.close(4401, 'unauthorized');
     return;
   }
@@ -1246,6 +1288,13 @@ const fixed = normalizeStoredBitrates(normalizeBitrate);
 if (fixed) {
   console.warn(`! repaired bitrate config: ${fixed.before.join(', ')} -> ${fixed.after.join(', ')}`);
   saveConfig({ encoder: { videoBitrate: config.encoder.videoBitrate, audioBitrate: config.encoder.audioBitrate } });
+}
+// A stored config is not a trusted input: it may predate the validation in
+// PUT /api/config, or have been edited by hand.
+const encFixed = normalizeStoredEncoder();
+if (encFixed) {
+  console.warn(`! repaired encoder config: ${encFixed.join(', ')}`);
+  saveConfig({ encoder: config.encoder });
 }
 const { port, host } = config.server;
 server.listen(port, host, () => {

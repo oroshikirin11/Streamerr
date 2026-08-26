@@ -414,7 +414,12 @@ export class SmbStreamLibrary {
   static safeRel(rel) {
     if (typeof rel !== 'string' || !rel) return false;
     if (rel.includes('\0')) return false;
-    return rel.split('/').every((seg) => seg && seg !== '.' && seg !== '..');
+    // Split on BOTH separators. _p() rewrites '/' to '\\' for the protocol, so
+    // a backslash in the input is a separator by the time it reaches the
+    // server — splitting only on '/' let '..\\..\\secret' through as a single
+    // innocent-looking segment.
+    if (/^[A-Za-z]:/.test(rel)) return false;          // drive letter
+    return rel.split(/[/\\]/).every((seg) => seg && seg !== '.' && seg !== '..');
   }
 
   /** For the HTTP bridge: size then a ranged stream of a share file. */

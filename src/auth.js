@@ -71,6 +71,21 @@ export function destroySession(token) {
   sessions.delete(token);
 }
 
+/** End every session except the caller's — used when the password changes. */
+export function destroyOtherSessions(keep) {
+  for (const token of sessions.keys()) if (token !== keep) sessions.delete(token);
+}
+
+// Expired sessions are otherwise only dropped when that exact token is
+// presented again, so a long-lived process accumulates them forever.
+const sweep = setInterval(() => {
+  const now = Date.now();
+  for (const [token, s] of sessions) {
+    if (now - s.createdAt > SESSION_TTL_MS) sessions.delete(token);
+  }
+}, 60 * 60 * 1000);
+sweep.unref?.();
+
 /** Pull the session token from a cookie header or Authorization bearer. */
 export function tokenFromRequest(req) {
   const auth = req.headers?.authorization;
@@ -137,11 +152,17 @@ export function throttleFail(ip) {
     return;
   }
   rec.count += 1;
-  // Unbounded growth would be a memory leak on a panel under attack from
-  // many addresses; the window expiry above only prunes what is touched.
+  // Unbounded growth would be a memory leak on a panel under attack from many
+  // addresses (an IPv6 /64 makes buckets cheap). Prune expired entries first,
+  // and if that is not enough, drop the oldest — losing a little history is
+  // better than growing without bound.
   if (attempts.size > 5000) {
     const cutoff = Date.now() - ATTEMPT_WINDOW_MS;
     for (const [k, v] of attempts) if (v.first < cutoff) attempts.delete(k);
+    if (attempts.size > 5000) {
+      const oldest = [...attempts.entries()].sort((a, b) => a[1].first - b[1].first);
+      for (const [k] of oldest.slice(0, attempts.size - 5000)) attempts.delete(k);
+    }
   }
 }
 

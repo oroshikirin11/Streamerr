@@ -6,7 +6,9 @@
  * so nothing here carries a real default.
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from 'fs';
+import {
+  readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, unlinkSync,
+} from 'fs';
 import { resolve, dirname, isAbsolute } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -153,6 +155,34 @@ export function normalizeStoredBitrates(normalize) {
     : null;
 }
 
+/**
+ * Clamp the encoder values that get interpolated into ffmpeg filtergraphs.
+ *
+ * The PUT /api/config handler validates these, but a config.json written by
+ * an older build — or edited by hand — is merged verbatim at import. These
+ * end up inside "scale=W:H" and "color=s=WxH", where a comma starts another
+ * filter, so the file is not a trusted source either.
+ */
+export function normalizeStoredEncoder() {
+  const enc = config.encoder;
+  if (!enc) return null;
+  const fixed = [];
+  const clamp = (key, lo, hi, dflt) => {
+    const n = Number(enc[key]);
+    const safe = Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : dflt;
+    if (enc[key] !== safe) { fixed.push(`${key}=${JSON.stringify(enc[key])}→${safe}`); enc[key] = safe; }
+  };
+  clamp('width', 16, 7680, 1920);
+  clamp('height', 16, 4320, 1080);
+  clamp('fps', 1, 240, 30);
+  clamp('gopSeconds', 1, 60, 2);
+  if (enc.device !== undefined && !/^\/dev\/dri\/[A-Za-z0-9_-]+$/.test(String(enc.device))) {
+    fixed.push(`device=${JSON.stringify(enc.device)}→/dev/dri/renderD128`);
+    enc.device = '/dev/dri/renderD128';
+  }
+  return fixed.length ? fixed : null;
+}
+
 export function ensureDirs() {
   for (const dir of Object.values(config.paths)) {
     mkdirSync(dir, { recursive: true });
@@ -172,6 +202,10 @@ export function saveConfig(patch) {
   // config.json — it holds every setting and the credential hashes, and a
   // corrupt one bricks the service until someone edits it by hand.
   const tmp = `${CONFIG_PATH}.tmp`;
+  // writeFileSync's mode applies only when it CREATES the file. A leftover
+  // .tmp from an interrupted save (or from a build before this was 0600)
+  // keeps its old permissions and then gets renamed over config.json.
+  try { unlinkSync(tmp); } catch { /* nothing to remove */ }
   // 0600: this file holds the Owncast stream key in clear and the panel's
   // password hash. On a shared host the default 0644 hands both to every
   // local account.
@@ -202,12 +236,30 @@ function stripComments(obj) {
 }
 
 /**
+ * Reject anything that is not an RTMP address.
+ *
+ * ffmpeg picks its OUTPUT PROTOCOL from the URL, and `-f flv` only chooses the
+ * muxer — so a target of `file:///etc/cron.d/x` makes ffmpeg write a file
+ * there instead of opening a socket, as the service user. The container runs
+ * as root and bind-mounts the media tree, so that turned "can configure the
+ * panel" into "can write anywhere". `http://` is the same primitive pointed at
+ * the network. Only rtmp/rtmps ever reach ffmpeg as an output.
+ */
+export function assertRtmpUrl(url) {
+  const s = String(url ?? '').trim();
+  if (!/^rtmps?:\/\/[^/\s]+/i.test(s)) {
+    throw new Error('The server address must start with rtmp:// or rtmps://');
+  }
+  return s.replace(/\/+$/, '');
+}
+
+/**
  * The full RTMP target. Kept out of logs and API responses — it embeds the
  * stream key, and RTMP carries it in the handshake as plaintext.
  */
 export function rtmpTarget(cfg = config) {
-  const base = (cfg.owncast.rtmpUrl || '').replace(/\/+$/, '');
-  if (!base) throw new Error('owncast.rtmpUrl is not configured');
+  if (!cfg.owncast.rtmpUrl) throw new Error('owncast.rtmpUrl is not configured');
+  const base = assertRtmpUrl(cfg.owncast.rtmpUrl);
   if (!cfg.owncast.streamKey) throw new Error('owncast.streamKey is not configured');
   return `${base}/${cfg.owncast.streamKey}`;
 }
@@ -228,9 +280,14 @@ export function rtmpTargetRedacted(cfg = config) {
  */
 export function redact(text, cfg = config) {
   if (!text) return text;
+  let out = String(text);
+  // The SMB bridge token rides in the URL ffmpeg is spawned with, and every
+  // spawn logs its full argv — which lands in the debug ring the panel serves
+  // and in `docker logs`. Mask it wherever it appears.
+  out = out.replace(/([?&]t=)[0-9a-f]{32,}/gi, `$1${'*'.repeat(8)}`);
   const key = cfg.owncast?.streamKey;
-  if (!key || key.length < 4) return text;
-  return String(text).split(key).join('*'.repeat(8));
+  if (!key || key.length < 4) return out;
+  return out.split(key).join('*'.repeat(8));
 }
 
 export { CONFIG_PATH, ROOT };
