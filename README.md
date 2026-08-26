@@ -1,5 +1,9 @@
 # Jellystreamerr
 
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE.md)
+<!-- TODO: replace # with your Buy Me a Coffee link -->
+[![Buy me a coffee](https://img.shields.io/badge/☕-Buy%20me%20a%20coffee-ffdd00)](#)
+
 **Turn your media library into a live TV channel.** Jellystreamerr is
 web-controlled playout for [Owncast](https://owncast.online): browse your
 library in the browser, click an episode, and it goes live — subtitles burned
@@ -32,10 +36,12 @@ watch* test link) are Owncast-specific.
 **Contents:** [What it's for](#what-its-for) · [Quick start](#quick-start-docker)
 · [Owncast setup](#owncast-setup)
 · [Hardware and encoders](#hardware-and-encoders) · [How it works](#how-it-works)
-· [Subtitles and audio](#subtitles-and-audio) · [Performance](#performance)
+· [Scheduling](#scheduling) · [Subtitles and audio](#subtitles-and-audio)
+· [Performance](#performance)
 · [Library providers](#library-providers) · [Settings](#settings)
 · [Troubleshooting](#troubleshooting) · [CLI](#cli) · [Security](#security)
 · [Limitations](#limitations) · [From source](#run-from-source)
+· [License](#license)
 
 ## What it's for
 
@@ -280,6 +286,19 @@ RAM-only by design — never disk (see `shm_size` in the quick start). Settings
 has an on/off toggle and a size override; by default the budget fits itself to
 the container's memory.
 
+## Scheduling
+
+The Schedule page turns the queue into a programme:
+
+<img src="docs/screenshots/schedule.png" alt="Schedule: on-air card with track chips, queued show blocks with pinned air times, dead-air warnings" width="100%">
+
+- Queue episodes or whole seasons; air times are projected from each item's
+  real length and grouped by show.
+- **Pin a block to a clock time** — the broadcast waits behind an interval
+  card instead of starting early, or goes off air for the gap if you prefer.
+- Skip the current episode, reorder the queue, or change audio and subtitles
+  live, all without touching the stream.
+
 ## Subtitles and audio
 
 **Tracks are chosen per file, not once per broadcast.** Track indices are
@@ -511,6 +530,24 @@ node src/index.js                 # panel on :8099
 ```
 
 `JELLYSTREAMERR_CONFIG` sets the config path (default `./config.json`).
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, run, and modify for
+any **noncommercial** purpose. Forks and derived versions are welcome, but
+they inherit the same noncommercial terms: nobody can take this and sell it.
+(That makes it source-available rather than OSI "open source" — a deliberate
+choice.)
+
+If Jellystreamerr runs your channel and you want to say thanks, there's a
+*Buy me a coffee* button at the top.
+
+## Built with AI
+
+Developed in close collaboration with Claude (Anthropic). The design
+decisions, testing on real hardware, and everything that ships are reviewed
+by a human — but a large share of the code and documentation was written by
+the model.
 
 ## Development
 

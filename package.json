@@ -1,7 +1,7 @@
 {
   "name": "jellystreamerr",
   "version": "0.1.0",
-  "description": "Web-controlled playout panel — stream your media library to Owncast",
+  "description": "Web-controlled playout panel \u2014 stream your media library to Owncast",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
@@ -19,5 +19,5 @@
     "v9u-smb2": "^1.0.6",
     "ws": "^8.18.0"
   },
-  "license": "MIT"
+  "license": "PolyForm-Noncommercial-1.0.0"
 }

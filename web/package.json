@@ -17,5 +17,6 @@
   },
   "dependencies": {
     "mpegts.js": "^1.8.2"
-  }
+  },
+  "license": "PolyForm-Noncommercial-1.0.0"
 }
