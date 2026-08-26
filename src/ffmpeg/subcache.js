@@ -69,7 +69,21 @@ export function isExtractable(sub) {
   return Boolean(sub && !sub.external && !sub.bitmap && EXT_FOR[sub.codec]);
 }
 
+/** http(s) sources — the SMB bridge, or any future remote library. */
+function isUrl(srcPath) {
+  return /^https?:\/\//i.test(srcPath);
+}
+
 function keyFor(srcPath, typeIndex) {
+  // A URL cannot be stat'ed; key on the URL alone. If the file behind it is
+  // replaced in place the cache goes stale — acceptable for a media library,
+  // where files are added and renamed but practically never edited in place.
+  if (isUrl(srcPath)) {
+    return createHash('sha1')
+      .update(`${srcPath}:${typeIndex}`)
+      .digest('hex')
+      .slice(0, 16);
+  }
   const st = statSync(srcPath);
   return createHash('sha1')
     .update(`${srcPath}:${st.size}:${Math.floor(st.mtimeMs)}:${typeIndex}`)
@@ -86,7 +100,10 @@ function keyFor(srcPath, typeIndex) {
  */
 export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null, signal = null) {
   if (!isExtractable(sub)) return null;
-  if (!existsSync(srcPath)) return null;
+  // existsSync on a URL is always false — this gate is for local paths only.
+  // Skipping extraction for a bridge URL silently re-enabled the in-band
+  // read this module exists to prevent, at N encoders x the whole file.
+  if (!isUrl(srcPath) && !existsSync(srcPath)) return null;
 
   const ext = EXT_FOR[sub.codec];
   mkdirSync(cacheDir, { recursive: true });
@@ -145,7 +162,7 @@ export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null,
  * @returns {Promise<string|null>} directory containing the fonts
  */
 export async function extractFonts(srcPath, cacheDir, signal = null) {
-  if (!existsSync(srcPath)) return null;
+  if (!isUrl(srcPath) && !existsSync(srcPath)) return null;
 
   let dir;
   try {

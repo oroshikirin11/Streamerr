@@ -557,10 +557,33 @@ app.get('/smbmedia/*', async (req, res) => {
       'Content-Type': 'application/octet-stream',
     });
     const s2 = await library.stream(rel, { start, end });
+    if (process.env.JSR_SMB_TRACE) {
+      const t0 = Date.now();
+      const reqs = (globalThis.__bridgeReqs ??= new Map());
+      const id = (globalThis.__bridgeSeq = (globalThis.__bridgeSeq ?? 0) + 1);
+      const entry = { start, t0, sent: 0 };
+      reqs.set(id, entry);
+      if (!globalThis.__bridgeMon) {
+        globalThis.__bridgeMon = setInterval(() => {
+          const now = Date.now();
+          const rows = [...reqs.values()].map((r) =>
+            `${Math.round((now - r.t0) / 1000)}s@${r.start}+${Math.round(r.sent / 1024)}K`);
+          console.log(`[bridge-live] n=${rows.length} ${rows.join(' ')}`);
+        }, 5000);
+        globalThis.__bridgeMon.unref?.();
+      }
+      s2.on('data', (d) => { entry.sent += d.length; });
+      const fin = (why) => { reqs.delete(id);
+        console.log(`[bridge] ${why} r=${start}-${end} sent=${entry.sent} ${Date.now() - t0}ms`); };
+      s2.on('error', (e) => fin('err:' + String(e.message).slice(0, 40)));
+      res.on('close', () => fin('close'));
+      console.log(`[bridge] open#${id} r=${start}-${end} port=${req.socket.remotePort} ua=${String(req.headers['user-agent'] ?? '').slice(0, 24)}`);
+    }
     s2.on('error', () => res.destroy());
     res.on('close', () => s2.destroy?.());
     s2.pipe(res);
   } catch (err) {
+    if (process.env.JSR_SMB_TRACE) console.log(`[bridge] 502 ${err.message}`);
     res.status(502).json({ error: err.message });
   }
 });

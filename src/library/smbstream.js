@@ -101,6 +101,10 @@ _forge.response = function(c) {
 };
 
 export class SmbStreamLibrary {
+  // Eight sessions, three concurrent commands each — see _acquireLane.
+  static POOL = 8;
+  static DEPTH = 3;
+
   constructor(smb = {}, { bridgeBase = '' } = {}) {
     this._cfg = parseSmbTarget(smb);
     this._bridgeBase = bridgeBase;   // e.g. http://127.0.0.1:8099/smbmedia
@@ -112,17 +116,77 @@ export class SmbStreamLibrary {
     return Boolean(this._cfg.host && this._cfg.share);
   }
 
-  _smb() {
-    if (this._client) return this._client;
-    const { host, share, username, password, guest } = this._cfg;
-    this._client = new SMB2({
-      share: `\\\\${host}\\${share}`,
-      domain: 'WORKGROUP',
-      username: guest || !username ? 'guest' : username,
-      password: guest ? '' : password,
-      autoCloseTimeout: 0,           // long broadcasts must not lose the session
-    });
-    return this._client;
+  /**
+   * A POOL of connections, not one. The chunk encoders are many ffmpeg
+   * processes range-reading the bridge at once; over a single SMB session
+   * their requests serialized and a fresh episode took minutes to first
+   * air. Stripes round-robin across the pool, and a global lane budget
+   * keeps one consumer at full wire speed while many share fairly.
+   */
+  _smb(lane = 0) {
+    this._pool ??= [];
+    const i = Math.abs(lane) % SmbStreamLibrary.POOL;
+    if (!this._pool[i]) {
+      const { host, share, username, password, guest } = this._cfg;
+      this._pool[i] = new SMB2({
+        share: `\\\\${host}\\${share}`,
+        domain: 'WORKGROUP',
+        username: guest || !username ? 'guest' : username,
+        password: guest ? '' : password,
+        autoCloseTimeout: 0,         // long broadcasts must not lose the session
+      });
+    }
+    return this._pool[i];
+  }
+
+  /**
+   * Per-connection op budget. The depth is THE load-bearing number: this
+   * client wedges a session outright somewhere past ~3 concurrent
+   * commands (a 16-encoder storm through 3-deep connections passed clean;
+   * raising the global budget so one connection carried 8 hung every op
+   * on it forever — used=32 waiting=32 with zero bytes moving). Width
+   * therefore comes from MORE CONNECTIONS, never deeper queues: eight
+   * sessions, three ops each. Acquisition picks the least-loaded session
+   * so a burst spreads instead of convoying.
+   */
+  _acquireLane(avoid = -1) {
+    this._busy ??= new Array(SmbStreamLibrary.POOL).fill(0);
+    this._waiters ??= [];
+    if (process.env.JSR_SMB_TRACE && !this._laneMon) {
+      this._laneMon = setInterval(() => {
+        console.log(`[smb-lanes] busy=${this._busy.join(',')} waiting=${this._waiters.length}`);
+      }, 3000);
+      this._laneMon.unref?.();
+    }
+    const pick = () => {
+      let best = -1;
+      for (let i = 0; i < this._busy.length; i++) {
+        if (i === avoid && this._busy.length > 1) continue;
+        if (this._busy[i] < SmbStreamLibrary.DEPTH
+            && (best < 0 || this._busy[i] < this._busy[best])) best = i;
+      }
+      return best;
+    };
+    const c = pick();
+    if (c >= 0) {
+      this._busy[c] += 1;
+      return Promise.resolve(c);
+    }
+    return new Promise((res) => this._waiters.push({ res, avoid }));
+  }
+
+  _releaseLane(c) {
+    this._busy[c] -= 1;
+    // Wake waiters that can now be placed (their avoid may skip this slot).
+    for (let i = 0; i < this._waiters.length; ) {
+      const w = this._waiters[i];
+      const free = this._busy.findIndex((n, j) =>
+        n < SmbStreamLibrary.DEPTH && (j !== w.avoid || this._busy.length === 1));
+      if (free < 0) break;
+      this._waiters.splice(i, 1);
+      this._busy[free] += 1;
+      w.res(free);
+    }
   }
 
   /** share-relative path with backslashes, as the protocol wants. */
@@ -132,13 +196,58 @@ export class SmbStreamLibrary {
     return [base, tail].filter(Boolean).join('\\');
   }
 
+  /** EVERY SMB operation passes through the lane budget — not just
+   *  stripe transfers. Sixteen concurrent encoders' open/stat/read storm
+   *  overdrew the server's SMB2 credits and every pending request hung
+   *  with the encoders at 0.1% CPU. Bounded outstanding ops keep credits
+   *  healthy no matter how many consumers pile onto the bridge. */
+  /**
+   * The client connects lazily on the first command, and its handshake
+   * cannot absorb concurrent requests: a spawn burst racing onto a fresh
+   * connection produced EALREADY, double-fired callbacks and ops hung to
+   * their deadline. One trivial command, alone, brings a connection up;
+   * everything else on it waits for that. A failed warm-up forgets the
+   * connection so the next use rebuilds it from scratch.
+   */
+  _ensureReady(c) {
+    this._ready ??= [];
+    this._ready[c] ??= new Promise((resolve, reject) => {
+      this._smb(c).exists(this._p('') || '.', (err) => {
+        if (err) { this._ready[c] = null; this._pool[c] = null; reject(this._friendly(err)); }
+        else resolve();
+      });
+    });
+    return this._ready[c];
+  }
+
+  async _op(fn, avoid = -1) {
+    const c = await this._acquireLane(avoid);
+    try {
+      await this._deadline(this._ensureReady(c), 20_000);
+      // A lane-holding operation may NEVER hang: a wedged op leaked its
+      // lane forever, and twelve leaks meant every later request queued
+      // behind a dead wall (measured: used=12, waiting=52, zero progress).
+      return await this._deadline(fn(c), 20_000);
+    } catch (err) {
+      // The client shares one file handle per (connection, path): when a
+      // concurrent read of the same file finishes, its close invalidates
+      // the handle under everyone else on that connection mid-request.
+      // Purely a timing race — a different connection has its own handle,
+      // so one retry there resolves it every time.
+      if (avoid < 0 && /FILE_CLOSED/i.test(String(err?.code ?? err?.message ?? err))) {
+        return this._op(fn, c);
+      }
+      throw err;
+    } finally { this._releaseLane(c); }
+  }
+
   _readdir(rel) {
-    return new Promise((resolve, reject) => {
-      this._smb().readdir(this._p(rel), { stats: true }, (err, list) => {
+    return this._op((c) => new Promise((resolve, reject) => {
+      this._smb(c).readdir(this._p(rel), { stats: true }, (err, list) => {
         if (err) reject(this._friendly(err));
         else resolve(list);
       });
-    });
+    }));
   }
 
   _friendly(err) {
@@ -295,14 +404,14 @@ export class SmbStreamLibrary {
 
   /** For the HTTP bridge: size then a ranged stream of a share file. */
   size(rel) {
-    return new Promise((resolve, reject) => {
-      this._smb().getSize(this._p(rel), (err, n) => err ? reject(this._friendly(err)) : resolve(n));
-    });
+    return this._op((c) => new Promise((resolve, reject) => {
+      this._smb(c).getSize(this._p(rel), (err, n) => err ? reject(this._friendly(err)) : resolve(n));
+    }));
   }
 
-  _rawStream(rel, opts) {
+  _rawStream(rel, opts, lane = 0) {
     return new Promise((resolve, reject) => {
-      this._smb().createReadStream(this._p(rel), opts, (err, s) =>
+      this._smb(lane).createReadStream(this._p(rel), opts, (err, s) =>
         err ? reject(this._friendly(err)) : resolve(s));
     });
   }
@@ -324,30 +433,79 @@ export class SmbStreamLibrary {
     const STRIPE = 4 * 1024 * 1024;
     const LANES = 4;
     // Small reads don't benefit — one stripe, no orchestration.
-    if (total <= STRIPE) return this._rawStream(rel, { start: s0, end: e0 });
+    if (total <= STRIPE) {
+      // Budgeted open; the transfer itself is small.
+      return this._op((c) => this._rawStream(rel, { start: s0, end: e0 }, c));
+    }
 
     const { Readable } = await import('stream');
     const self = this;
-    let next = s0;              // next stripe to LAUNCH
-    let emit = s0;              // next stripe to EMIT
+    // Emission is by STRIPE ORDER, never by byte arithmetic: a stripe that
+    // arrives short would desync a byte-based pointer and hang the stream
+    // silently. Short stripes are an integrity failure and error out loud.
+    // SLOW START. ffmpeg's opening moves are probes: read a few KB, seek
+    // away, abandon the connection. Eagerly prefetching 16MB per request
+    // meant the bridge shoveled megabytes into abandoned sockets while
+    // real reads starved behind the waste — node at 54% CPU, encoders at
+    // 0.1%. The first stripes are small and sequential; full parallel
+    // striping engages only once the consumer has proven it is streaming.
+    const sizes = [256 * 1024, 1024 * 1024, 2 * 1024 * 1024];
+    const order = [];
+    {
+      let from = s0;
+      for (let k = 0; from <= e0; k++) {
+        const len = Math.min(sizes[k] ?? STRIPE, e0 - from + 1);
+        order.push({ from, to: from + len - 1 });
+        from += len;
+      }
+    }
+    let launchIdx = 0;
+    let emitIdx = 0;
     const done = new Map();     // stripeStart -> Buffer
     const inflight = new Map(); // stripeStart -> Promise
     let failed = null;
 
     const launch = () => {
-      while (inflight.size < LANES && next <= e0 && !failed) {
-        const from = next;
-        const to = Math.min(from + STRIPE - 1, e0);
-        next = to + 1;
+      // PREFETCH EARNS ITS DEPTH. ffmpeg's opening moves probe ~1.3MB and
+      // hang up; with sixteen encoders probing at once, every megabyte
+      // fetched beyond what the consumer actually reads is bandwidth
+      // stolen from a neighbour. Measured with eager 4-deep prefetch:
+      // wire at full line rate, ~90% of it into abandoned sockets, no
+      // encoder finishing its probe in two minutes. So: one stripe at a
+      // time until three have been drained, two until six, and only a
+      // proven long reader gets full parallel striping.
+      const cap = emitIdx < 3 ? 1 : emitIdx < 6 ? 2 : LANES;
+      while (inflight.size < cap && launchIdx < order.length
+          && launchIdx - emitIdx < cap + 1 && !failed) {
+        const { from, to } = order[launchIdx];
+        launchIdx += 1;
         inflight.set(from, (async () => {
-          const st = await self._rawStream(rel, { start: from, end: to });
-          const parts = [];
-          await new Promise((res, rej) => {
-            st.on('data', (d) => parts.push(d));
-            st.on('end', res);
-            st.on('error', rej);
+          let lastConn = -1;
+          const pull = (avoid) => self._op(async (c) => {
+            lastConn = c;
+            const st = await self._rawStream(rel, { start: from, end: to }, c);
+            const parts = [];
+            await new Promise((res, rej) => {
+              st.on('data', (d) => parts.push(d));
+              st.on('end', res);
+              st.on('error', rej);
+            });
+            const buf = Buffer.concat(parts);
+            if (buf.length !== to - from + 1) {
+              throw new Error(`short read from the share at offset ${from}: `
+                + `${buf.length} of ${to - from + 1} bytes`);
+            }
+            return buf;
           });
-          done.set(from, Buffer.concat(parts));
+          let buf;
+          try {
+            buf = await pull(-1);
+          } catch {
+            // One retry on a different connection — a single wedged or
+            // reset session must not fail the whole stream.
+            buf = await pull(lastConn);
+          }
+          done.set(from, buf);
           inflight.delete(from);
         })().catch((err) => { failed = err; inflight.delete(from); }));
       }
@@ -356,17 +514,23 @@ export class SmbStreamLibrary {
     const out = new Readable({
       async read() {
         for (;;) {
+          if (this.destroyed) return;   // consumer hung up — stop fetching
           if (failed) { this.destroy(failed); return; }
-          if (emit > e0) { this.push(null); return; }
+          if (emitIdx >= order.length) { this.push(null); return; }
           launch();
-          if (done.has(emit)) {
-            const buf = done.get(emit);
-            done.delete(emit);
-            emit += buf.length;
+          const key = order[emitIdx]?.from;
+          if (done.has(key)) {
+            const buf = done.get(key);
+            done.delete(key);
+            emitIdx += 1;
             if (!this.push(buf)) return;   // backpressure — resume on next read()
             continue;
           }
-          // wait for any lane to land, then re-check
+          if (!inflight.size) {
+            // nothing running and nothing to emit — never spin, never hang
+            this.destroy(new Error('stream underrun reading the share'));
+            return;
+          }
           await Promise.race([...inflight.values()]).catch(() => {});
         }
       },
