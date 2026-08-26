@@ -38,6 +38,12 @@ services:
 
     environment:
       - JELLYSTREAMERR_CONFIG=/config/config.json
+      # Uncomment when this sits behind a reverse proxy. It makes the panel
+      # trust X-Forwarded-For/-Proto/-Host, which it needs for a per-client
+      # login rate limit, the Secure cookie flag over HTTPS, and the
+      # WebSocket origin check. Only with a proxy in front — those headers
+      # are forgeable by anyone who can reach the port directly.
+      # - JELLYSTREAMERR_TRUST_PROXY=1
       # Leave the VAAPI driver to autodetection. Only force it if `probe`
       # reports vaapi failing on hardware you know works — iHD for Intel
       # Broadwell+, i965 for older Intel, radeonsi for AMD.

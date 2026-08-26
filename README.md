@@ -123,6 +123,7 @@ services:
 
     environment:
       - JELLYSTREAMERR_CONFIG=/config/config.json
+      # - JELLYSTREAMERR_TRUST_PROXY=1   # only behind a reverse proxy
 
     volumes:
       - ./config:/config            # settings + your stream key
@@ -454,6 +455,12 @@ documentation recommends; changing it can break segmenting.
 - **The panel shows "Lost connection to Jellystreamerr".** The server isn't
   answering. Check `docker compose logs jellystreamerr` — unhandled faults are
   logged with a stack trace rather than taking the process down.
+- **"The server address must start with rtmp:// or rtmps://".** Only those two
+  schemes are accepted. ffmpeg takes its output protocol from the URL, so any
+  other scheme would make it write somewhere instead of streaming.
+- **Everything works but the timeline and preview are frozen**, while page
+  reloads still show the right state. That is the WebSocket being refused —
+  see [Behind a reverse proxy](#behind-a-reverse-proxy).
 - **Subtitles don't render at all.** The image ships fonts and fontconfig; the
   `subtitles` filter renders *nothing* without them. If you're running from
   source, that's the first thing to check.
@@ -496,10 +503,31 @@ address.
 
 Stream keys are redacted from every log line, including the Console page.
 
-**Behind a reverse proxy**, set `JELLYSTREAMERR_TRUST_PROXY=1`. Without it the
-panel ignores `X-Forwarded-For`/`X-Forwarded-Proto` — which is the safe default,
-since a direct caller could otherwise forge them to dodge the login rate limit —
-but that also means every request looks like it came from the proxy.
+Changing your password signs out every other session, so it doubles as a
+"log out everywhere" button.
+
+Responses carry `Content-Security-Policy`, `X-Frame-Options: DENY` and
+`nosniff`. The panel refuses to be framed — it has buttons that start and stop
+a live broadcast.
+
+### Behind a reverse proxy
+
+Set `JELLYSTREAMERR_TRUST_PROXY=1`. Without it the panel ignores
+`X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` — the safe
+default, since a direct caller could otherwise forge them — but that costs you
+three things:
+
+- Every request looks like it came from the proxy, so all clients share one
+  login rate-limit bucket and a stranger's failed guesses lock you out too.
+- The session cookie never gets the `Secure` flag, even over HTTPS.
+- If your proxy **rewrites** the `Host` header (nginx does by default; Caddy
+  preserves it), the live status feed and the preview window stop working.
+  They are WebSockets, and the panel checks their `Origin` against the host
+  it thinks it is serving.
+
+With the flag set, forward the original host — `proxy_set_header Host $host;`
+on nginx, or Caddy's default. Only turn it on if the panel is reachable
+**only** through the proxy: it means trusting whatever those headers say.
 
 RTMP sends the stream key **in plaintext**, so the link to Owncast should not
 cross the open internet — put it over a VPN or tailnet, and the ingest port

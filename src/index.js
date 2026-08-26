@@ -1289,9 +1289,16 @@ const previewWss = new WebSocketServer({ noServer: true });
 function originAllowed(req) {
   const origin = req.headers.origin;
   if (!origin) return true;                 // not a browser
+  // Behind a proxy the Host header may have been rewritten to the upstream
+  // (nginx does this by default; Caddy preserves the original), which would
+  // make every legitimate handshake look cross-origin and silently kill the
+  // live feed. Trust the forwarded name only when the operator has said
+  // there IS a proxy — otherwise a direct caller could forge it.
+  const expected = (process.env.JELLYSTREAMERR_TRUST_PROXY
+    && String(req.headers['x-forwarded-host'] ?? '').split(',')[0].trim())
+    || req.headers.host;
   try {
-    const o = new URL(origin);
-    return o.host === req.headers.host;
+    return new URL(origin).host === expected;
   } catch { return false; }
 }
 
