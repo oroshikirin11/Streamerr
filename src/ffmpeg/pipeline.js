@@ -1414,7 +1414,11 @@ export class PipelinePlayout extends EventEmitter {
     // see below. The scheduler must know: with a card up it must not
     // deliver until two chunks are in hand, or the card dies after the
     // short opener and the publisher starves through chunk 1's encode.
-    const cover = flushed && Boolean(this.publisher) && !this._stopping;
+    // GPU-class (cache-mode) clips also cover the INITIAL connect, so a
+    // fresh broadcast or an out-of-cache seek goes on air instantly on
+    // real content instead of waiting behind the encode gate.
+    const cover = (flushed && Boolean(this.publisher) && !this._stopping)
+      || (noSubCache && !this._stopping);
     const sched = new ChunkScheduler({
       srcPath: item.srcPath,
       startOffset: offset,
@@ -1537,12 +1541,35 @@ export class PipelinePlayout extends EventEmitter {
     // card — the bank's tail of the previous episode covers it instead.
     if (cover) {
       this.holding = true;
-      this._spawnSource(buildHoldArgs({
-        profile: this.profile,
-        tsOffset: this.timeline,
-        statsPeriodMs: this.statsPeriodMs,
-        label: 'Loading',
-      }), { kind: 'hold' });
+      if (noSubCache) {
+        // These clips stream at or above realtime by definition — that is
+        // why they are in cache mode at all. So the cover is not a card:
+        // it is the STREAMING SOURCE playing the real content at the
+        // target, instantly, exactly like the pre-cache path — while the
+        // chunker rebuilds behind it. The ready handler kills it and
+        // splices to chunks the same way it killed the card. Viewers see
+        // content within a second everywhere on the timeline; the card
+        // remains only for CPU-burn clips, whose streaming path cannot
+        // keep up (which is why THEY are chunked).
+        this._spawnSource(buildSourceArgs({
+          srcPath: item.srcPath,
+          offset,
+          profile: this.profile,
+          selection: this.selection,
+          tsOffset: this.timeline,
+          statsPeriodMs: this.statsPeriodMs,
+          extractedPath: cached?.path ?? null,
+          fontsDir: cached?.fontsDir ?? null,
+          duration: this.current.duration,
+        }), { kind: 'hold' });
+      } else {
+        this._spawnSource(buildHoldArgs({
+          profile: this.profile,
+          tsOffset: this.timeline,
+          statsPeriodMs: this.statsPeriodMs,
+          label: 'Loading',
+        }), { kind: 'hold' });
+      }
     }
 
     // Into the bank, not straight at the publisher — see _bankFeed. A
