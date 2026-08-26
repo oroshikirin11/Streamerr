@@ -12,6 +12,18 @@ your library  →  Jellystreamerr  →  Owncast  →  viewers
  (any format)     (one clean stream)
 ```
 
+<img src="docs/screenshots/live.png" alt="Live broadcast: poster grid, transport bar with next episode, floating preview with burned-in subtitles, encoder running at 6.9x" width="100%">
+
+<p align="center">
+  <img src="docs/screenshots/library.png" alt="Library poster grid" width="49%">
+  <img src="docs/screenshots/settings.png" alt="Settings: Owncast connection and output profile" width="49%">
+</p>
+
+*On air: the encoder sprinting ahead at 6.9× (top left), the cache band growing
+along the timeline, and the floating preview showing exactly what viewers get —
+subtitles already burned in. Every title in these shots is generated demo
+content.*
+
 Owncast is our choice, not a requirement — the output is one standard RTMP
 stream (H.264 + AAC), so **any RTMP ingest works**: MediaMTX, nginx-rtmp,
 even Twitch or YouTube. Only the Owncast extras (title sync, the *Send 30s to
