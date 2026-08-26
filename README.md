@@ -180,10 +180,11 @@ On the VPS, in this order:
 2. **Log into the admin** at `http://<vps>:8080/admin` and change the default
    admin password.
 3. **Set a stream key** under *Configuration → Server Setup → Stream Keys*.
-4. **Video settings**: leave the segment/latency defaults. Jellystreamerr
-   already sends stream-ready H.264 + AAC with 2-second keyframes, so give the
-   output variant a low CPU setting or passthrough — the VPS should not
-   re-encode what is already encoded for it.
+4. **Enable video passthrough** under *Configuration → Video → Stream output*:
+   edit the output entry, open *Advanced*, turn on *Video passthrough*.
+   Jellystreamerr already sends stream-ready H.264 + AAC with 2-second
+   keyframes — without passthrough the VPS re-encodes it for nothing. Leave
+   the segment/latency defaults.
 5. **Optional, for title sync**: create an access token under
    *Integrations* and put it with the server URL into Jellystreamerr's
    Owncast settings. The watch page then shows what's playing.
