@@ -439,6 +439,12 @@ export class ChunkScheduler extends EventEmitter {
         }
       }
       this._evictKept();
+      // The encoders must not keep working BEHIND the jump: scheduling
+      // continued from where it was, producing chunks for skipped-over
+      // content that could never deliver — they inflated the ahead band
+      // by roughly the seek distance and squatted in the RAM budget
+      // forever. Scheduling resumes from the jump target.
+      this.nextToSchedule = Math.max(this.nextToSchedule, i);
     } else {
       // Backward: wake the retained chunks from target to the old
       // playhead — they re-deliver, and everything already queued AHEAD
