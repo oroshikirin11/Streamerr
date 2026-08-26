@@ -662,11 +662,27 @@ export class PipelinePlayout extends EventEmitter {
     // specific chunk, since workers finish out of order.
     if (this.scheduler) {
       const head = onAudioGrid(this.timeline + 0.064);
-      const at = this.scheduler.jumpTo(next, head);
+      const sched = this.scheduler;
+      const at = sched.jumpTo(next, head);
       if (at != null) {
         this.position = next;
         this.emit('log', `[cache] seek to ${next.toFixed(0)}s served from the `
           + `run-ahead cache — no re-encode\n`);
+        // Safety net: a jump whose delivery stalls (a wedged remux, a slow
+        // disk, anything) starved the publisher in silence until Owncast
+        // hung up — seen live on the N100 while the same path passes clean
+        // on fast hardware. If no bytes reach the publisher within a few
+        // seconds of the jump, abandon it and rebuild through the card
+        // path, which is slow but cannot starve.
+        const pubAt = this._published ?? 0;
+        setTimeout(() => {
+          if (this.scheduler !== sched || this._stopping) return;
+          if ((this._published ?? 0) > pubAt) return;
+          this.emit('warn', 'cache seek stalled — rebuilding at the target instead');
+          this._flushed = true;   // the bank is already flushed and empty
+          this._play(this.current?.item ?? null, next,
+            { duration: this.current?.duration });
+        }, 5000);
         this.emit('discontinuity');
         this.emit('seeked', { position: next });
         return next;

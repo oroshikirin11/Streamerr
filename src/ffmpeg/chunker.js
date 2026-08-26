@@ -497,7 +497,7 @@ export class ChunkScheduler extends EventEmitter {
       '-output_ts_offset', offset.toFixed(3),
       '-mpegts_flags', '+resend_headers+initial_discontinuity',
       '-f', 'mpegts', shifted,
-    ], (err) => after(err));
+    ], { timeout: 15000 }, (err) => after(err));
     let after;
 
     if (jump) {
@@ -518,7 +518,7 @@ export class ChunkScheduler extends EventEmitter {
         ...(jump.trim > 0.02 ? ['-ss', jump.trim.toFixed(3)] : []),
         '-i', record.out, '-c', 'copy',
         '-muxdelay', '0', '-muxpreload', '0', '-f', 'mpegts', cutFile,
-      ], (terr) => {
+      ], { timeout: 15000 }, (terr) => {
         if (terr) { after(terr); return; }
         execFile('ffmpeg', [
           '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
@@ -527,7 +527,7 @@ export class ChunkScheduler extends EventEmitter {
           '-output_ts_offset', jump.head.toFixed(3),
           '-mpegts_flags', '+resend_headers+initial_discontinuity',
           '-f', 'mpegts', shifted,
-        ], (err) => { safeUnlink(cutFile); after(err); });
+        ], { timeout: 15000 }, (err) => { safeUnlink(cutFile); after(err); });
       });
     } else {
       run(0, this.tsOffsetOf(this._startOf(record.index)) + this.shift);
@@ -547,7 +547,7 @@ export class ChunkScheduler extends EventEmitter {
       // actually ends — measured, not assumed, because the keyframe snap
       // decides the true cut.
       execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
-        '-of', 'csv=p=0', shifted], (perr, out) => {
+        '-of', 'csv=p=0', shifted], { timeout: 15000 }, (perr, out) => {
         const dur = Number(String(out ?? '').trim());
         this._jump = null;
         if (perr || !Number.isFinite(dur) || dur <= 0) {

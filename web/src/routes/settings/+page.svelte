@@ -545,6 +545,14 @@
           switches off rather than touching a disk. Applies from the next
           broadcast.
         </p>
+        <p class="muted small" style="margin-top:6px;">
+          Only media that must be processed on the CPU — subtitle burn-in
+          the GPU cannot composite — uses the cache: those encodes run near
+          realtime, so working ahead is what makes seeking and pausing
+          instant. GPU-processed media already restarts anywhere in under a
+          second and streams at realtime by design, so it plays without a
+          cache and shows no cache bar on the timeline.
+        </p>
       </div>
     {/if}
   </section>
