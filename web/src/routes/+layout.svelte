@@ -108,6 +108,8 @@
       } else if (msg.type === 'progress') {
         position = msg.payload.position;
         speed = msg.payload.speed;
+        if (msg.payload.cachedAhead != null) stream.cachedAhead = msg.payload.cachedAhead;
+        if (msg.payload.cachedBehind != null) stream.cachedBehind = msg.payload.cachedBehind;
         if (msg.payload.buffer != null && !counting && !paused) {
           if (msg.payload.bufferMax) bufMax = msg.payload.bufferMax;
           bufPts = [...bufPts.slice(-89), msg.payload.buffer];

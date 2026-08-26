@@ -361,10 +361,18 @@ function buildEngine({ profile, selection }) {
   e.on('queue', () => broadcast('stream', streamStatus()));
   e.on('seeked', () => broadcast('stream', streamStatus()));
   e.on('selection', () => broadcast('stream', streamStatus()));
-  e.on('progress', (b) => broadcast('progress', {
-    position: b.position, speed: b.speed, drops: b.drops,
-    buffer: b.buffer, bufferMax: b.bufferMax,
-  }));
+  e.on('progress', (b) => {
+    // The cache bands ride the half-second progress tick. They used to
+    // travel only on rare status events, so the panel's bar froze at
+    // whatever the cache looked like seconds after go-live — an engine
+    // holding the whole episode while the bar showed a sliver.
+    const s = e.snapshot();
+    broadcast('progress', {
+      position: b.position, speed: b.speed, drops: b.drops,
+      buffer: b.buffer, bufferMax: b.bufferMax,
+      cachedAhead: s.cachedAhead ?? 0, cachedBehind: s.cachedBehind ?? 0,
+    });
+  });
   e.on('warn', (m) => { dpush('warn', m); broadcast('warn', { message: redact(String(m)) }); });
   e.on('log', (m) => dpush('ffmpeg', m));
   // Distinct from a generic warning: this one predicts the stream failing.
