@@ -80,7 +80,7 @@
     await refreshAuth();
     ready = true;
     const mock = import.meta.env.DEV && page.url.searchParams.has('mock');
-    if (authed && !mock) startFeed();
+    if (authed && !mock) await enterApp();
     // Dev-only playbar preview (`npm run dev` + ?mock): the transport bar only
     // renders while something streams, which makes styling it require a live
     // broadcast. The real feed is skipped so it cannot overwrite the fake
@@ -114,6 +114,41 @@
     }
   }
 
+  /** Poll while the live feed is down, so the panel cannot show stale state. */
+  let feedPoll = null;
+  function onFeedLiveness(up, code) {
+    if (up) {
+      clearInterval(feedPoll);
+      feedPoll = null;
+      return;
+    }
+    if (code === 4401) {   // session gone — the gate is the honest answer
+      refreshAuth();
+      return;
+    }
+    if (feedPoll) return;
+    feedPoll = setInterval(async () => {
+      try { stream = await api.streamStatus(); } catch { /* keep trying */ }
+    }, 5000);
+  }
+
+  /**
+   * Called once we know we are signed in, from BOTH the page-load path and the
+   * sign-in path — they used to differ, and the sign-in path was the one most
+   * people take after a redeploy.
+   *
+   * Ask for the real state first. `stream` starts at 'stopped' and the socket
+   * was the only thing that ever changed it, so a socket that never connected
+   * left the panel calmly reporting "Offline" over a running broadcast, with
+   * no transport bar and no preview. Starting the feed must also never throw
+   * into the caller: it was inside login()'s try, so a transport failure
+   * surfaced as "your password is wrong".
+   */
+  async function enterApp() {
+    try { stream = await api.streamStatus(); } catch { /* feed may still recover */ }
+    try { startFeed(); } catch { onFeedLiveness(false); }
+  }
+
   function startFeed() {
     connectStatus((msg) => {
       if (msg.type === 'stream') {
@@ -142,7 +177,7 @@
         toast = { kind: msg.type, message: msg.payload.message };
         setTimeout(() => { toast = null; }, 8000);
       }
-    });
+    }, onFeedLiveness);
   }
 
   async function login(e) {
@@ -154,7 +189,7 @@
       else await api.setupPassword(password);
       password = '';
       await refreshAuth();
-      startFeed();
+      await enterApp();
     } catch (err) {
       loginError = err.message;
     } finally {

@@ -89,7 +89,7 @@ export const api = {
 };
 
 /** Live status feed. Reconnects on drop — the panel is left open for hours. */
-export function connectStatus(onMessage) {
+export function connectStatus(onMessage, onLiveness = null) {
   let ws = null;
   let closed = false;
   let retry = 1000;
@@ -104,9 +104,13 @@ export function connectStatus(onMessage) {
         onMessage(JSON.parse(ev.data));
       } catch { /* ignore malformed frames */ }
     };
-    ws.onopen = () => { retry = 1000; };
-    ws.onclose = () => {
+    ws.onopen = () => { retry = 1000; onLiveness?.(true); };
+    ws.onclose = (ev) => {
       if (closed) return;
+      // Report the close code: 4401 means the session is gone (sign in
+      // again), anything else is a transport problem. Silence here is what
+      // made a dead feed indistinguishable from an idle server.
+      onLiveness?.(false, ev?.code);
       setTimeout(open, retry);
       retry = Math.min(retry * 2, 15000);
     };
