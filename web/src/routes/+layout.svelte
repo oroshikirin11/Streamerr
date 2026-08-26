@@ -493,8 +493,20 @@
   <PreviewWindow bottomInset={footerH + 14} onclose={togglePreview} />
 {/if}
 
+{#if stream.status === 'starting' && stream.playing}
+  <!-- Pre-build indicator: the encode gate is filling the cache before
+       going live. Sits in the toast corner and stays until on air. -->
+  <div class="toast prebuild">
+    <span class="spin"></span>
+    Building cache before going live{stream.cachedAhead > 0.5
+      ? ` — ${Math.round(stream.cachedAhead)}s ready`
+      : '…'}
+  </div>
+{/if}
 {#if toast}
-  <div class="toast" class:error={toast.kind === 'error'}>{toast.message}</div>
+  <!-- Raised above the pre-build chip when both occupy the corner. -->
+  <div class="toast" class:error={toast.kind === 'error'}
+       class:raised={stream.status === 'starting' && stream.playing}>{toast.message}</div>
 {/if}
 
 <style>
@@ -769,6 +781,18 @@
      the navigation, so a warning can sit there for its eight seconds
      without covering the library, the queue or the transport bar — which
      is exactly what it did in the bottom-right corner. */
+  .toast.raised { bottom: 64px; }
+  .toast.prebuild {
+    border-left-color: var(--accent);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .toast .spin {
+    width: 11px; height: 11px; flex-shrink: 0;
+    border: 2px solid var(--surface-2); border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: jsr-spin .9s linear infinite;
+  }
+  @keyframes jsr-spin { to { transform: rotate(360deg); } }
   .toast {
     position: fixed; bottom: 10px; left: 10px;
     width: calc(var(--sidebar) - 20px);

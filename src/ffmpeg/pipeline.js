@@ -1496,6 +1496,12 @@ export class PipelinePlayout extends EventEmitter {
       if (this.publisher) return;
       this.emit('log', '[chunks] cushion encoded — connecting\n');
       this._spawnPublisher();
+      if (this.status === 'starting') {
+        this.status = 'running';
+        this._lastBlockAt = Date.now();
+        this._lastAiredAt = Date.now();
+        this.emit('status', this.status);
+      }
     });
     // Chunk workers that keep failing must end the broadcast rather than
     // marching silently through the queue: the streaming path has this
@@ -1585,9 +1591,13 @@ export class PipelinePlayout extends EventEmitter {
           // survived to the first delivery.
           this.emit('discontinuity');
         }
-        if (this.status === 'starting') {
-          // Same moment the streaming path claims 'running': the first
-          // bytes on their way out. Until this the watchdog stays off.
+        if (this.status === 'starting' && this.publisher) {
+          // Running means AIRING. Flipping on the first encoded byte —
+          // before the publisher even existed — made the panel's clock
+          // track the encoder through the pre-live minute and then snap
+          // back to 0:00 at connect. Until the publisher is up, the
+          // broadcast is honestly still starting: the clock sits at 0:00
+          // and the cache band shows the cushion being built.
           this.status = 'running';
           this._lastBlockAt = Date.now();
           this._lastAiredAt = Date.now();
