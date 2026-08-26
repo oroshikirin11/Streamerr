@@ -41,6 +41,11 @@
   let previewOpen = $state(localStorage.getItem('jsr-preview-open') !== '0');
   /** Measured, not assumed — the window docks just above the transport bar. */
   let footerH = $state(76);
+  // The Audio & subs panel opens BELOW the transport bar, so while it is open
+  // the bar is no longer at the bottom of the viewport. The floating preview
+  // docks itself relative to that bottom edge, so without counting the panel
+  // it lands on top of the track list and swallows the clicks meant for it.
+  let panelH = $state(0);
   function togglePreview() {
     previewOpen = !previewOpen;
     localStorage.setItem('jsr-preview-open', previewOpen ? '1' : '0');
@@ -490,7 +495,7 @@
       </footer>
 
       {#if tracks}
-        <div class="panel">
+        <div class="panel" bind:clientHeight={panelH}>
           <div class="phead">
             <strong>{tracks.title}</strong>
             <span class="muted small">{tracks.chosen.reason}</span>
@@ -536,7 +541,7 @@
 {#if authed && previewAllowed && previewOpen}
   <!-- Keyed on nothing but presence: mounting connects, unmounting tears the
        player down, so going off air cleans up by itself. -->
-  <PreviewWindow bottomInset={footerH + 14} onclose={togglePreview} />
+  <PreviewWindow bottomInset={footerH + (tracks ? panelH : 0) + 14} onclose={togglePreview} />
 {/if}
 
 {#if stream.playing && (stream.status === 'starting'
