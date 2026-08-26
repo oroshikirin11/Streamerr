@@ -1,7 +1,6 @@
 # Jellystreamerr
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE.md)
-[![Buy me a coffee](https://img.shields.io/badge/☕-Buy%20me%20a%20coffee-ffdd00)](https://buymeacoffee.com/oroshikirin11)
 
 **Turn your media library into a live TV channel.** Jellystreamerr is
 web-controlled playout for [Owncast](https://owncast.online): browse your
@@ -538,8 +537,9 @@ they inherit the same noncommercial terms: nobody can take this and sell it.
 (That makes it source-available rather than OSI "open source" — a deliberate
 choice.)
 
-If Jellystreamerr runs your channel and you want to say thanks, there's a
-*Buy me a coffee* button at the top.
+If Jellystreamerr runs your channel and you want to say thanks:
+
+<a href="https://buymeacoffee.com/oroshikirin11"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>
 
 ## Built with AI
 
