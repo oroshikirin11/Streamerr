@@ -172,7 +172,10 @@ export function saveConfig(patch) {
   // config.json — it holds every setting and the credential hashes, and a
   // corrupt one bricks the service until someone edits it by hand.
   const tmp = `${CONFIG_PATH}.tmp`;
-  writeFileSync(tmp, JSON.stringify(stripComments(merged), null, 2) + '\n');
+  // 0600: this file holds the Owncast stream key in clear and the panel's
+  // password hash. On a shared host the default 0644 hands both to every
+  // local account.
+  writeFileSync(tmp, JSON.stringify(stripComments(merged), null, 2) + '\n', { mode: 0o600 });
   renameSync(tmp, CONFIG_PATH);
 
   for (const key of Object.keys(config)) delete config[key];

@@ -99,6 +99,13 @@ export function ensureSmbMount(target, runDir) {
     const opts = ['ro', 'iocharset=utf8'];
     if (guest || (!username && !password)) opts.push('guest');
     else {
+      // A comma is CIFS's own option separator, so a value containing one
+      // appends mount options of the caller's choosing (rw, uid=0, …).
+      for (const [label, v] of [['username', username], ['password', password]]) {
+        if (v && /[,\n\r]/.test(String(v))) {
+          throw new Error(`SMB ${label} may not contain a comma or newline.`);
+        }
+      }
       opts.push(`username=${username}`);
       if (password) opts.push(`password=${password}`);
     }

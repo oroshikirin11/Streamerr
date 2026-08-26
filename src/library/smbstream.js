@@ -105,9 +105,10 @@ export class SmbStreamLibrary {
   static POOL = 8;
   static DEPTH = 3;
 
-  constructor(smb = {}, { bridgeBase = '' } = {}) {
+  constructor(smb = {}, { bridgeBase = '', bridgeToken = '' } = {}) {
     this._cfg = parseSmbTarget(smb);
     this._bridgeBase = bridgeBase;   // e.g. http://127.0.0.1:8099/smbmedia
+    this.bridgeToken = bridgeToken;
     this._client = null;
     this._paths = new Map();         // id -> share-relative path ('' = root)
   }
@@ -399,7 +400,21 @@ export class SmbStreamLibrary {
   resolvePath(episode) {
     const rel = episode.rel ?? this._paths.get(episode.id);
     if (rel == null) throw new Error('Unknown media path');
-    return `${this._bridgeBase}/${rel.split('/').map(encodeURIComponent).join('/')}`;
+    const path = rel.split('/').map(encodeURIComponent).join('/');
+    const tok = this.bridgeToken;
+    return `${this._bridgeBase}/${path}${tok ? `?t=${tok}` : ''}`;
+  }
+
+  /**
+   * Share-relative paths are built by the scanner, never by a caller — so a
+   * request carrying '..' did not come from us. Refuse rather than hand it
+   * to the server and trust the server to say no: the configured subfolder
+   * is a real boundary and nothing else was enforcing it.
+   */
+  static safeRel(rel) {
+    if (typeof rel !== 'string' || !rel) return false;
+    if (rel.includes('\0')) return false;
+    return rel.split('/').every((seg) => seg && seg !== '.' && seg !== '..');
   }
 
   /** For the HTTP bridge: size then a ranged stream of a share file. */

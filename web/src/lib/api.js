@@ -21,7 +21,7 @@ async function request(method, path, body) {
     throw err;
   }
 
-  if (res.status === 401) {
+  if (res.status === 401 && path !== '/api/auth/login') {
     const err = new Error('Not authenticated');
     err.unauthenticated = true;
     throw err;

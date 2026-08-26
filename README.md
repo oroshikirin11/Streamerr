@@ -152,9 +152,10 @@ safe value.
 docker compose up -d --build
 ```
 
-**5. Open `http://<host>:8099`.** On first run you set a password (the panel can
-start broadcasts and stores your stream key, so it isn't left open), then an
-onboarding wizard walks through five validating steps:
+**5. Open `http://<host>:8099`.** The first screen makes you choose a password —
+the panel can start broadcasts and holds your stream key, so it refuses to do
+anything until it has one. Then an onboarding wizard walks through five
+validating steps:
 
 1. **Owncast** — RTMP address and stream key, from your Owncast admin page.
    There's a *Send 30s to watch* button so you can confirm video actually
@@ -482,12 +483,23 @@ through the real engine, and asserts one publisher process survived all of it.
 
 ## Security
 
-The panel is **password-protected** (scrypt, set on first run) because it can
-start broadcasts and holds your Owncast stream key. Secrets are write-only from
-the browser's perspective: the API returns a sentinel, never the value, and
-`config.json` is gitignored so the repo stays publishable.
+The panel is **password-protected** (scrypt, forced on first run) because it can
+start broadcasts and holds your Owncast stream key. Until a password is set the
+API answers nothing but the two endpoints setup itself needs, so a fresh
+container is never briefly open. Secrets are write-only from the browser's
+perspective: the API returns a sentinel, never the value, and `config.json` is
+gitignored (and written `0600`) so the repo stays publishable.
+
+Passwords are stored as scrypt hashes with a per-password random salt — never
+in clear, and the hash never leaves the server. Login is rate limited per
+address.
 
 Stream keys are redacted from every log line, including the Console page.
+
+**Behind a reverse proxy**, set `JELLYSTREAMERR_TRUST_PROXY=1`. Without it the
+panel ignores `X-Forwarded-For`/`X-Forwarded-Proto` — which is the safe default,
+since a direct caller could otherwise forge them to dodge the login rate limit —
+but that also means every request looks like it came from the proxy.
 
 RTMP sends the stream key **in plaintext**, so the link to Owncast should not
 cross the open internet — put it over a VPN or tailnet, and the ingest port

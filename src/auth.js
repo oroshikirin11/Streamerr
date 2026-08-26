@@ -86,15 +86,67 @@ export function tokenFromRequest(req) {
 }
 
 /**
- * Express middleware. Requests pass when no password is configured yet —
- * otherwise first-run setup would be locked out of its own panel.
+ * Express middleware.
+ *
+ * Before a password exists, only the two endpoints first-run setup needs are
+ * reachable — everything else answers 401. An unconfigured panel used to pass
+ * EVERY request through so setup could not lock itself out, which meant a
+ * fresh container published on 0.0.0.0 handed the whole API (filesystem
+ * browser, config writes, broadcast control) to anyone on the network until
+ * its owner happened to set a password. The gate now demands one first, so
+ * that window does not exist.
  */
+const SETUP_OPEN = new Set(['/auth/status', '/auth/setup']);
+
 export function requireAuth(getPasswordHash) {
   return (req, res, next) => {
-    if (!getPasswordHash()) return next(); // not yet configured
     if (validSession(tokenFromRequest(req))) return next();
+    // req.path is relative to the mount point ('/api'), so these are
+    // /api/auth/status and /api/auth/setup.
+    if (!getPasswordHash() && SETUP_OPEN.has(req.path)) return next();
     res.status(401).json({ error: 'Not authenticated' });
   };
+}
+
+/**
+ * Per-IP throttle for password attempts.
+ *
+ * Two reasons, and the second is the sharper one. An 8-character minimum with
+ * no lockout is guessable online; and every attempt runs scrypt on libuv's
+ * 4-thread pool, so unauthenticated request spam starves the same pool the
+ * broadcast's file I/O uses. Failures cost budget, successes clear it.
+ */
+const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+const MAX_ATTEMPTS = 8;
+const attempts = new Map(); // ip -> { count, first }
+
+/** @returns {number} seconds to wait, or 0 when the attempt may proceed. */
+export function throttleCheck(ip) {
+  const rec = attempts.get(ip);
+  if (!rec) return 0;
+  const age = Date.now() - rec.first;
+  if (age > ATTEMPT_WINDOW_MS) { attempts.delete(ip); return 0; }
+  if (rec.count < MAX_ATTEMPTS) return 0;
+  return Math.ceil((ATTEMPT_WINDOW_MS - age) / 1000);
+}
+
+export function throttleFail(ip) {
+  const rec = attempts.get(ip);
+  if (!rec || Date.now() - rec.first > ATTEMPT_WINDOW_MS) {
+    attempts.set(ip, { count: 1, first: Date.now() });
+    return;
+  }
+  rec.count += 1;
+  // Unbounded growth would be a memory leak on a panel under attack from
+  // many addresses; the window expiry above only prunes what is touched.
+  if (attempts.size > 5000) {
+    const cutoff = Date.now() - ATTEMPT_WINDOW_MS;
+    for (const [k, v] of attempts) if (v.first < cutoff) attempts.delete(k);
+  }
+}
+
+export function throttleReset(ip) {
+  attempts.delete(ip);
 }
 
 export const SESSION_COOKIE = 'jsr_session';

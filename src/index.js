@@ -9,6 +9,7 @@ import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import { existsSync, createReadStream, readdirSync } from 'fs';
+import { timingSafeEqual } from 'crypto';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -19,6 +20,7 @@ import {
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
+  throttleCheck, throttleFail, throttleReset,
 } from './auth.js';
 import {
   probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
@@ -30,6 +32,7 @@ import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } fro
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
+import { SmbStreamLibrary } from './library/smbstream.js';
 import { suggestRules } from './library/pathmap.js';
 import { dpush, dlist, teeConsole } from './debuglog.js';
 
@@ -418,20 +421,57 @@ function buildEngine({ profile, selection }) {
 const passwordHash = () => config.auth?.passwordHash || null;
 const auth = requireAuth(passwordHash);
 
+/** Client address for throttling. Honours X-Forwarded-For only when the
+ *  panel is knowingly behind a proxy, so a direct caller cannot spoof its
+ *  way out of the rate limit by inventing a header. */
+function clientIp(req) {
+  if (process.env.JELLYSTREAMERR_TRUST_PROXY) {
+    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
+    if (fwd) return fwd;
+  }
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+/** Whether this request reached us over TLS, so the session cookie can carry
+ *  Secure. Behind a TLS-terminating proxy only the forwarded header knows. */
+function isSecure(req) {
+  if (req.socket.encrypted) return true;
+  return process.env.JELLYSTREAMERR_TRUST_PROXY
+    ? String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https'
+    : false;
+}
+
 app.get('/api/auth/status', (req, res) => {
   res.json({
     configured: Boolean(passwordHash()),
-    authenticated: !passwordHash() || validSession(tokenFromRequest(req)),
+    // Never "authenticated" merely because setup has not run. Claiming it
+    // was what let the panel skip its own gate and drop a brand-new install
+    // straight into the wizard with no password and no way to notice.
+    authenticated: validSession(tokenFromRequest(req)),
     onboarded: Boolean(config.onboarded),
   });
 });
 
 app.post('/api/auth/login', async (req, res) => {
+  const ip = clientIp(req);
+  const wait = throttleCheck(ip);
+  if (wait) {
+    return res.status(429).json({
+      error: `Too many attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`,
+    });
+  }
+  // Count the attempt BEFORE spending scrypt on it. Counting afterwards let
+  // a burst of parallel requests all pass the check while none had yet
+  // recorded a failure — twelve concurrent guesses sailed through — and it
+  // also meant the limiter could not protect the libuv threadpool, which is
+  // the more damaging half: scrypt runs there, alongside the broadcast's
+  // file I/O. A successful login clears the budget.
+  throttleFail(ip);
   const ok = await verifyPassword(req.body?.password ?? '', passwordHash());
   if (!ok) return res.status(401).json({ error: 'Wrong password' });
-
+  throttleReset(ip);
   const token = createSession();
-  res.setHeader('Set-Cookie', sessionCookie(token));
+  res.setHeader('Set-Cookie', sessionCookie(token, { secure: isSecure(req) }));
   res.json({ ok: true });
 });
 
@@ -448,7 +488,7 @@ app.post('/api/auth/setup', async (req, res) => {
     const hash = await hashPassword(req.body?.password ?? '');
     saveConfig({ auth: { passwordHash: hash } });
     const token = createSession();
-    res.setHeader('Set-Cookie', sessionCookie(token));
+    res.setHeader('Set-Cookie', sessionCookie(token, { secure: isSecure(req) }));
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -532,12 +572,31 @@ app.get('/api/fs/dirs', (req, res) => {
  * machine's own processes.
  */
 app.get('/smbmedia/*', async (req, res) => {
+  // Two independent gates. The peer check keeps media bytes off the LAN;
+  // the token is what actually authorises, because a reverse proxy on this
+  // same host makes every forwarded request look local.
   const remote = req.socket.remoteAddress ?? '';
   if (!/^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(remote)) {
     return res.status(403).end();
   }
   if (typeof library?.stream !== 'function') return res.status(404).end();
-  const rel = decodeURIComponent(req.path.replace(/^\/smbmedia\//, ''));
+  const expected = library.bridgeToken ?? '';
+  const given = String(req.query.t ?? '');
+  if (!expected || given.length !== expected.length
+      || !timingSafeEqual(Buffer.from(given), Buffer.from(expected))) {
+    return res.status(403).end();
+  }
+  let rel;
+  try {
+    rel = decodeURIComponent(req.path.replace(/^\/smbmedia\//, ''));
+  } catch {
+    return res.status(400).json({ error: 'Bad path encoding' });
+  }
+  // '..' never appears in a path the scanner produced, so its presence means
+  // someone is probing outside the configured folder.
+  if (!SmbStreamLibrary.safeRel(rel)) {
+    return res.status(400).json({ error: 'Bad path' });
+  }
   try {
     const size = await library.size(rel);
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
@@ -615,6 +674,40 @@ app.put('/api/config', (req, res) => {
   }
   if (patch.encoder?.audioBitrate !== undefined) {
     patch.encoder.audioBitrate = normalizeBitrate(patch.encoder.audioBitrate, '160k');
+  }
+
+  // Numbers must BE numbers. These are interpolated straight into ffmpeg
+  // filtergraphs ("scale=W:H", "color=s=WxH"), and a filtergraph is a
+  // comma-separated language: a height of "1080,drawtext=textfile=/etc/passwd"
+  // appends a filter of the attacker's choosing and renders an arbitrary file
+  // into the live broadcast. Coercing and clamping here closes that for every
+  // client, since nothing downstream re-validates.
+  const clamp = (v, lo, hi, dflt) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : dflt;
+  };
+  if (patch.encoder?.width !== undefined) {
+    patch.encoder.width = clamp(patch.encoder.width, 16, 7680, config.encoder.width);
+  }
+  if (patch.encoder?.height !== undefined) {
+    patch.encoder.height = clamp(patch.encoder.height, 16, 4320, config.encoder.height);
+  }
+  if (patch.encoder?.fps !== undefined) {
+    patch.encoder.fps = clamp(patch.encoder.fps, 1, 240, config.encoder.fps);
+  }
+  if (patch.encoder?.gopSeconds !== undefined) {
+    patch.encoder.gopSeconds = clamp(patch.encoder.gopSeconds, 1, 60, config.encoder.gopSeconds);
+  }
+  // The render device becomes part of "-init_hw_device vaapi=va:<device>",
+  // where a comma would likewise start a second option.
+  if (patch.encoder?.device !== undefined) {
+    const dev = String(patch.encoder.device);
+    if (!/^\/dev\/dri\/[A-Za-z0-9_-]+$/.test(dev)) {
+      return res.status(400).json({
+        error: 'Render device must be a path like /dev/dri/renderD128',
+      });
+    }
+    patch.encoder.device = dev;
   }
 
   // The panel expresses intent — which languages you understand, and whether
