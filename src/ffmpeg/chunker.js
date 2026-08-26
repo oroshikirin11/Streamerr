@@ -203,6 +203,30 @@ export class ChunkScheduler extends EventEmitter {
     return true;
   }
 
+  /**
+   * Suspend delivery while a card airs, keeping every chunk and every
+   * worker. Pause used to kill the whole scheduler — so resume rebuilt
+   * from zero and put a minute of card on screen for a position that was
+   * sitting in the retained window the entire time.
+   */
+  pauseDelivery() {
+    this._holdDelivery = true;
+    if (this._rs) {
+      try { this._rs.unpipe(this._sink); } catch { /* gone */ }
+      try { this._rs.destroy(); } catch { /* gone */ }
+    }
+    this._writing = false;
+  }
+
+  /** Where the retained window begins, in clip seconds. */
+  keptStart() {
+    let lo = null;
+    for (const [i, c] of this.chunks) {
+      if (c.delivered && (lo == null || i < lo)) lo = i;
+    }
+    return lo == null ? null : this._startOf(lo);
+  }
+
   /** Drop the oldest retained chunks once the keep budget is exceeded. */
   _evictKept() {
     if (!this.keepBytes || this._keptBytes <= this.keepBytes) return;
@@ -446,6 +470,7 @@ export class ChunkScheduler extends EventEmitter {
     // only known after the remux.
     this._jump = { index: i, head, trim };
     this.shift = 0;
+    this._holdDelivery = false;
     this._fill();
     this._drain();
     return this._startOf(i);
@@ -573,6 +598,7 @@ export class ChunkScheduler extends EventEmitter {
    */
   _drain() {
     if (this._writing || !this.running) return;
+    if (this._holdDelivery) return;
     if (this.holdUntilReady && !this._announcedReady) return;
     if (process.env.JSR_TRACE) this.emit('warn', `[trace] drain: next=${this.nextToWrite} done=${this.chunks.get(this.nextToWrite)?.done ?? 'none'}`);
 

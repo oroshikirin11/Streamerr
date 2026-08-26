@@ -600,8 +600,20 @@ export class PipelinePlayout extends EventEmitter {
       // Encoded-but-unaired content in seconds: the run-ahead cushion the
       // player timeline shades ahead of the playhead. Zero on the
       // streaming path, where nothing encodes ahead.
-      cachedAhead: this.scheduler?.cachedSeconds?.() ?? 0,
-      cachedBehind: this.scheduler?.keptSeconds?.() ?? 0,
+      // Both bands measured from what has actually AIRED, so the shaded
+      // regions are exactly the instant-seek territory: 'delivered'
+      // content the viewer has not seen yet belongs to the AHEAD band,
+      // not the behind one it used to inflate.
+      cachedAhead: (() => {
+        const sc = this.scheduler;
+        if (!sc) return 0;
+        const edge = sc._startOf?.(sc.nextToWrite) ?? air.position;
+        return Math.max(0, edge - air.position) + (sc.cachedSeconds?.() ?? 0);
+      })(),
+      cachedBehind: (() => {
+        const ks = this.scheduler?.keptStart?.();
+        return ks == null ? 0 : Math.max(0, air.position - ks);
+      })(),
       // What is actually being burned in, so the panel can show it without
       // asking — the choice is baked into the stream and is not something a
       // viewer can change at their end.
@@ -671,14 +683,43 @@ export class PipelinePlayout extends EventEmitter {
     if (this.status === 'paused' || !this.current) return;
     this.status = 'paused';
     this._bankFlush();
+    // The scheduler SURVIVES a pause: delivery suspends, the workers keep
+    // encoding ahead, and the retained window keeps the position we are
+    // pausing at. Killing it here was why resuming took a minute of card —
+    // a full rebuild for content the cache was already holding.
+    if (this.scheduler) this.scheduler.pauseDelivery();
     // Hold the pipe with a card so the publisher keeps writing and Owncast
     // never sees the ten seconds of silence that would end the broadcast.
-    this._spawnHold();
+    this._spawnHold('Paused', { keepScheduler: true });
     this.emit('status', this.status);
   }
 
   resume() {
     if (this.status !== 'paused' || !this.current) return;
+    // Chunked path: the paused position lives in the retained window, so
+    // resuming is a cache jump — kill the card, flush its unaired tail,
+    // and deliver from the retained chunk. Instant, no re-encode.
+    if (this.scheduler) {
+      if (this.holding && this.source) {
+        const h = this.source;
+        this.source = null;
+        this.holding = false;
+        this._srcGen = (this._srcGen ?? 0) + 1;
+        h.stdout?.removeAllListeners?.('data');
+        try { h.stdout?.resume?.(); } catch { /* gone */ }
+        try { h.kill('SIGKILL'); } catch { /* gone */ }
+      }
+      this._bankFlush();
+      const at = this.scheduler.jumpTo(this.position, onAudioGrid(this.timeline + 0.064));
+      if (at != null) {
+        this.position = at;
+        this.status = 'running';
+        this.emit('log', '[cache] resumed from the retained window — no re-encode\n');
+        this.emit('discontinuity');
+        this.emit('status', this.status);
+        return;
+      }
+    }
     this.status = 'running';
     this._play(this.current.item, this.position, { duration: this.current.duration });
     this.emit('status', this.status);
@@ -880,8 +921,8 @@ export class PipelinePlayout extends EventEmitter {
 
   // ── source ───────────────────────────────────────────────────────────
 
-  _killSource() {
-    if (this.scheduler) {
+  _killSource({ keepScheduler = false } = {}) {
+    if (this.scheduler && !keepScheduler) {
       this.scheduler.stop();
       this.scheduler = null;
     }
@@ -1710,8 +1751,8 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   /** Black card on the pipe, so a pause doesn't starve the publisher. */
-  _spawnHold(label = 'Paused') {
-    this._killSource();
+  _spawnHold(label = 'Paused', { keepScheduler = false } = {}) {
+    this._killSource({ keepScheduler });
     this.holding = true;
     this._spawnSource(buildHoldArgs({
       profile: this.profile,
