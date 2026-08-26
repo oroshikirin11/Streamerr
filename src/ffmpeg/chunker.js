@@ -505,6 +505,18 @@ export class ChunkScheduler extends EventEmitter {
     this._writing = true;
     this._deliverable(next, (path) => {
       if (!this.running) { this._writing = false; return; }
+      // Announce what is about to stream, with its exact byte size, so
+      // the pipeline can interpolate the playhead WITHIN the chunk. The
+      // stamps otherwise only move once per chunk — a time display that
+      // ticks in 20-second jumps.
+      try {
+        this.emit('chunkstart', {
+          index: next.index,
+          start: this._startOf(next.index) + (next.trimmed ?? 0),
+          dur: this._durOf(next.index) - (next.trimmed ?? 0),
+          bytes: statSync(path).size,
+        });
+      } catch { /* stat raced a cleanup — interpolation just skips */ }
       const rs = createReadStream(path);
       this._rs = rs;
       const cleanup = () => { safeUnlink(path); if (path !== next.out) safeUnlink(next.out); };

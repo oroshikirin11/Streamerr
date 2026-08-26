@@ -987,6 +987,19 @@ export class PipelinePlayout extends EventEmitter {
       // that has stopped draining stops accepting writes.
       this._lastAiredAt = Date.now();
       this._published = (this._published ?? 0) + c.data.length;
+      // The drain runs at the publisher's own pace — the one steady
+      // realtime heartbeat the chunked path has. Announcing progress here
+      // is what makes the panel's clock tick every half second instead of
+      // once per twenty-second chunk (feeding is bursty; airing is not).
+      if (this.scheduler) {
+        const now = Date.now();
+        if (now - (this._airProgAt ?? 0) > 500) {
+          this._airProgAt = now;
+          this.emit('progress', {
+            position: this.position, speed: this.scheduler.speed?.() ?? null, drops: 0,
+          });
+        }
+      }
       // Mirror of the publisher's input for preview windows: the exact bytes
       // going out, tapped after the write so a dead publisher mirrors
       // nothing. With no listener this is a no-op.
@@ -1410,6 +1423,10 @@ export class PipelinePlayout extends EventEmitter {
       this.emit('fatal', err);
       this.stop();
     });
+    sched.on('chunkstart', (c) => {
+      if (this.scheduler !== sched) return;
+      this._feedChunk = { ...c, fed: 0 };
+    });
     sched.on('chunk', ({ start }) => {
       if (this.scheduler !== sched) return;   // superseded mid-delivery
       // Position is where the newest delivered chunk begins; the publisher is
@@ -1486,6 +1503,13 @@ export class PipelinePlayout extends EventEmitter {
           this.emit('status', this.status);
         }
         this._sawBlock = true;
+        // Playhead interpolation within the streaming chunk, so the time
+        // display moves every half second instead of once per chunk.
+        const fc = this._feedChunk;
+        if (fc?.bytes) {
+          fc.fed += chunk.length;
+          this.position = fc.start + fc.dur * Math.min(1, fc.fed / fc.bytes);
+        }
         if (this._bankFeed(chunk)) return cb();
         if (process.env.JSR_TRACE) this.emit('log', `[trace] sink parked bank=${this._bankBytes}\n`);
         this._bankRoom = cb;      // released by _bankResume
