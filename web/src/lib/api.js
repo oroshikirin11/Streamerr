@@ -112,7 +112,11 @@ export function connectStatus(onMessage, onLiveness = null) {
       // made a dead feed indistinguishable from an idle server.
       onLiveness?.(false, ev?.code);
       setTimeout(open, retry);
-      retry = Math.min(retry * 2, 15000);
+      // Cap low. This is a live control panel: a socket that backs off to
+      // fifteen seconds means the transport bar can keep showing a broadcast
+      // that already stopped, which is exactly how a flapping connection
+      // presented — instant in one browser, fifteen seconds late in another.
+      retry = Math.min(retry * 2, 4000);
     };
     ws.onerror = () => ws?.close();
   };

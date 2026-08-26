@@ -127,9 +127,11 @@
       return;
     }
     if (feedPoll) return;
+    // Poll briskly: this only runs while the socket is down, and it is the
+    // only thing keeping the panel honest in that window.
     feedPoll = setInterval(async () => {
       try { stream = await api.streamStatus(); } catch { /* keep trying */ }
-    }, 5000);
+    }, 2000);
   }
 
   /**
@@ -145,8 +147,16 @@
    * surfaced as "your password is wrong".
    */
   async function enterApp() {
-    try { stream = await api.streamStatus(); } catch { /* feed may still recover */ }
+    // Socket FIRST, and never awaited behind anything. Fetching status before
+    // opening it delayed every live update by one round trip — the transport
+    // bar and preview stopped appearing the instant a broadcast began, which
+    // is the whole point of a live feed. The fetch is only a safety net for
+    // the case where the socket never arrives, so it runs alongside and loses
+    // any race: a socket message is fresher by definition.
     try { startFeed(); } catch { onFeedLiveness(false); }
+    api.streamStatus()
+      .then((s) => { if (stream.status === 'stopped') stream = s; })
+      .catch(() => { /* the socket is the primary path; it may still land */ });
   }
 
   function startFeed() {
