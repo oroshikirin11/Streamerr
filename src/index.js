@@ -368,7 +368,12 @@ function buildEngine({ profile, selection }) {
     // holding the whole episode while the bar showed a sliver.
     const s = e.snapshot();
     broadcast('progress', {
-      position: b.position, speed: b.speed, drops: b.drops,
+      // The AIRED position, not the encoder's. The raw progress position
+      // is the feed frontier, which on the chunked path advances in
+      // 20-second bursts as chunks pour into the bank — a clock built on
+      // it ticks in lurches. What has aired advances at exactly realtime,
+      // which is what a clock is.
+      position: s.position ?? b.position, speed: b.speed, drops: b.drops,
       buffer: b.buffer, bufferMax: b.bufferMax,
       cachedAhead: s.cachedAhead ?? 0, cachedBehind: s.cachedBehind ?? 0,
     });

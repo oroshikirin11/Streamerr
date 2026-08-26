@@ -16,6 +16,17 @@
 
   let stream = $state({ status: 'stopped', playing: null, queue: [] });
   let position = $state(0);
+
+  // The clock ticks LOCALLY at exactly one second per second, like any
+  // video player. Server positions arrive at uneven cadence — on the
+  // chunked path they ride chunk deliveries and drain heartbeats — and a
+  // clock built directly on them lurches. The server value only corrects
+  // the local one when they genuinely drift apart (seek, stall, resync);
+  // small disagreements never touch a running clock.
+  const syncPosition = (server) => {
+    if (server == null) return;
+    if (Math.abs(server - position) > 2.5) position = server;
+  };
   let speed = $state(null);
   let toast = $state(null);
   let tracks = $state(null);
@@ -52,6 +63,15 @@
     .map((v, i) => `${((i / Math.max(1, bufPts.length - 1)) * 100).toFixed(1)},`
       + `${(24 - Math.min(1, v / bufMax) * 21).toFixed(1)}`)
     .join(' '));
+
+  onMount(() => {
+    const tick = setInterval(() => {
+      if (stream.status === 'running' && stream.playing && !paused && !counting) {
+        position += 1;
+      }
+    }, 1000);
+    return () => clearInterval(tick);
+  });
 
   onMount(async () => {
     await refreshAuth();
@@ -103,10 +123,10 @@
           setTimeout(() => { toast = null; }, 12000);
         }
         stream = msg.payload;
-        if (msg.payload.position != null) position = msg.payload.position;
+        syncPosition(msg.payload.position);
         if (msg.payload.status === 'stopped') bufPts = [];
       } else if (msg.type === 'progress') {
-        position = msg.payload.position;
+        syncPosition(msg.payload.position);
         speed = msg.payload.speed;
         if (msg.payload.cachedAhead != null) stream.cachedAhead = msg.payload.cachedAhead;
         if (msg.payload.cachedBehind != null) stream.cachedBehind = msg.payload.cachedBehind;
