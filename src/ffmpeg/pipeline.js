@@ -617,6 +617,10 @@ export class PipelinePlayout extends EventEmitter {
       // Encoded-but-unaired content in seconds: the run-ahead cushion the
       // player timeline shades ahead of the playhead. Zero on the
       // streaming path, where nothing encodes ahead.
+      // A cover card is on air while the scheduler re-encodes ("Loading"
+      // after a seek outside the cache): the panel shows the same build
+      // indicator it shows before going live, for as long as the card is.
+      rebuilding: Boolean(this.holding && this.scheduler),
       // Both bands measured from what has actually AIRED, so the shaded
       // regions are exactly the instant-seek territory: 'delivered'
       // content the viewer has not seen yet belongs to the AHEAD band,

@@ -263,6 +263,7 @@ function streamStatus() {
     position: s.position,
     cachedAhead: s.cachedAhead ?? 0,
     cachedBehind: s.cachedBehind ?? 0,
+    rebuilding: s.rebuilding ?? false,
     tracks: s.tracks ?? null,
     preview: previewEnabled(),
   };
@@ -376,6 +377,7 @@ function buildEngine({ profile, selection }) {
       position: s.position ?? b.position, speed: b.speed, drops: b.drops,
       buffer: b.buffer, bufferMax: b.bufferMax,
       cachedAhead: s.cachedAhead ?? 0, cachedBehind: s.cachedBehind ?? 0,
+      rebuilding: s.rebuilding ?? false,
     });
   });
   e.on('warn', (m) => { dpush('warn', m); broadcast('warn', { message: redact(String(m)) }); });

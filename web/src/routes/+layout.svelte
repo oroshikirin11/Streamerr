@@ -133,6 +133,7 @@
         speed = msg.payload.speed;
         if (msg.payload.cachedAhead != null) stream.cachedAhead = msg.payload.cachedAhead;
         if (msg.payload.cachedBehind != null) stream.cachedBehind = msg.payload.cachedBehind;
+        if (msg.payload.rebuilding != null) stream.rebuilding = msg.payload.rebuilding;
         if (msg.payload.buffer != null && !counting && !paused) {
           if (msg.payload.bufferMax) bufMax = msg.payload.bufferMax;
           bufPts = [...bufPts.slice(-89), msg.payload.buffer];
@@ -493,12 +494,14 @@
   <PreviewWindow bottomInset={footerH + 14} onclose={togglePreview} />
 {/if}
 
-{#if stream.status === 'starting' && stream.playing}
+{#if stream.playing && (stream.status === 'starting'
+  || (stream.status === 'running' && stream.rebuilding))}
   <!-- Pre-build indicator: the encode gate is filling the cache before
        going live. Sits in the toast corner and stays until on air. -->
   <div class="toast prebuild">
     <span class="spin"></span>
-    Building cache before going live{stream.cachedAhead > 0.5
+    {stream.status === 'starting' ? 'Building cache before going live'
+      : 'Rebuilding cache at this position'}{stream.cachedAhead > 0.5
       ? ` — ${Math.round(stream.cachedAhead)}s ready`
       : '…'}
   </div>
@@ -506,7 +509,8 @@
 {#if toast}
   <!-- Raised above the pre-build chip when both occupy the corner. -->
   <div class="toast" class:error={toast.kind === 'error'}
-       class:raised={stream.status === 'starting' && stream.playing}>{toast.message}</div>
+       class:raised={stream.playing && (stream.status === 'starting'
+         || (stream.status === 'running' && stream.rebuilding))}>{toast.message}</div>
 {/if}
 
 <style>
