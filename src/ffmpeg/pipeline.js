@@ -1300,6 +1300,21 @@ export class PipelinePlayout extends EventEmitter {
       this._fillDuration(item);
       return;
     }
+    // Clips with no subtitle burn chunk for the CACHE, not for parallelism:
+    // one worker, sequential — an encoder that runs above realtime banks the
+    // surplus, and one that dips below realtime spends it, which is exactly
+    // the smoothing a machine that hovers around 1.0x needs. The chunk args
+    // already build every backend's graph (for vaapi: decode on the CPU,
+    // hwupload, encode on the GPU). Subtitle-composite clips are untouched:
+    // their streaming path stays exactly as it was. A chunk failure demotes
+    // this clip AND the rest of the broadcast back to streaming.
+    if (!this.selection?.subtitle && this._chunkPlan().ramBytes
+        && !this._noSubChunkOff) {
+      this._playChunked(item, offset, cached, 1, flushed, { noSubCache: true });
+      this.emit('nowplaying', this.snapshot());
+      this._fillDuration(item);
+      return;
+    }
 
     const args = buildSourceArgs({
       srcPath: item.srcPath,
@@ -1385,7 +1400,8 @@ export class PipelinePlayout extends EventEmitter {
     return Math.max(1, availableCores());
   }
 
-  _playChunked(item, offset, cached, workers, flushed = false) {
+  _playChunked(item, offset, cached, workers, flushed = false,
+    { noSubCache = false } = {}) {
     this._clipBase = this.timeline;
     const chunkSeconds = Number(this.profile?.chunkSeconds ?? 20);
 
@@ -1469,6 +1485,17 @@ export class PipelinePlayout extends EventEmitter {
     // guard (_deadClips) and lives in _spawnSource, which chunks never run.
     sched.on('fatal', (err) => {
       if (this.scheduler !== sched || this._stopping) return;
+      if (noSubCache) {
+        // The cache mode is an optimization, never a reason to lose the
+        // broadcast: fall back to the streaming path this clip would have
+        // used before the cache existed, and stay there.
+        this._noSubChunkOff = true;
+        this.emit('warn', 'run-ahead chunking failed for this clip — '
+          + `continuing on the streaming path. (${String(err?.message ?? err).slice(0, 120)})`);
+        this._killSource();
+        this._play(item, this.position, { duration: this.current?.duration });
+        return;
+      }
       this.emit('fatal', err);
       this.stop();
     });
