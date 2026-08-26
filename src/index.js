@@ -296,6 +296,10 @@ function wirePreview(e) {
   // Cutting the sockets here makes every client rebuild its player against
   // the post-splice stream, which is the only reliable way back to a moving
   // picture. The first spawn of a broadcast has no one mid-stream to cut.
+  // Soft seams don't cut the preview — but its player is sitting on up to
+  // a few seconds of pre-seam buffer, and waiting for the latency chaser
+  // to notice reads as a stutter. Tell it to hop.
+  e.on('seam', () => broadcast('seam', {}));
   e.on('discontinuity', () => {
     if (tsBytes === 0) return;
     for (const ws of previewSockets) {

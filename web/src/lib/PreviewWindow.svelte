@@ -232,9 +232,24 @@
     );
   }
 
+  // A seam splice appended fresh content behind whatever this player had
+  // buffered. Hop to it at once — waiting for the latency chaser to work
+  // that out is the visible pause-and-stutter after a cache seek.
+  function onSeam() {
+    setTimeout(() => {
+      if (!video || video.paused) return;
+      const b = video.buffered;
+      if (!b?.length) return;
+      const end = b.end(b.length - 1);
+      if (end - video.currentTime > 1.2) video.currentTime = Math.max(0, end - 0.8);
+    }, 300);
+  }
+
   onMount(() => {
+    window.addEventListener('jsr-seam', onSeam);
     connect();
-    return () => { gone = true; teardown(); };
+    return () => {
+      window.removeEventListener('jsr-seam', onSeam); gone = true; teardown(); };
   });
 </script>
 
