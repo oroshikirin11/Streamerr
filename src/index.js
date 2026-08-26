@@ -288,6 +288,8 @@ function wirePreview(e) {
   // packet phase both restart with the engine, so anyone still connected
   // from the previous broadcast is cut off to reconnect into clean state.
   let tsBytes = 0;
+  // (ring state is declared below and captured per-engine, so a new
+  // broadcast starts with an empty ring automatically.)
   for (const ws of previewSockets) {
     try { ws.close(1000, 'stream restarted'); } catch { /* closing */ }
   }
@@ -296,28 +298,96 @@ function wirePreview(e) {
   // Cutting the sockets here makes every client rebuild its player against
   // the post-splice stream, which is the only reliable way back to a moving
   // picture. The first spawn of a broadcast has no one mid-stream to cut.
-  // Soft seams don't cut the preview — but its player is sitting on up to
-  // a few seconds of pre-seam buffer, and waiting for the latency chaser
-  // to notice reads as a stutter. Tell it to hop.
-  e.on('seam', () => broadcast('seam', {}));
-  e.on('discontinuity', () => {
+  // Seams cut preview sockets exactly like hard discontinuities. Letting
+  // clients ride across a seam in-stream was measured twice and failed
+  // twice: mpegts.js sometimes stops appending silently, and a client
+  // that rebuilds DURING the seam can reconnect into bytes that still
+  // straddle it and wedge again (the 10s outlier). A server-side cut
+  // means every reconnect starts inside clean post-seam content — the
+  // one ordering that cannot wedge. With the 300ms resync and backoff
+  // reset, each splice costs a consistent ~2s preview blink.
+  e.on('seam', () => {
     if (tsBytes === 0) return;
+    // Pre-seam bytes must never be served to a rejoining client — the
+    // first post-seam bytes are a fresh PAT + keyframe anyway.
+    ring.length = 0; ringBytes = 0; ringStartAt = tsBytes;
     for (const ws of previewSockets) {
       try { ws.close(1000, 'stream splice'); } catch { /* closing */ }
     }
+    // Tell panels out-of-band: a cut landing mid-recovery ratchets the
+    // preview's error backoff into many seconds. Knowing it is a splice,
+    // the client reconnects immediately with clean state instead.
+    broadcast('seam', {});
   });
+  e.on('discontinuity', () => {
+    if (tsBytes === 0) return;
+    ring.length = 0; ringBytes = 0; ringStartAt = tsBytes;
+    for (const ws of previewSockets) {
+      try { ws.close(1000, 'stream splice'); } catch { /* closing */ }
+    }
+    // Tell panels out-of-band: a cut landing mid-recovery ratchets the
+    // preview's error backoff into many seconds. Knowing it is a splice,
+    // the client reconnects immediately with clean state instead.
+    broadcast('seam', {});
+  });
+
+  // Rolling tail of the stream, so a joining client can be started AT a
+  // keyframe instead of waiting mid-GOP for the next one — the difference
+  // between a ~1s lock and a 3-10s variable one, paid on every preview
+  // reconnect (and every splice cuts the sockets).
+  const ring = [];
+  let ringBytes = 0;
+  let ringStartAt = 0;
+  const RING_MAX = 4 * 1024 * 1024;
+
+  /** Bytes from the latest PAT preceding the latest video keyframe. */
+  const keyframeTail = () => {
+    if (!ringBytes) return null;
+    const full = Buffer.concat(ring, ringBytes);
+    let off = (188 - (ringStartAt % 188)) % 188;
+    let lastPat = null;
+    let patForIdr = null;
+    let idr = null;
+    for (; off + 188 <= full.length; off += 188) {
+      if (full[off] !== 0x47) break;              // phase lost — bail
+      const pid = ((full[off + 1] & 0x1f) << 8) | full[off + 2];
+      const pusi = (full[off + 1] & 0x40) !== 0;
+      if (pid === 0 && pusi) lastPat = off;
+      if (pid === 0x100 && pusi) {
+        const afc = (full[off + 3] >> 4) & 0x3;
+        if ((afc & 0x2) && full[off + 4] > 0 && (full[off + 5] & 0x40)) {
+          idr = off;                               // random-access video packet
+          patForIdr = lastPat;
+        }
+      }
+    }
+    if (idr == null || patForIdr == null) return null;
+    return full.subarray(patForIdr);
+  };
 
   e.on('data', (chunk) => {
     const at = tsBytes;
     tsBytes += chunk.length;
+    ring.push(chunk);
+    ringBytes += chunk.length;
+    while (ringBytes - (ring[0]?.length ?? 0) >= RING_MAX && ring.length > 1) {
+      ringStartAt += ring[0].length;
+      ringBytes -= ring[0].length;
+      ring.shift();
+    }
     if (!previewSockets.size || !previewEnabled()) return;
     for (const ws of previewSockets) {
       if (ws.readyState !== 1) continue;
       if (ws.bufferedAmount > PREVIEW_BUFFER_MAX) { ws.jsrNeedsSync = true; continue; }
       if (ws.jsrNeedsSync) {
-        // Joining (or rejoining after falling behind) mid-stream: start at
-        // the next packet boundary and let the demuxer wait for the next
-        // PAT and keyframe — a moment of black, never a corrupt picture.
+        const tail = keyframeTail();
+        if (tail) {
+          ws.jsrNeedsSync = false;
+          ws.send(tail);
+          ws.send(chunk);
+          continue;
+        }
+        // No keyframe in the ring yet — packet-align onto the live tail.
         const skip = (188 - (at % 188)) % 188;
         if (skip >= chunk.length) continue;
         ws.jsrNeedsSync = false;
