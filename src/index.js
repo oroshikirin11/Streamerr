@@ -26,7 +26,7 @@ import {
 } from './ffmpeg/probe.js';
 import { normalizeBitrate } from './ffmpeg/encoders.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
-import { PipelinePlayout, contentRect, effectiveFps } from './ffmpeg/pipeline.js';
+import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
@@ -261,6 +261,7 @@ function streamStatus() {
       breakOffline: q.breakOffline ?? false,
     })),
     position: s.position,
+    cachedAhead: s.cachedAhead ?? 0,
     tracks: s.tracks ?? null,
     preview: previewEnabled(),
   };
@@ -330,6 +331,17 @@ function wirePreview(e) {
  * broadcast; seeking, pausing and track changes restart only the source, so
  * none of them need a new engine.
  */
+/** The run-ahead budget in bytes, or null when the cache is off. */
+function runAheadBudget() {
+  const ra = config.runAhead ?? {};
+  if (ra.enabled === false) return null;
+  const mb = ra.ramMB === 'auto' || ra.ramMB == null
+    ? recommendedCacheBytes() / 1024 ** 2
+    : Number(ra.ramMB);
+  if (!Number.isFinite(mb) || mb < 16) return null;
+  return { ramBytes: Math.round(mb * 1024 ** 2) };
+}
+
 function buildEngine({ profile, selection }) {
   const e = new PipelinePlayout({
     target: rtmpTarget(),
@@ -338,6 +350,7 @@ function buildEngine({ profile, selection }) {
     // Extracted subtitle tracks and embedded fonts live here.
     cacheDir: config.paths.cache,
     resolveSelection: (item) => selectionFor(item, profile),
+    runAhead: runAheadBudget(),
   });
 
   wirePreview(e);
@@ -492,7 +505,12 @@ app.get('/api/fs/dirs', (req, res) => {
   res.json({ path, parent: parent === path ? null : parent, dirs });
 });
 
-app.get('/api/config', (req, res) => res.json(redactedConfig()));
+app.get('/api/config', (req, res) => res.json({
+  ...redactedConfig(),
+  // Computed, not stored: what 'auto' resolves to on THIS machine, so the
+  // Settings page can show a concrete recommendation next to the field.
+  recommendedCacheMB: Math.round(recommendedCacheBytes() / 1024 ** 2),
+}));
 
 app.put('/api/config', (req, res) => {
   const patch = { ...req.body };

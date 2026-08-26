@@ -70,6 +70,12 @@ const DEFAULTS = {
   // only reliably portable form.
   paths: { cache: './cache', run: './run' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
+  // Run-ahead cache: when the encoders outpace the broadcast, let them
+  // keep going and hold the finished chunks in RAM instead of throttling
+  // at the bank. Seeks and skips into the cushion are instant. ramMB
+  // 'auto' resolves to a recommendation computed from the memory the
+  // container actually has.
+  runAhead: { enabled: true, ramMB: 'auto' },
   // The floating preview window in the panel. It replays the exact bytes the
   // publisher sends — no second encode — so its only real cost is the
   // stream's own bitrate to each open panel.

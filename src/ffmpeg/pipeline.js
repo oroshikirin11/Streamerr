@@ -29,9 +29,9 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statfsSync } from 'fs';
 import { Writable } from 'stream';
-import { availableParallelism, cpus } from 'os';
+import { availableParallelism, cpus , totalmem } from 'os';
 import { EventEmitter } from 'events';
 import { join } from 'path';
 import { ProgressParser } from './progress.js';
@@ -93,6 +93,46 @@ export function effectiveFps(video, profile) {
  * without the container being recreated.
  */
 let cachedCores = null;
+/**
+ * The memory this service actually has, in bytes — the container's cgroup
+ * limit when one is set, the machine's total otherwise. Same philosophy as
+ * availableCores: ask the environment, never the config.
+ */
+export function availableMemory() {
+  const read = (path) => {
+    try { return readFileSync(path, 'utf8').trim(); } catch { return null; }
+  };
+  const v2 = read('/sys/fs/cgroup/memory.max');
+  if (v2 && v2 !== 'max' && Number(v2) > 0) return Number(v2);
+  const v1 = read('/sys/fs/cgroup/memory/memory.limit_in_bytes');
+  // v1 reports a huge sentinel when unlimited.
+  if (v1 && Number(v1) > 0 && Number(v1) < 2 ** 60) return Number(v1);
+  return totalmem();
+}
+
+/**
+ * Recommended RAM budget for the run-ahead cache: half of what remains
+ * after a working-set reserve for the encoders, Node and the OS page
+ * cache. Clamped so tiny containers still get a useful cushion and huge
+ * hosts do not default to hoarding gigabytes.
+ */
+export function recommendedCacheBytes() {
+  const reserve = 1.5 * 1024 ** 3;
+  const spare = availableMemory() - reserve;
+  return Math.round(Math.min(Math.max(spare * 0.5, 128 * 1024 ** 2), 4 * 1024 ** 3));
+}
+
+/** Output bytes per second of broadcast, from the configured bitrates. */
+export function streamBytesPerSecond(profile) {
+  const rate = (v, dflt) => {
+    const m = /^(\d+(?:\.\d+)?)([kM]?)$/.exec(String(v ?? '').trim());
+    if (!m) return dflt;
+    return Number(m[1]) * (m[2] === 'M' ? 1e6 : m[2] === 'k' ? 1e3 : 1);
+  };
+  const bits = rate(profile?.videoBitrate, 4.5e6) + rate(profile?.audioBitrate, 160e3);
+  return (bits / 8) * 1.15;   // measured MPEG-TS overhead is ~10-15%
+}
+
 export function availableCores() {
   if (cachedCores != null) return cachedCores;
   let n = 2;
@@ -204,7 +244,7 @@ export class PipelinePlayout extends EventEmitter {
    */
   constructor({
     target, profile, selection = null, statsPeriodMs = 500, cacheDir = null,
-    resolveSelection = null,
+    resolveSelection = null, runAhead = null,
   }) {
     super();
     this.target = target;
@@ -222,6 +262,8 @@ export class PipelinePlayout extends EventEmitter {
     this.statsPeriodMs = statsPeriodMs;
     /** Where extracted subtitle tracks and fonts are kept. */
     this.cacheDir = cacheDir;
+    // {ramBytes} — resolved by the caller; null disables the run-ahead.
+    this.runAhead = runAhead;
     this._subCache = new Map();   // `${srcPath}:${typeIndex}` -> {path, fontsDir}
     /** Set when a clip is encoded in parallel chunks instead of streamed. */
     this.scheduler = null;
@@ -555,6 +597,10 @@ export class PipelinePlayout extends EventEmitter {
       playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: this.queue.map((q, i) => ({ ...q, at: sched[i] ?? null })),
       position: air.position,
+      // Encoded-but-unaired content in seconds: the run-ahead cushion the
+      // player timeline shades ahead of the playhead. Zero on the
+      // streaming path, where nothing encodes ahead.
+      cachedAhead: this.scheduler?.cachedSeconds?.() ?? 0,
       // What is actually being burned in, so the panel can show it without
       // asking — the choice is baked into the stream and is not something a
       // viewer can change at their end.
@@ -593,6 +639,16 @@ export class PipelinePlayout extends EventEmitter {
     if (this.current.duration) {
       next = Math.min(next, Math.max(0, this.current.duration - 2));
     }
+
+    // NOT YET: serving an in-cushion seek straight from the run-ahead
+    // cache (ChunkScheduler.jumpTo + a negative delivery shift). The
+    // machinery exists and passes in isolation, but two things bar it
+    // from the live path: jumpTo lands on the CHUNK START, up to a whole
+    // chunk before the requested position, and under live conditions it
+    // declined a target the isolation test accepts — undiagnosed. Until
+    // both are settled a seek rebuilds like it always has; the cache
+    // still pays for itself in steady-state resilience and instant
+    // recovery after the rebuild.
 
     // Restart only the source; the publisher and its connection are untouched.
     this._play(this.current.item, next, { duration: this.current.duration });
@@ -1277,7 +1333,11 @@ export class PipelinePlayout extends EventEmitter {
       chunkSeconds,
       workers,
       holdUntilReady: cover,
-      workDir: join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`),
+      workDir: this._chunkDir(),
+      ...(this.runAhead?.ramBytes ? {
+        aheadBytes: this.runAhead.ramBytes,
+        aheadSeconds: this.runAhead.ramBytes / streamBytesPerSecond(this.profile),
+      } : {}),
       tsOffsetOf: (start) => this._clipBase + (start - offset),
       buildArgs: ({ start, dur, out }) => buildChunkArgs({
         srcPath: item.srcPath,
@@ -1424,6 +1484,34 @@ export class PipelinePlayout extends EventEmitter {
     });
     sink.on('error', () => { /* publisher gone; close handler deals with it */ });
     sched.start(sink);
+  }
+
+  /**
+   * Where chunk files live. With the run-ahead cache on, that should be
+   * RAM: /dev/shm is tmpfs everywhere this runs, so files there ARE
+   * memory, and the failing disk under the cinema container never sees
+   * the churn. Falls back to the cache dir when /dev/shm is missing or
+   * too small for the budget (a Docker default of 64MB shm is the common
+   * case — raising shm_size fixes it).
+   */
+  _chunkDir() {
+    if (this._chunkDirPick) return this._chunkDirPick;
+    let dir = join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`);
+    const budget = this.runAhead?.ramBytes;
+    if (budget) {
+      try {
+        const st = statfsSync('/dev/shm');
+        const free = st.bavail * st.bsize;
+        if (free > budget * 1.2) {
+          dir = `/dev/shm/jellystreamerr-${process.pid}`;
+        } else {
+          this.emit('warn', `run-ahead cache on disk: /dev/shm has ${Math.round(free / 1024 ** 2)}MB free `
+            + `but the budget needs ${Math.round((budget * 1.2) / 1024 ** 2)}MB (raise shm_size)`);
+        }
+      } catch { /* no /dev/shm — disk it is */ }
+    }
+    this._chunkDirPick = dir;
+    return dir;
   }
 
   /**

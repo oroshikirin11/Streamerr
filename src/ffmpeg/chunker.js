@@ -27,7 +27,7 @@
 
 import { spawn, execFile } from 'child_process';
 import { EventEmitter } from 'events';
-import { createReadStream, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { createReadStream, existsSync, mkdirSync, statSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { onAudioGrid } from './encoders.js';
 
@@ -56,6 +56,7 @@ export class ChunkScheduler extends EventEmitter {
     srcPath, startOffset = 0, duration = null,
     chunkSeconds = 20, workers = 3, workDir, buildArgs,
     holdUntilReady = false, tsOffsetOf = null,
+    aheadSeconds = null, aheadBytes = null,
   }) {
     super();
     // Deliver nothing until two chunks are in hand ('ready'). Mid-broadcast
@@ -72,6 +73,17 @@ export class ChunkScheduler extends EventEmitter {
     this.shift = 0;
     /** Baked absolute placement of a chunk, from the pipeline. */
     this.tsOffsetOf = tsOffsetOf;
+    /**
+     * Run-ahead budget. Null keeps the legacy near-sighted bound (twice the
+     * worker count): enough to keep every worker busy, nothing more. Set,
+     * they let the encoders run minutes ahead of the playhead — seconds is
+     * the target, bytes the hard ceiling against the RAM the chunk files
+     * actually occupy (the workDir is tmpfs when the cache is on, so bytes
+     * here ARE memory).
+     */
+    this.aheadSeconds = aheadSeconds;
+    this.aheadBytes = aheadBytes;
+    this._cacheBytes = 0;
     this.srcPath = srcPath;
     this.startOffset = startOffset;
     this.duration = duration;
@@ -153,14 +165,11 @@ export class ChunkScheduler extends EventEmitter {
     this.chunks.clear();
   }
 
-  /** Keep `workers` encodes in flight, and never run far ahead of the writer. */
+  /** Keep `workers` encodes in flight, within the run-ahead budget. */
   _fill() {
     if (!this.running) return;
 
-    while (
-      this._procs.size < this.workers
-      && this.nextToSchedule - this.nextToWrite < this.workers * 2
-    ) {
+    while (this._procs.size < this.workers && this._withinBudget()) {
       const i = this.nextToSchedule;
       if (this.duration != null && this._startOf(i) >= this.duration - 0.05) {
         this.finished = true;
@@ -169,6 +178,27 @@ export class ChunkScheduler extends EventEmitter {
       this.nextToSchedule += 1;
       this._encode(i);
     }
+  }
+
+  /**
+   * May the next chunk be scheduled? Without a budget, stay near-sighted;
+   * with one, run ahead until the content span or the byte ceiling is hit.
+   */
+  _withinBudget() {
+    if (this.aheadSeconds == null) {
+      return this.nextToSchedule - this.nextToWrite < this.workers * 2;
+    }
+    const span = this._startOf(this.nextToSchedule) - this._startOf(this.nextToWrite);
+    if (span >= this.aheadSeconds) return false;
+    if (this.aheadBytes != null && this._cacheBytes >= this.aheadBytes) return false;
+    return true;
+  }
+
+  /** Encoded-but-unaired content, in seconds — the cushion the UI shows. */
+  cachedSeconds() {
+    let sum = 0;
+    for (const [i, c] of this.chunks) if (c.done && !c.failed) sum += this._durOf(i);
+    return sum;
   }
 
   _encode(index) {
@@ -201,6 +231,10 @@ export class ChunkScheduler extends EventEmitter {
 
       record.done = true;
       record.failed = code !== 0 || !existsSync(out);
+      if (!record.failed) {
+        try { record.bytes = statSync(out).size; this._cacheBytes += record.bytes; }
+        catch { record.bytes = 0; }
+      }
       if (!record.failed) {
         // Going on air is gated on this, not on a timer: the publisher
         // consumes at exactly realtime once connected, so it must never be
@@ -244,7 +278,49 @@ export class ChunkScheduler extends EventEmitter {
    * reads through at once.
    */
   setShift(seconds) {
-    this.shift = Math.max(0, Number(seconds) || 0);
+    // Negative is legal: a seek into the run-ahead cache pulls a chunk
+    // baked FURTHER along the clip back to the current stream head. The
+    // invariant is only that delivered timestamps land forward of what
+    // has aired — the caller owes that, this is just the offset.
+    this.shift = Number(seconds) || 0;
+  }
+
+  /**
+   * Jump delivery to the chunk containing clip position `seconds`.
+   *
+   * The point of the run-ahead cache: a seek whose target is already
+   * encoded needs no new scheduler, no cover card and no re-encode — just
+   * start delivering from a different chunk. Returns the chunk's exact
+   * start position, or null when the target is not in hand (caller falls
+   * back to a full rebuild).
+   */
+  jumpTo(seconds) {
+    let i = null;
+    for (let k = this.nextToWrite; ; k++) {
+      const st = this._startOf(k);
+      if (this.duration != null && st >= this.duration - 0.05) break;
+      if (seconds >= st && seconds < st + this._durOf(k)) { i = k; break; }
+      if (st > seconds) break;
+    }
+    if (i == null) return null;
+    const c = this.chunks.get(i);
+    if (!c || !c.done || c.failed) return null;
+
+    // Abort an in-flight delivery and discard everything before the target.
+    if (this._rs) { try { this._rs.destroy(); } catch { /* gone */ } }
+    this._writing = false;
+    for (let k = this.nextToWrite; k < i; k++) {
+      const drop = this.chunks.get(k);
+      if (drop) {
+        safeUnlink(drop.out);
+        if (drop.bytes) this._cacheBytes -= drop.bytes;
+        this.chunks.delete(k);
+      }
+    }
+    this.nextToWrite = i;
+    this._fill();
+    this._drain();
+    return this._startOf(i);
   }
 
   /** Deliverable path for a chunk: re-stamped when a shift is set. */
@@ -329,6 +405,8 @@ export class ChunkScheduler extends EventEmitter {
 
     this.chunks.delete(this.nextToWrite);
     this.nextToWrite += 1;
+    if (next.bytes) { this._cacheBytes -= next.bytes; next.bytes = 0; }
+    this._fill();   // budget freed — the encoders may move again
 
     if (next.failed) {
       safeUnlink(next.out);
@@ -352,6 +430,7 @@ export class ChunkScheduler extends EventEmitter {
     this._deliverable(next, (path) => {
       if (!this.running) { this._writing = false; return; }
       const rs = createReadStream(path);
+      this._rs = rs;
       const cleanup = () => { safeUnlink(path); if (path !== next.out) safeUnlink(next.out); };
       rs.on('error', () => { this._writing = false; cleanup(); this._drain(); });
       rs.on('end', () => {
