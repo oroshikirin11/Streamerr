@@ -383,8 +383,13 @@ function wirePreview(e) {
         const tail = keyframeTail();
         if (tail) {
           ws.jsrNeedsSync = false;
+          // The tail ALREADY ends with the current chunk — it was pushed
+          // into the ring above before this loop ran. Sending the chunk
+          // again handed every joining client a duplicated packet run with
+          // backwards continuity counters as its very first bytes; the
+          // demuxer sometimes shrugged and sometimes froze on the first
+          // frame — the still-picture-after-retoggle report.
           ws.send(tail);
-          ws.send(chunk);
           continue;
         }
         // No keyframe in the ring yet — packet-align onto the live tail.
