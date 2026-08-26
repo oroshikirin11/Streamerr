@@ -41,7 +41,44 @@ function isMounted(mountpoint) {
  * (mountpoint plus the optional subfolder). Idempotent: an existing mount
  * is reused, so restarts don't stack mounts or fail on EBUSY.
  */
-export function ensureSmbMount({ host, share, path = '', username = '', password = '', guest = true }, runDir) {
+/**
+ * Accept the address in every form people actually paste: a bare host, an
+ * smb:// URL with user and share embedded, or a Windows UNC path. Returns
+ * normalized components; explicit fields win over URL-embedded ones only
+ * where the URL does not carry them.
+ */
+export function parseSmbTarget({ host = '', share = '', path = '', username = '', password = '', guest = true }) {
+  let h = String(host).trim()
+    .replace(/^smb:\/\//i, '')
+    .replace(/^\\\\/, '')
+    .replace(/\\/g, '/');
+  let user = username;
+  const at = h.indexOf('@');
+  if (at !== -1) {
+    const cred = h.slice(0, at);
+    h = h.slice(at + 1);
+    if (!user) {
+      const colon = cred.indexOf(':');
+      user = colon === -1 ? cred : cred.slice(0, colon);
+      if (colon !== -1 && !password) password = cred.slice(colon + 1);
+    }
+  }
+  const segs = h.split('/').filter(Boolean);
+  h = segs.shift() ?? '';
+  // A URL that names its share is authoritative for share and folder —
+  // whatever it says IS where the media lives.
+  let sh = share;
+  let p = path;
+  if (segs.length) {
+    sh = segs.shift();
+    p = segs.length ? segs.join('/') : p;
+  }
+  if (user && guest) guest = false;
+  return { host: h, share: sh, path: p, username: user, password, guest };
+}
+
+export function ensureSmbMount(target, runDir) {
+  const { host, share, path = '', username = '', password = '', guest = true } = parseSmbTarget(target);
   return new Promise((resolve, reject) => {
     if (!host || !share) {
       reject(new Error('SMB share is not configured: host and share name are required.'));

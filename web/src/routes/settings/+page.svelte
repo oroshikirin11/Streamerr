@@ -432,8 +432,31 @@
       <input type="password" bind:value={jellyfinKey}
              placeholder={jfKeyStored ? 'leave blank to keep the saved key' : 'Dashboard → API Keys'} />
     {:else if cfg.library.provider === 'smb'}
-      <label>Server (hostname or IP)</label>
-      <input bind:value={cfg.library.smb.host} spellcheck="false" placeholder="nas.local" />
+      <label>Server (hostname, IP, or a full smb:// address)</label>
+      <input bind:value={cfg.library.smb.host} spellcheck="false"
+             placeholder="nas.local  or  smb://user@nas/share/folder"
+             onchange={() => {
+               // A pasted smb:// URL or UNC path distributes into the
+               // fields below, so what you see is exactly what mounts.
+               let h = cfg.library.smb.host.trim()
+                 .replace(/^smb:\/\//i, '').replace(/^\\\\/, '').replace(/\\/g, '/');
+               const at = h.indexOf('@');
+               if (at !== -1) {
+                 const cred = h.slice(0, at); h = h.slice(at + 1);
+                 const colon = cred.indexOf(':');
+                 cfg.library.smb.username = colon === -1 ? cred : cred.slice(0, colon);
+                 if (colon !== -1) smbPassword = cred.slice(colon + 1);
+                 cfg.library.smb.guest = false;
+               }
+               const segs = h.split('/').filter(Boolean);
+               if (segs.length > 1) {
+                 cfg.library.smb.host = segs[0];
+                 cfg.library.smb.share = segs[1];
+                 cfg.library.smb.path = segs.slice(2).join('/');
+               } else {
+                 cfg.library.smb.host = segs[0] ?? '';
+               }
+             }} />
       <label>Share name</label>
       <input bind:value={cfg.library.smb.share} spellcheck="false" placeholder="media" />
       <label>Folder within the share (optional)</label>
