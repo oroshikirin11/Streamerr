@@ -473,9 +473,8 @@
                placeholder={cfg.library.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
       {/if}
       <p class="muted small" style="margin-top:6px;">
-        The share is mounted read-only by the service itself. In Docker this
-        needs <code>cap_add: [SYS_ADMIN]</code>; the Test button will say so
-        if it is missing.
+        Read directly over the network — no mount, no privileges, works in
+        any container. The share is only ever read.
       </p>
     {:else}
       <label>Folders, one per line</label>

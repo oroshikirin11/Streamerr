@@ -525,6 +525,46 @@ app.get('/api/fs/dirs', (req, res) => {
   res.json({ path, parent: parent === path ? null : parent, dirs });
 });
 
+/**
+ * The SMB bridge: ffmpeg reads share files as localhost HTTP with Range
+ * support, so seeking and probing work without any mount. Strictly local —
+ * the panel port faces the LAN, but media bytes are only served to this
+ * machine's own processes.
+ */
+app.get('/smbmedia/*', async (req, res) => {
+  const remote = req.socket.remoteAddress ?? '';
+  if (!/^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(remote)) {
+    return res.status(403).end();
+  }
+  if (typeof library?.stream !== 'function') return res.status(404).end();
+  const rel = decodeURIComponent(req.path.replace(/^\/smbmedia\//, ''));
+  try {
+    const size = await library.size(rel);
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    let start = 0;
+    let end = size - 1;
+    if (range && (range[1] || range[2])) {
+      start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+      end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : end;
+      if (start > end || start >= size) {
+        return res.status(416).set('Content-Range', `bytes */${size}`).end();
+      }
+      res.status(206).set('Content-Range', `bytes ${start}-${end}/${size}`);
+    }
+    res.set({
+      'Accept-Ranges': 'bytes',
+      'Content-Length': String(end - start + 1),
+      'Content-Type': 'application/octet-stream',
+    });
+    const s2 = await library.stream(rel, { start, end });
+    s2.on('error', () => res.destroy());
+    res.on('close', () => s2.destroy?.());
+    s2.pipe(res);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.get('/api/config', (req, res) => res.json({
   ...redactedConfig(),
   // Computed, not stored: what 'auto' resolves to on THIS machine, so the
