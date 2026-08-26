@@ -474,7 +474,11 @@
       {/if}
       <p class="muted small" style="margin-top:6px;">
         Read directly over the network — no mount, no privileges, works in
-        any container. The share is only ever read.
+        any container. The share is only ever read. Note: the first
+        playback of each file is slower than from local disk (subtitle
+        extraction reads it once in full over the network), and heavy
+        CPU-transcoded media may start noticeably slower than it would
+        from a local folder or Jellyfin mount.
       </p>
     {:else}
       <label>Folders, one per line</label>
