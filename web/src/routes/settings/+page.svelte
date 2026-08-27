@@ -47,6 +47,111 @@
   ];
   let resPreset = $state('1080p');
 
+  /**
+   * The values worth offering for the fields that used to be open boxes.
+   *
+   * Each keeps a "Custom" escape hatch, so nothing that was settable before
+   * stopped being settable — the list just means the common answer is one
+   * click and a typo is not a silent misconfiguration.
+   */
+  const FPS_PRESETS = [24, 25, 30, 48, 50, 60];
+  const GOP_PRESETS = [1, 2, 3, 4];
+  const VBR_PRESETS = ['2000k', '3000k', '4500k', '6000k', '8000k', '12000k', '16000k'];
+  const ABR_PRESETS = ['96k', '128k', '160k', '192k', '256k'];
+  const SCAN_PRESETS = [6, 12, 24, 48, 168];
+  const scanLabel = (h) => (h === 168 ? 'Weekly' : h === 24 ? 'Daily' : `Every ${h} hours`);
+
+  /** Server-supplied choices: the language table and the real /dev/dri nodes. */
+  let options = $state(null);
+
+  // Which dropdown entry is showing. 'custom' reveals the original free field.
+  let fpsSel = $state('30');
+  let gopSel = $state('2');
+  let vbrSel = $state('4500k');
+  let abrSel = $state('160k');
+  let scanSel = $state('12');
+  let devSel = $state('/dev/dri/renderD128');
+  /** Codes the picker does not offer — normLang passes those through. */
+  let extraLangs = $state('');
+
+  /** A bitrate may be stored bare ("4500") or suffixed ("4500k"); one form. */
+  const brKey = (v) => {
+    const t = String(v ?? '').trim().toLowerCase();
+    return /^\d+$/.test(t) ? `${t}k` : t;
+  };
+
+  const pick = (list, value) => (list.some((x) => String(x) === String(value)) ? String(value) : 'custom');
+
+  /**
+   * The encoder choices: the static list straight away, replaced by the
+   * probe's verdict once it has run so failures show their reason.
+   */
+  const encoderList = $derived(encoders?.encoders ?? options?.encoderBackends ?? []);
+
+  /** Point every dropdown at whatever is actually stored. */
+  function syncPickers() {
+    fpsSel = pick(FPS_PRESETS, cfg.encoder.fps);
+    gopSel = pick(GOP_PRESETS, cfg.encoder.gopSeconds);
+    vbrSel = pick(VBR_PRESETS, brKey(cfg.encoder.videoBitrate));
+    abrSel = pick(ABR_PRESETS, brKey(cfg.encoder.audioBitrate));
+    scanSel = pick(SCAN_PRESETS, cfg.library.autoRefresh.hours);
+    const devs = options?.renderDevices ?? [];
+    devSel = devs.includes(cfg.encoder.device) ? cfg.encoder.device : 'custom';
+    const offered = new Set((options?.languages ?? []).map((l) => l.code));
+    // A config written before this invariant existed may interleave the two;
+    // settle it once on load so the badges and the stored order agree.
+    cfg.tracks.languages = normalizeLangs(cfg.tracks.languages ?? []);
+    extraLangs = (cfg.tracks.languages ?? []).filter((c) => !offered.has(c)).join(', ');
+  }
+
+  /** Apply a dropdown choice; 'custom' leaves the stored value alone. */
+  function choose(key, value) {
+    if (value !== 'custom') cfg.encoder[key] = /^\d+$/.test(value) ? Number(value) : value;
+  }
+
+  // ── languages ──────────────────────────────────────────────────────────
+  // Order is preference order: the matcher walks the list and takes the
+  // first track that matches, so a chip shows its rank, not just on/off.
+  const langRank = (code) => (cfg?.tracks?.languages ?? []).indexOf(code);
+
+  /**
+   * Listed languages first (in preference order), then anything typed into
+   * "other languages". The picker has no way to place a typed code above a
+   * chip, so this is the only ordering it can honestly represent — enforcing
+   * it keeps the rank badges reading 1..n instead of skipping numbers that
+   * belong to codes shown nowhere.
+   */
+  function normalizeLangs(list) {
+    const offered = new Set((options?.languages ?? []).map((l) => l.code));
+    return [...list.filter((c) => offered.has(c)), ...list.filter((c) => !offered.has(c))];
+  }
+
+  function toggleLang(code) {
+    const list = [...(cfg.tracks.languages ?? [])];
+    const at = list.indexOf(code);
+    if (at >= 0) list.splice(at, 1);
+    else list.push(code);
+    cfg.tracks.languages = normalizeLangs(list);
+  }
+
+  /** Merge the free-text box back in, keeping the offered codes in order. */
+  function applyExtras() {
+    const offered = new Set((options?.languages ?? []).map((l) => l.code));
+    const kept = (cfg.tracks.languages ?? []).filter((c) => offered.has(c));
+    cfg.tracks.languages = normalizeLangs([...kept, ...parseList(extraLangs)]);
+  }
+
+  /**
+   * A rough bitrate for the chosen frame size and rate — about 0.07 bits per
+   * pixel per frame, the usual H.264 streaming ballpark. Advisory only.
+   */
+  const recommendedVbr = $derived.by(() => {
+    const w = +cfg?.encoder?.width || 1920;
+    const h = +cfg?.encoder?.height || 1080;
+    const f = +cfg?.encoder?.fps || 30;
+    return Math.round((w * h * f * 0.07) / 1000 / 500) * 500;
+  });
+
   function syncPresetFromCfg() {
     const hit = RES_PRESETS.find((r) => r.w === +cfg.encoder.width && r.h === +cfg.encoder.height);
     resPreset = hit ? hit.key : 'custom';
@@ -83,6 +188,10 @@
       cfg.tracks.subtitleMode ??= 'auto';
       selectSource(Math.min(sel, cfg.library.sources.length - 1));
       syncPresetFromCfg();
+      // Best-effort: if this fails the pickers fall back to free text
+      // rather than the page failing to render.
+      try { options = await api.get('/api/options'); } catch { options = null; }
+      syncPickers();
     } catch (err) { error = err.message; }
   }
 
@@ -380,20 +489,58 @@
       <div>
         <label>Framerate</label>
         <select bind:value={cfg.encoder.fpsMode}>
-          <option value="auto">Auto — match source</option>
+          <option value="auto">Auto</option>
           <option value="fixed">Fixed</option>
         </select>
       </div>
       <div>
         <label>{cfg.encoder.fpsMode === 'fixed' ? 'Framerate' : 'Framerate cap'}</label>
-        <input type="number" bind:value={cfg.encoder.fps} />
+        <select bind:value={fpsSel} onchange={() => choose('fps', fpsSel)}>
+          {#each FPS_PRESETS as f}<option value={String(f)}>{f} fps</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if fpsSel === 'custom'}
+          <input class="exact" type="number" min="1" max="240" aria-label="Exact framerate"
+                 bind:value={cfg.encoder.fps} />
+        {/if}
       </div>
-      <div><label>Video bitrate (kbps)</label><input bind:value={cfg.encoder.videoBitrate} /></div>
-      <div><label>Audio bitrate (kbps)</label><input bind:value={cfg.encoder.audioBitrate} /></div>
-      <div><label>Keyframes (s)</label><input type="number" bind:value={cfg.encoder.gopSeconds} /></div>
+      <div>
+        <label>Video bitrate</label>
+        <select bind:value={vbrSel} onchange={() => choose('videoBitrate', vbrSel)}>
+          {#each VBR_PRESETS as b}<option value={b}>{parseInt(b, 10).toLocaleString()} kbps</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if vbrSel === 'custom'}
+          <input class="exact" bind:value={cfg.encoder.videoBitrate} spellcheck="false"
+                 aria-label="Exact video bitrate" placeholder="4500k" />
+        {/if}
+      </div>
+      <div>
+        <label>Audio bitrate</label>
+        <select bind:value={abrSel} onchange={() => choose('audioBitrate', abrSel)}>
+          {#each ABR_PRESETS as b}<option value={b}>{parseInt(b, 10)} kbps</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if abrSel === 'custom'}
+          <input class="exact" bind:value={cfg.encoder.audioBitrate} spellcheck="false"
+                 aria-label="Exact audio bitrate" placeholder="160k" />
+        {/if}
+      </div>
+      <div>
+        <label>Keyframes</label>
+        <select bind:value={gopSel} onchange={() => choose('gopSeconds', gopSel)}>
+          {#each GOP_PRESETS as g}<option value={String(g)}>{g} second{g === 1 ? '' : 's'}</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if gopSel === 'custom'}
+          <input class="exact" type="number" min="1" max="60" aria-label="Exact keyframe interval"
+                 bind:value={cfg.encoder.gopSeconds} />
+        {/if}
+      </div>
     </div>
     <p class="muted small">
-      Bitrates are in kbps &mdash; 4500 is a reasonable 1080p30 figure, and
+      About {recommendedVbr.toLocaleString()} kbps suits
+      {cfg.encoder.width}&times;{cfg.encoder.height} at {cfg.encoder.fps}fps, and
       anything above your upload speed will stutter for viewers. Auto
       framerate outputs each file at its native rate (24fps anime stays
       24fps &mdash; less GPU work, no judder) up to the cap; 60fps sources
@@ -405,29 +552,57 @@
     </p>
 
     <label>Encoder</label>
-    {#if encoders}
+    {#if encoderList.length}
       <ul class="enc">
         <li>
           <input type="radio" bind:group={cfg.encoder.backend} value="auto" id="s-auto" />
           <label for="s-auto">Automatic <span class="muted small">— best that works</span></label>
         </li>
-        {#each encoders.encoders as e}
+        {#each encoderList as e}
           <li>
+            <!-- Before the probe has run nothing is known to be broken, so
+                 nothing is disabled; the probe fills in the failures. -->
             <input type="radio" bind:group={cfg.encoder.backend} value={e.backend}
-                   disabled={!e.ok} id={`s-${e.backend}`} />
-            <label for={`s-${e.backend}`} class:dim={!e.ok}>
-              {e.label}{#if !e.ok}<span class="muted small"> — {e.error}</span>{/if}
+                   disabled={e.ok === false} id={`s-${e.backend}`} />
+            <label for={`s-${e.backend}`} class:dim={e.ok === false}>
+              {e.label}{#if e.ok === false}<span class="muted small"> — {e.error}</span>{/if}
             </label>
           </li>
         {/each}
       </ul>
-      <p class="muted small">ffmpeg {encoders.ffmpeg}</p>
+      {#if encoders}
+        <p class="muted small">ffmpeg {encoders.ffmpeg}</p>
+      {:else}
+        <p class="muted small">Probe to see which of these this machine can actually use.</p>
+      {/if}
     {:else}
       <input bind:value={cfg.encoder.backend} spellcheck="false" />
     {/if}
 
     <label>Render device</label>
-    <input bind:value={cfg.encoder.device} spellcheck="false" />
+    {#if options?.renderDevices?.length}
+      <select bind:value={devSel} onchange={() => { if (devSel !== 'custom') cfg.encoder.device = devSel; }}>
+        {#each options.renderDevices as d}<option value={d}>{d}</option>{/each}
+        <option value="custom">Custom</option>
+      </select>
+      {#if devSel === 'custom'}
+        <input bind:value={cfg.encoder.device} spellcheck="false" style="margin-top:8px" />
+      {/if}
+      {#if options.renderDevices.length > 1}
+        <p class="muted small">
+          This machine exposes {options.renderDevices.length} render nodes. If
+          the encoder probe fails on one, try the other.
+        </p>
+      {/if}
+    {:else}
+      <!-- No /dev/dri to enumerate: a CPU-only host, or the device was never
+           passed into the container. Nothing to offer, so ask. -->
+      <input bind:value={cfg.encoder.device} spellcheck="false" />
+      <p class="muted small">
+        No <code>/dev/dri</code> render node is visible here, so hardware
+        encoding will not work until one is passed into the container.
+      </p>
+    {/if}
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
       <input type="checkbox" bind:checked={cfg.encoder.hwDecode} style="width:auto" />
@@ -448,11 +623,12 @@
       </div>
     </div>
     <p class="muted small">
-      Encodes several sections of the CPU path at once. Whether it helps
-      varies wildly by machine &mdash; measured 3.5&times; on one box and
-      <em>slower</em> than a single worker on another &mdash; and it costs one
-      chunk-length of delay before playback starts. Leave at 1 unless
-      <code>cli.js benchmark &lt;file&gt;</code> shows a clear win.
+      How much video each worker on the CPU path encodes at a time. Longer
+      chunks mean fewer seams, but a longer wait before playback starts &mdash;
+      the first chunk has to finish before anything goes out. 20s suits most
+      machines; shorten it if startup feels slow. How many workers run at once
+      is decided per clip by the engine, since the right answer depends on
+      whether that file can use the GPU compositor.
     </p>
 
     <p class="muted small" style="margin-top:14px;">
@@ -635,12 +811,35 @@
       You can change audio or subtitles at any time, including mid-episode.
     </p>
     <label>Languages you understand</label>
-    <input value={(cfg.tracks.languages || []).join(', ')}
-           oninput={(e) => (cfg.tracks.languages = parseList(e.currentTarget.value))}
-           placeholder="eng" spellcheck="false" />
-    <p class="muted small">
-      Used both to pick a dub and to choose a subtitle language.
-    </p>
+    {#if options?.languages?.length}
+      <div class="langs">
+        {#each options.languages as l}
+          <button class="chip" class:on={langRank(l.code) >= 0}
+                  onclick={() => toggleLang(l.code)}
+                  title={l.code}>
+            {#if langRank(l.code) >= 0}<span class="pri">{langRank(l.code) + 1}</span>{/if}
+            {l.name}
+          </button>
+        {/each}
+      </div>
+      <p class="muted small">
+        Click in order of preference &mdash; the first one a file offers wins.
+        Used both to pick a dub and to choose a subtitle language.
+      </p>
+      <label>Other languages (optional)</label>
+      <input bind:value={extraLangs} onchange={applyExtras} spellcheck="false"
+             placeholder="swe, dan — ISO codes not listed above" />
+      <p class="muted small">Tried after the ones selected above.</p>
+    {:else}
+      <!-- The options fetch failed; fall back to the raw list so the setting
+           stays editable rather than disappearing. -->
+      <input value={(cfg.tracks.languages || []).join(', ')}
+             oninput={(e) => (cfg.tracks.languages = parseList(e.currentTarget.value))}
+             placeholder="eng" spellcheck="false" />
+      <p class="muted small">
+        Used both to pick a dub and to choose a subtitle language.
+      </p>
+    {/if}
 
     <label>Audio</label>
     <select bind:value={cfg.tracks.audioMode}>
@@ -742,13 +941,24 @@
       {#if saved === 'autoscan'}<span class="ok small">Saved</span>{/if}
     </label>
     {#if cfg.library.autoRefresh.enabled}
-      <label class="row" style="margin-top:10px;">
-        <span>Every</span>
-        <input type="number" min="1" max="168" step="1"
-               bind:value={cfg.library.autoRefresh.hours}
-               onchange={saveAutoRefresh} style="width:80px" />
-        <span>hours</span>
-      </label>
+      <div style="margin-top:10px; max-width: 260px;">
+        <select bind:value={scanSel} onchange={() => {
+          if (scanSel !== 'custom') cfg.library.autoRefresh.hours = Number(scanSel);
+          saveAutoRefresh();
+        }}>
+          {#each SCAN_PRESETS as h}<option value={String(h)}>{scanLabel(h)}</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if scanSel === 'custom'}
+          <label class="row" style="margin-top:8px;">
+            <span>Every</span>
+            <input type="number" min="1" max="168" step="1"
+                   bind:value={cfg.library.autoRefresh.hours}
+                   onchange={saveAutoRefresh} style="width:80px" />
+            <span>hours</span>
+          </label>
+        {/if}
+      </div>
     {/if}
     <p class="muted small">
       Asks every Jellyfin source to rescan, then reloads the shelves — so an
@@ -771,10 +981,9 @@
       {#if saved === 'ui'}<span class="ok small">Saved</span>{/if}
     </label>
     <p class="muted small">
-      Off by default, and best left off for most libraries: the browser will
-      not start fetching a poster until it is nearly on screen, so scrolling
-      outruns it and the shelf fills in behind you. Turn it on for a library
-      large enough that requesting a whole shelf at once is the greater cost.
+      Mainly for Jellyfin sources &mdash; folder and SMB libraries only show
+      artwork where a poster file sits beside the media. Leave off unless a
+      shelf is big enough that fetching it all at once is the slower option.
     </p>
   </section>
 
@@ -860,6 +1069,9 @@
     background: var(--surface); padding: 8px 11px;
   }
   .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  /* The free field a "Custom" choice reveals, tucked under its own select so
+     the pair never gets split across a wrapped grid row. */
+  .exact { margin-top: 6px; }
   .actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   /* Direct children only: this rule sizes the path-mapping text fields, and
      unscoped it also stretched radio buttons nested inside labels. */
@@ -867,6 +1079,22 @@
   .actions button { flex-shrink: 0; }
   .ok { color: var(--success); animation: okin .2s ease; }
   @keyframes okin { from { opacity: 0; transform: translateX(-4px); } }
+  .langs { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 0; }
+  .langs .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 13px; border-radius: 999px; font-size: 13px;
+    background: var(--surface-2); border: 1px solid transparent; color: var(--muted);
+  }
+  .langs .chip:hover { color: var(--text); }
+  .langs .chip.on { color: var(--accent); border-color: var(--accent); background: transparent; }
+  /* The rank, not a count: preference order decides which dub is picked. */
+  .langs .pri {
+    display: inline-grid; place-items: center;
+    width: 17px; height: 17px; border-radius: 50%;
+    background: var(--accent); color: var(--bg);
+    font-size: 11px; font-weight: 600;
+  }
+
   .srcbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
   .srcbar .chip {
     padding: 5px 13px; border-radius: 999px; font-size: 13px;

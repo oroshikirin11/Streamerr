@@ -422,10 +422,10 @@ Everything the wizard configures is editable later, grouped in the UI:
 | Group | Covers |
 |---|---|
 | **Owncast** | RTMP address, stream key, connection test, 30s watch test |
-| **Output** | resolution preset or custom, framerate (auto/fixed), bitrates, keyframe interval, encoder, render device |
+| **Output** | resolution, framerate, bitrates, keyframe interval, encoder, render device &mdash; each a list of the usual answers, with Custom for anything else |
 | **Library** | any number of sources — Jellyfin, folder, SMB — with a directory browser |
 | **Path mapping** | only when Jellyfin's paths differ from this container's |
-| **Languages** | languages you understand, original vs dubbed, subtitle policy |
+| **Languages** | pick the languages you understand, original vs dubbed, subtitle policy |
 | **Run-ahead cache** | on/off, RAM budget (auto-recommended from the machine) |
 | **Live preview** | the floating preview window (on by default) |
 | **Automatic library scan** | on/off and how often (12 hours by default) |

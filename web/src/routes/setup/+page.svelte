@@ -52,6 +52,37 @@
 
   // step 5
   let cfgTracks = $state({ languages: ['eng'], audioMode: 'original', subtitleMode: 'auto' });
+  /** The offered languages, from the server, so onboarding matches Settings. */
+  let options = $state(null);
+  let extraLangs = $state('');
+
+  const langRank = (code) => (cfgTracks.languages ?? []).indexOf(code);
+
+  /**
+   * Listed languages first (in preference order), then anything typed into
+   * "other languages". The picker has no way to place a typed code above a
+   * chip, so this is the only ordering it can honestly represent — enforcing
+   * it keeps the rank badges reading 1..n instead of skipping numbers that
+   * belong to codes shown nowhere.
+   */
+  function normalizeLangs(list) {
+    const offered = new Set((options?.languages ?? []).map((l) => l.code));
+    return [...list.filter((c) => offered.has(c)), ...list.filter((c) => !offered.has(c))];
+  }
+
+  function toggleLang(code) {
+    const list = [...(cfgTracks.languages ?? [])];
+    const at = list.indexOf(code);
+    if (at >= 0) list.splice(at, 1);
+    else list.push(code);
+    cfgTracks = { ...cfgTracks, languages: normalizeLangs(list) };
+  }
+
+  function applyExtras() {
+    const offered = new Set((options?.languages ?? []).map((l) => l.code));
+    const kept = (cfgTracks.languages ?? []).filter((c) => offered.has(c));
+    cfgTracks = { ...cfgTracks, languages: normalizeLangs([...kept, ...parseList(extraLangs)]) };
+  }
 
   onMount(async () => {
     try {
@@ -72,6 +103,10 @@
         audioMode: cfg.tracks?.audioMode ?? 'original',
         subtitleMode: cfg.tracks?.subtitleMode ?? 'auto',
       };
+      try { options = await api.get('/api/options'); } catch { options = null; }
+      const offered = new Set((options?.languages ?? []).map((l) => l.code));
+      cfgTracks = { ...cfgTracks, languages: normalizeLangs(cfgTracks.languages ?? []) };
+      extraLangs = (cfgTracks.languages ?? []).filter((c) => !offered.has(c)).join(', ');
     } catch (err) { error = err.message; }
   });
 
@@ -331,12 +366,32 @@
         per episode, or change it while something is playing.
       </p>
     <label>Languages you understand</label>
-      <input value={(cfgTracks.languages || []).join(', ')}
-             oninput={(e) => (cfgTracks.languages = parseList(e.currentTarget.value))}
-             placeholder="eng" spellcheck="false" />
-      <p class="muted small">
-        Used both to pick a dub and to choose a subtitle language.
-      </p>
+      {#if options?.languages?.length}
+        <div class="langs">
+          {#each options.languages as l}
+            <button class="chip" class:on={langRank(l.code) >= 0}
+                    onclick={() => toggleLang(l.code)} title={l.code}>
+              {#if langRank(l.code) >= 0}<span class="pri">{langRank(l.code) + 1}</span>{/if}
+              {l.name}
+            </button>
+          {/each}
+        </div>
+        <p class="muted small">
+          Click in order of preference &mdash; the first one a file offers wins.
+          Used both to pick a dub and to choose a subtitle language.
+        </p>
+        <label>Other languages (optional)</label>
+        <input bind:value={extraLangs} onchange={applyExtras} spellcheck="false"
+               placeholder="swe, dan — ISO codes not listed above" />
+        <p class="muted small">Tried after the ones selected above.</p>
+      {:else}
+        <input value={(cfgTracks.languages || []).join(', ')}
+               oninput={(e) => (cfgTracks.languages = parseList(e.currentTarget.value))}
+               placeholder="eng" spellcheck="false" />
+        <p class="muted small">
+          Used both to pick a dub and to choose a subtitle language.
+        </p>
+      {/if}
 
       <label>Audio</label>
       <select bind:value={cfgTracks.audioMode}>
@@ -373,6 +428,22 @@
 </div>
 
 <style>
+  .langs { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 0; }
+  .langs .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 13px; border-radius: 999px; font-size: 13px;
+    background: var(--surface-2); border: 1px solid transparent; color: var(--muted);
+  }
+  .langs .chip:hover { color: var(--text); }
+  .langs .chip.on { color: var(--accent); border-color: var(--accent); background: transparent; }
+  /* The rank, not a count: preference order decides which dub is picked. */
+  .langs .pri {
+    display: inline-grid; place-items: center;
+    width: 17px; height: 17px; border-radius: 50%;
+    background: var(--accent); color: var(--bg);
+    font-size: 11px; font-weight: 600;
+  }
+
   .wrap { max-width: 620px; margin: 0 auto; }
   .steps { display: flex; gap: 4px; margin: 8px 0 16px; }
   .seg { flex: 1; height: 3px; border-radius: 2px; background: var(--surface-2); }

@@ -16,24 +16,35 @@ import { existsSync, readdirSync } from 'fs';
 import { basename, dirname, extname, join } from 'path';
 
 /**
- * ISO 639-2/B and /T both appear in the wild, sometimes alongside 639-1.
- * Normalising to one form per language means a file tagged `deu` and a user
- * preference of `ger` still match.
+ * The languages the panel offers by name.
+ *
+ * ISO 639-2/B and /T both appear in the wild, sometimes alongside 639-1, so
+ * each entry lists every spelling seen on a real file — a file tagged `deu`
+ * and a preference of `ger` have to match. This table is also what the
+ * settings picker is built from, so the codes on offer and the codes that
+ * actually resolve can never drift apart.
+ *
+ * Not a closed set: normLang passes an unrecognised code through unchanged,
+ * so a share full of Swedish still works by typing `swe`.
  */
-const LANG_ALIASES = {
-  de: 'ger', deu: 'ger', ger: 'ger', german: 'ger',
-  en: 'eng', eng: 'eng', english: 'eng',
-  ja: 'jpn', jpn: 'jpn', japanese: 'jpn',
-  fr: 'fre', fra: 'fre', fre: 'fre', french: 'fre',
-  es: 'spa', spa: 'spa', spanish: 'spa',
-  it: 'ita', ita: 'ita', italian: 'ita',
-  nl: 'dut', nld: 'dut', dut: 'dut', dutch: 'dut',
-  pt: 'por', por: 'por', portuguese: 'por',
-  ru: 'rus', rus: 'rus', russian: 'rus',
-  zh: 'chi', zho: 'chi', chi: 'chi', chinese: 'chi',
-  ko: 'kor', kor: 'kor', korean: 'kor',
-  pl: 'pol', pol: 'pol', polish: 'pol',
-};
+export const LANGUAGES = [
+  { code: 'eng', name: 'English', aliases: ['en', 'english'] },
+  { code: 'jpn', name: 'Japanese', aliases: ['ja', 'japanese'] },
+  { code: 'ger', name: 'German', aliases: ['de', 'deu', 'german'] },
+  { code: 'fre', name: 'French', aliases: ['fr', 'fra', 'french'] },
+  { code: 'spa', name: 'Spanish', aliases: ['es', 'spanish'] },
+  { code: 'ita', name: 'Italian', aliases: ['it', 'italian'] },
+  { code: 'dut', name: 'Dutch', aliases: ['nl', 'nld', 'dutch'] },
+  { code: 'por', name: 'Portuguese', aliases: ['pt', 'portuguese'] },
+  { code: 'rus', name: 'Russian', aliases: ['ru', 'russian'] },
+  { code: 'chi', name: 'Chinese', aliases: ['zh', 'zho', 'chinese'] },
+  { code: 'kor', name: 'Korean', aliases: ['ko', 'korean'] },
+  { code: 'pol', name: 'Polish', aliases: ['pl', 'polish'] },
+];
+
+const LANG_ALIASES = Object.fromEntries(
+  LANGUAGES.flatMap((l) => [l.code, ...l.aliases].map((a) => [a, l.code])),
+);
 
 export function normLang(code) {
   if (!code) return null;

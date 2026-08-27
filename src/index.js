@@ -26,7 +26,8 @@ import {
   probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
   pickPillarboxGraph,
 } from './ffmpeg/probe.js';
-import { normalizeBitrate } from './ffmpeg/encoders.js';
+import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
+import { LANGUAGES } from './ffmpeg/tracks.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
@@ -901,6 +902,35 @@ app.post('/api/check/owncast-title', async (req, res) => {
   } catch (err) {
     res.json({ ok: false, error: `Could not reach ${apiUrl}: ${err.cause?.message ?? err.message}` });
   }
+});
+
+/**
+ * The fixed sets the settings form builds its pickers from.
+ *
+ * Served rather than duplicated in the frontend so a language the panel
+ * offers is always one the track matcher resolves, and so the render device
+ * list is the machine's actual one instead of a guess.
+ */
+app.get('/api/options', (req, res) => {
+  let renderDevices = [];
+  try {
+    renderDevices = readdirSync('/dev/dri')
+      .filter((n) => n.startsWith('render'))
+      .sort()
+      .map((n) => `/dev/dri/${n}`);
+  } catch {
+    // No /dev/dri at all — a CPU-only host, or the device was not passed
+    // into the container. The form falls back to a free text field.
+  }
+  res.json({
+    languages: LANGUAGES.map(({ code, name }) => ({ code, name })),
+    renderDevices,
+    // Names and labels are static; only whether each one WORKS needs the
+    // probe. Sending them up front means the encoder choice is a list from
+    // the moment the page loads instead of a free text box until you
+    // remember to press Probe.
+    encoderBackends: Object.entries(BACKENDS).map(([backend, b]) => ({ backend, label: b.label })),
+  });
 });
 
 app.get('/api/check/encoders', async (req, res) => {
