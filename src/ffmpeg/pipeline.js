@@ -899,6 +899,13 @@ export class PipelinePlayout extends EventEmitter {
       // FLV's codec ids for AVC and AAC. Copying from MPEG-TS carries the TS
       // stream types across, which the flv muxer rejects.
       '-tag:v', '7', '-tag:a', '10',
+      // Only to fill in onMetaData's videodatarate. H.264 carries no bitrate
+      // of its own and this is a stream copy, so the flv muxer would write a
+      // zero there — which Owncast reports as "Unknown kbps" and logs as
+      // "Bandwidth info not available". Copying is unaffected: with -c copy
+      // this never reaches an encoder, and the muxed payload is byte for
+      // byte the same. (AAC carries its own rate, so audio already reports.)
+      ...(this.profile?.videoBitrate ? ['-b:v', String(this.profile.videoBitrate)] : []),
       '-muxdelay', '0', '-muxpreload', '0', '-max_interleave_delta', '0',
       '-flvflags', 'no_duration_filesize+no_sequence_end',
       ...(/^rtmps?:\/\//i.test(this.target) ? [] : ['-y']),
