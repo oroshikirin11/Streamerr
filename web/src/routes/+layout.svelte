@@ -301,10 +301,15 @@
   // you are still looking, and a page-level banner ends up wherever the
   // markup happens to sit — at the bottom of a long scrolling library, in
   // the case that prompted this.
+  let toastSeq = 0;
   $effect(() => {
     const h = (e) => {
+      // Compare a token, not the object. Assigning into $state stores a
+      // PROXY of the detail, so `toast === e.detail` is never true and the
+      // dismissal silently never fired — the toast simply stayed forever.
+      const seq = ++toastSeq;
       toast = e.detail;
-      setTimeout(() => { if (toast === e.detail) toast = null; }, e.detail?.ms ?? 7000);
+      setTimeout(() => { if (toastSeq === seq) toast = null; }, e.detail?.ms ?? 7000);
     };
     window.addEventListener('jsr-toast', h);
     return () => window.removeEventListener('jsr-toast', h);
