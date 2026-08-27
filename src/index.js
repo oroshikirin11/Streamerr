@@ -576,18 +576,45 @@ function redactedConfig() {
       streamKey: config.owncast.streamKey ? '__SET__' : '',
       accessToken: config.owncast.accessToken ? '__SET__' : '',
     },
+    // Secrets live inside each source now. Spreading config.library would
+    // hand them back verbatim, so every source is rebuilt with its own
+    // credentials masked.
     library: {
       ...config.library,
-      jellyfin: {
-        ...config.library.jellyfin,
-        apiKey: config.library.jellyfin?.apiKey ? '__SET__' : '',
-      },
-      smb: {
-        ...config.library.smb,
-        password: config.library.smb?.password ? '__SET__' : '',
-      },
+      sources: (config.library?.sources ?? []).map(redactSource),
     },
   };
+}
+
+/** One source with its credentials replaced by the sentinel. */
+function redactSource(src) {
+  const out = { ...src };
+  if (out.jellyfin) out.jellyfin = { ...out.jellyfin, apiKey: out.jellyfin.apiKey ? '__SET__' : '' };
+  if (out.smb) out.smb = { ...out.smb, password: out.smb.password ? '__SET__' : '' };
+  return out;
+}
+
+/**
+ * Put the real credentials back where the panel echoed the sentinel.
+ *
+ * The UI never receives a secret, so it cannot send one back; an untouched
+ * field returns as '__SET__' and must resolve to whatever is already stored
+ * for that same source, matched by id. Without this, saving any unrelated
+ * setting would blank every key.
+ */
+function restoreSourceSecrets(incoming) {
+  const stored = new Map((config.library?.sources ?? []).map((s) => [s.id, s]));
+  return incoming.map((src) => {
+    const prev = stored.get(src.id);
+    const out = { ...src };
+    if (out.jellyfin?.apiKey === '__SET__') {
+      out.jellyfin = { ...out.jellyfin, apiKey: prev?.jellyfin?.apiKey ?? '' };
+    }
+    if (out.smb?.password === '__SET__') {
+      out.smb = { ...out.smb, password: prev?.smb?.password ?? '' };
+    }
+    return out;
+  });
 }
 
 /** Read-only activity log for the web console. No input path exists. */
@@ -720,8 +747,9 @@ app.put('/api/config', (req, res) => {
   for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken']]) {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
   }
-  if (patch.library?.jellyfin?.apiKey === '__SET__') delete patch.library.jellyfin.apiKey;
-  if (patch.library?.smb?.password === '__SET__') delete patch.library.smb.password;
+  if (Array.isArray(patch.library?.sources)) {
+    patch.library.sources = restoreSourceSecrets(patch.library.sources);
+  }
   delete patch.auth; // password changes go through their own endpoint
 
   // ffmpeg reads a bare number as BITS per second, so a stored "12000"
