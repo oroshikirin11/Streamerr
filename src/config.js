@@ -42,6 +42,13 @@ const DEFAULTS = {
      * normalizeStoredLibrary.
      */
     sources: [],
+    /**
+     * Ask each Jellyfin source to rescan on a timer, so media added to it
+     * turns up without anyone pressing anything. On by default: the cost is
+     * two requests a day, and the alternative is wondering why a new episode
+     * is missing.
+     */
+    autoRefresh: { enabled: true, hours: 12 },
   },
   encoder: {
     backend: 'auto',

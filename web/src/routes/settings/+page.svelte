@@ -75,6 +75,7 @@
       }
       cfg.preview ??= { enabled: true };
       cfg.ui ??= { lazyImages: false };
+      cfg.library.autoRefresh ??= { enabled: true, hours: 12 };
       cfg.runAhead ??= { enabled: true, ramMB: 'auto' };
       cfg.tracks ??= {};
       cfg.tracks.languages ??= ['eng'];
@@ -131,6 +132,16 @@
     cfg.library.sources = cfg.library.sources.filter((_, j) => j !== i);
     selectSource(Math.max(0, Math.min(sel, cfg.library.sources.length - 1)));
     await save('library');
+  }
+
+  async function saveAutoRefresh() {
+    const a = cfg.library.autoRefresh;
+    // Mirror the server's clamp so the field cannot show a value that is not
+    // the one actually in effect.
+    a.hours = Math.min(168, Math.max(1, Math.round(Number(a.hours) || 12)));
+    await api.saveConfig({ library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
+    saved = 'autoscan';
+    setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
   }
 
   function libraryPayload() {
@@ -260,6 +271,7 @@
 {:else}
   {#if error}<p class="err">{error}</p>{/if}
 
+  <div class="cols">
   <!-- Owncast -->
   <section class="card">
     <h3>Owncast</h3>
@@ -720,6 +732,31 @@
     </p>
   </section>
 
+  <!-- Automatic scan -->
+  <section class="card">
+    <h3>Automatic library scan</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.library.autoRefresh.enabled} style="width:auto"
+             onchange={saveAutoRefresh} />
+      Scan for new media automatically
+      {#if saved === 'autoscan'}<span class="ok small">Saved</span>{/if}
+    </label>
+    {#if cfg.library.autoRefresh.enabled}
+      <label class="row" style="margin-top:10px;">
+        <span>Every</span>
+        <input type="number" min="1" max="168" step="1"
+               bind:value={cfg.library.autoRefresh.hours}
+               onchange={saveAutoRefresh} style="width:80px" />
+        <span>hours</span>
+      </label>
+    {/if}
+    <p class="muted small">
+      Asks every Jellyfin source to rescan, then reloads the shelves — so an
+      episode added to your server turns up on its own. The Refresh button on
+      the library page does the same thing immediately.
+    </p>
+  </section>
+
   <!-- Library display -->
   <section class="card">
     <h3>Library display</h3>
@@ -779,6 +816,7 @@
     </div>
     {#if pwMsg}<p class="small">{pwMsg}</p>{/if}
   </section>
+  </div>
 
   {#if browsing}
     <DirBrowser start={parseList(fsRoots)[0] ?? '/'}
@@ -795,8 +833,22 @@
 <style>
   /* Full-width inputs on a wide monitor stretch absurdly; settings read as a
      form, and forms want a centered column, not a strip down the left edge. */
-  .wrap { max-width: 680px; margin: 0 auto; }
+  .wrap { max-width: 1120px; margin: 0 auto; }
   section { margin-bottom: 16px; }
+
+  /* Two columns, packed. Multi-column rather than grid because the cards are
+     wildly different heights — a grid aligns them into rows and leaves a
+     ragged gap under every short one. The browser balances the two column
+     heights itself, so the page ends flat instead of trailing off. */
+  .cols { columns: 2; column-gap: 16px; }
+  /* Without this a card is sliced in half across the column break. */
+  .cols > section { break-inside: avoid; }
+  /* One column when there is no room for two readable ones. 680px was the
+     old single-column width — a lone column should not stretch past it. */
+  @media (max-width: 900px) {
+    .wrap { max-width: 680px; }
+    .cols { columns: 1; }
+  }
   section h3 {
     margin: 0 0 4px; padding-bottom: 10px;
     border-bottom: 1px solid var(--border);

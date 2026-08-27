@@ -234,7 +234,9 @@ function rememberIntent(selection, subtitleMode) {
 
 /** Rebuild the library client whenever its settings change. */
 function refreshLibrary() {
-  library = makeLibrary(config);
+  // Hand over the old instance so unchanged SMB sources keep their bridge
+  // token; see makeLibrary.
+  library = makeLibrary(config, library);
 }
 
 const clients = new Set();
@@ -817,6 +819,7 @@ app.put('/api/config', (req, res) => {
   try {
     saveConfig(patch);
     refreshLibrary();
+    scheduleAutoScan();
     // Turning the preview off mid-broadcast takes effect immediately: every
     // open panel learns via the status push, and connected preview windows
     // are cut rather than left streaming a feature that is now disabled.
@@ -967,7 +970,7 @@ const wrap = (fn) => async (req, res) => {
  * missing episode is almost always one Jellyfin has not indexed yet, and
  * refetching our end would just re-read the same stale answer.
  */
-app.post('/api/library/refresh', wrap(async (req, res) => {
+async function rescanSources() {
   const asked = [];
   for (const src of config.library?.sources ?? []) {
     if (src.provider !== 'jellyfin' || !src.jellyfin?.url || !src.jellyfin?.apiKey) continue;
@@ -983,6 +986,38 @@ app.post('/api/library/refresh', wrap(async (req, res) => {
     }
   }
   refreshLibrary();
+  return asked;
+}
+
+/**
+ * Periodic rescan, so media added to Jellyfin turns up without anyone
+ * pressing anything. Server-side on purpose: it has to happen whether or not
+ * a browser is open. It is safe during a broadcast because rebuilding the
+ * providers now carries SMB bridge tokens across, and a Jellyfin scan is
+ * Jellyfin's own background work.
+ */
+let autoScan = null;
+function scheduleAutoScan() {
+  clearInterval(autoScan);
+  const cfg = config.library?.autoRefresh ?? {};
+  if (cfg.enabled === false) return;
+  // Clamped: an interval of zero would spin, and anything under an hour
+  // asks Jellyfin to rescan more often than it can finish on a large library.
+  const hours = Math.min(168, Math.max(1, Number(cfg.hours) || 12));
+  autoScan = setInterval(async () => {
+    try {
+      const asked = await rescanSources();
+      const named = asked.filter((a) => a.ok).map((a) => a.name);
+      console.log(`  scheduled library scan${named.length ? `: asked ${named.join(', ')} to rescan` : ''}`);
+    } catch (err) {
+      console.warn(`! scheduled library scan failed: ${err.message}`);
+    }
+  }, hours * 60 * 60 * 1000);
+  autoScan.unref?.();
+}
+
+app.post('/api/library/refresh', wrap(async (req, res) => {
+  const asked = await rescanSources();
   res.json({
     ok: true,
     rescanned: asked,
@@ -1450,6 +1485,8 @@ if (encFixed) {
   console.warn(`! repaired encoder config: ${encFixed.join(', ')}`);
   saveConfig({ encoder: config.encoder });
 }
+scheduleAutoScan();
+
 const { port, host } = config.server;
 server.listen(port, host, () => {
   console.log(`jellystreamerr listening on http://${host}:${port}`);

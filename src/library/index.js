@@ -15,7 +15,7 @@ import { SmbStreamLibrary } from './smbstream.js';
 import { CompositeLibrary } from './composite.js';
 
 /** One provider instance for one configured source. */
-function makeSource(src, cfg) {
+function makeSource(src, cfg, reuseToken = null) {
   if (src.provider === 'jellyfin') {
     return new JellyfinLibrary({
       url: src.jellyfin?.url,
@@ -29,8 +29,11 @@ function makeSource(src, cfg) {
     // want it (it needs CAP_SYS_ADMIN / the Proxmox mount feature).
     const port = cfg?.server?.port ?? 8099;
     // Per source, so two shares cannot read each other's media through the
-    // bridge even though both are localhost.
-    const bridgeToken = randomBytes(32).toString('hex');
+    // bridge even though both are localhost. Carried across a rebuild when
+    // the source is the same one: an ffmpeg already reading a bridge url
+    // holds the old token, and minting a fresh one would 403 it mid-clip and
+    // take the broadcast down with it.
+    const bridgeToken = reuseToken ?? randomBytes(32).toString('hex');
     const smb = new SmbStreamLibrary(src.smb ?? {}, {
       bridgeBase: `http://127.0.0.1:${port}/smbmedia`,
       bridgeToken,
@@ -49,13 +52,21 @@ function makeSource(src, cfg) {
  * than the indirection it costs, and every caller already speaks this
  * interface.
  */
-export function makeLibrary(cfg) {
-  const sources = (cfg?.library?.sources ?? []).map((src, i) => ({
-    key: src.id || String(i),
-    name: src.name || src.provider || `Source ${i + 1}`,
-    provider: src.provider,
-    lib: makeSource(src, cfg),
-  }));
+export function makeLibrary(cfg, previous = null) {
+  const before = new Map((previous?.sources ?? []).map((s) => [s.key, s]));
+  const sources = (cfg?.library?.sources ?? []).map((src, i) => {
+    const key = src.id || String(i);
+    const prev = before.get(key);
+    // Only carry the token when the source is genuinely the same one; a
+    // provider change should not inherit credentials of another shape.
+    const reuse = prev?.provider === src.provider ? prev.lib?.bridgeToken ?? null : null;
+    return {
+      key,
+      name: src.name || src.provider || `Source ${i + 1}`,
+      provider: src.provider,
+      lib: makeSource(src, cfg, reuse),
+    };
+  });
   return new CompositeLibrary(sources);
 }
 

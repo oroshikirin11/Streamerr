@@ -365,6 +365,11 @@ comfortably absorbed. If quality ever looks lacking, raise the bitrate.
 
 ## Library providers
 
+You can add **as many sources as you like, in any combination** — Jellyfin for
+the shows, a folder for a music-video set, an SMB share for the rest. Each
+gets a name, and the library page shows them all together with a chip per
+source to filter down to one.
+
 **Jellyfin** — the preferred source: posters, seasons, titles and episode
 order come from the metadata Jellyfin already scraped. Create a key under
 *Dashboard → API Keys*. The other providers play files just as well — they
@@ -398,6 +403,18 @@ There is also `smbmount`, a kernel-mount variant for shares the built-in
 client can't handle. It needs privileges (`SYS_ADMIN` in Docker, or
 `--features mount=cifs` on a Proxmox LXC) — prefer plain `smb`.
 
+### Picking up new media
+
+Folder and SMB sources are read live, so a new file is there the moment you
+reload. **Jellyfin is different**: it serves what its own last scan found, so
+a file it hasn't scanned yet is invisible to us too.
+
+So there is a **Refresh** button on the library page — it asks every Jellyfin
+source to rescan, then reloads the shelves. The same thing runs automatically
+**every 12 hours**; the interval is adjustable and can be switched off in
+*Settings → Automatic library scan*. Safe to use mid-broadcast: a scan is
+Jellyfin's own background work and never touches what is playing.
+
 ## Settings
 
 Everything the wizard configures is editable later, grouped in the UI:
@@ -406,11 +423,13 @@ Everything the wizard configures is editable later, grouped in the UI:
 |---|---|
 | **Owncast** | RTMP address, stream key, connection test, 30s watch test |
 | **Output** | resolution preset or custom, framerate (auto/fixed), bitrates, keyframe interval, encoder, render device |
-| **Library** | Jellyfin, folder, or SMB share, with a directory browser |
+| **Library** | any number of sources — Jellyfin, folder, SMB — with a directory browser |
 | **Path mapping** | only when Jellyfin's paths differ from this container's |
 | **Languages** | languages you understand, original vs dubbed, subtitle policy |
 | **Run-ahead cache** | on/off, RAM budget (auto-recommended from the machine) |
 | **Live preview** | the floating preview window (on by default) |
+| **Automatic library scan** | on/off and how often (12 hours by default) |
+| **Library display** | load artwork lazily — for libraries large enough that a whole shelf at once is the greater cost |
 | **Developer** | read-only log console |
 
 **Framerate** defaults to *auto*: each file is output at its own rate up to your
