@@ -18,7 +18,7 @@ import {
   normalizeStoredBitrates, normalizeStoredEncoder, ROOT,
 } from './config.js';
 import {
-  hashPassword, verifyPassword, createSession, destroySession,
+  hashPassword, verifyPassword, needsRehash, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
   throttleCheck, throttleFail, throttleReset, destroyOtherSessions,
 } from './auth.js';
@@ -503,6 +503,15 @@ app.post('/api/auth/login', async (req, res) => {
   const ok = await verifyPassword(req.body?.password ?? '', passwordHash());
   if (!ok) return res.status(401).json({ error: 'Wrong password' });
   throttleReset(ip);
+  // A correct password against an older scrypt hash is the only moment the
+  // plaintext is in hand, so it is the only chance to upgrade it. Silent by
+  // design: nothing about the login changes for the user.
+  if (needsRehash(passwordHash())) {
+    try {
+      saveConfig({ auth: { passwordHash: await hashPassword(req.body?.password ?? '') } });
+      console.log('  upgraded the stored password hash to argon2id');
+    } catch { /* keep the working scrypt hash rather than risk locking out */ }
+  }
   const token = createSession();
   res.setHeader('Set-Cookie', sessionCookie(token, { secure: isSecure(req) }));
   res.json({ ok: true });

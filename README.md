@@ -490,16 +490,19 @@ through the real engine, and asserts one publisher process survived all of it.
 
 ## Security
 
-The panel is **password-protected** (scrypt, forced on first run) because it can
+The panel is **password-protected** (Argon2id, forced on first run) because it can
 start broadcasts and holds your Owncast stream key. Until a password is set the
 API answers nothing but the two endpoints setup itself needs, so a fresh
 container is never briefly open. Secrets are write-only from the browser's
 perspective: the API returns a sentinel, never the value, and `config.json` is
 gitignored (and written `0600`) so the repo stays publishable.
 
-Passwords are stored as scrypt hashes with a per-password random salt — never
-in clear, and the hash never leaves the server. Login is rate limited per
-address.
+Passwords are stored as Argon2id hashes with a per-password random salt —
+never in clear, and the hash never leaves the server. The stored value carries
+its own parameters, so they can be raised later without invalidating existing
+passwords. A password hashed by an older build used scrypt; it keeps working
+and is upgraded silently the next time it is entered correctly. Login is rate
+limited per address.
 
 Stream keys are redacted from every log line, including the Console page.
 

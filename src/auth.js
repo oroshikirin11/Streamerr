@@ -4,48 +4,102 @@
  * The panel can start and stop broadcasts and holds the Owncast stream key
  * and Jellyfin API key, so it is not something to leave open on a port.
  *
- * Uses scrypt from node's crypto rather than bcrypt: bcrypt is a native
- * addon, which would mean a compiler in the image and a rebuild on every
- * Node version bump. scrypt is memory-hard, in the standard library, and
- * entirely adequate for a single-admin panel.
+ * Hashes with Argon2id, which node 26 provides in core — so no native addon,
+ * no compiler in the image, and no rebuild on a node bump. That was the whole
+ * reason bcrypt was passed over originally and scrypt chosen instead; core
+ * support removes the trade entirely.
+ *
+ * Passwords hashed by older builds are scrypt, and still verify. A correct
+ * login against one of those is silently upgraded — see needsRehash.
  */
 
-import { randomBytes, scrypt, timingSafeEqual } from 'crypto';
+import { argon2, randomBytes, scrypt, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 
 const scryptAsync = promisify(scrypt);
+const argon2Async = promisify(argon2);
 
 const KEYLEN = 64;
 const SALT_BYTES = 16;
+const TAG_BYTES = 32;
+
+/**
+ * OWASP's floor: 19 MiB, two passes. Deliberately not the heavier 64 MiB
+ * profile — this runs on an N100 beside the encoders that keep a broadcast
+ * alive, and the login limiter allows several attempts before throttling, so
+ * the memory is multiplied by whatever arrives at once. At these settings a
+ * hash costs about 19ms, which is faster than the scrypt it replaces while
+ * using comparable memory.
+ */
+const ARGON = { memory: 19456, passes: 2, parallelism: 1, tagLength: TAG_BYTES };
+const PREFIX = 'argon2id';
 /** Sessions live in memory — a restart logs everyone out, which is fine. */
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 const sessions = new Map(); // token -> { createdAt }
 
-/** Hash a password for storage. Returns "salt:hash", both hex. */
+/**
+ * Hash a password for storage.
+ *
+ * The stored string carries its own parameters —
+ * "argon2id$m=19456,t=2,p=1$<salt>$<tag>" — so raising them later does not
+ * invalidate every existing password; old ones keep verifying against the
+ * settings they were made with. The legacy scrypt form has no "$" at all,
+ * which is what tells the two apart.
+ */
 export async function hashPassword(password) {
   if (typeof password !== 'string' || password.length < 8) {
     throw new Error('Password must be at least 8 characters');
   }
   const salt = randomBytes(SALT_BYTES);
-  const derived = await scryptAsync(password, salt, KEYLEN);
-  return `${salt.toString('hex')}:${derived.toString('hex')}`;
+  const tag = await argon2Async(PREFIX, { ...ARGON, message: Buffer.from(password, 'utf8'), nonce: salt });
+  return `${PREFIX}$m=${ARGON.memory},t=${ARGON.passes},p=${ARGON.parallelism}`
+    + `$${salt.toString('hex')}$${tag.toString('hex')}`;
 }
 
-/** Constant-time check of a password against a stored "salt:hash". */
+/** True when a stored hash predates Argon2id and should be upgraded. */
+export function needsRehash(stored) {
+  return Boolean(stored) && !String(stored).startsWith(`${PREFIX}$`);
+}
+
+/** Constant-time check against either format. */
 export async function verifyPassword(password, stored) {
   if (!stored || typeof password !== 'string') return false;
-  const [saltHex, hashHex] = String(stored).split(':');
-  if (!saltHex || !hashHex) return false;
+  return needsRehash(stored)
+    ? verifyScrypt(password, String(stored))
+    : verifyArgon2(password, String(stored));
+}
 
-  let expected;
+async function verifyArgon2(password, stored) {
+  const [, params, saltHex, tagHex] = stored.split('$');
+  if (!params || !saltHex || !tagHex) return false;
+  const m = /^m=(\d+),t=(\d+),p=(\d+)$/.exec(params);
+  if (!m) return false;
+
+  const expected = Buffer.from(tagHex, 'hex');
+  // Hex parsing is lenient — it stops at the first bad character rather than
+  // throwing — so the length check is what actually rejects a mangled value.
+  if (!expected.length || expected.length * 2 !== tagHex.length) return false;
+
   try {
-    expected = Buffer.from(hashHex, 'hex');
+    const derived = await argon2Async(PREFIX, {
+      message: Buffer.from(password, 'utf8'),
+      nonce: Buffer.from(saltHex, 'hex'),
+      memory: Number(m[1]), passes: Number(m[2]), parallelism: Number(m[3]),
+      tagLength: expected.length,
+    });
+    return timingSafeEqual(derived, expected);
   } catch {
     return false;
   }
-  if (expected.length !== KEYLEN) return false;
+}
 
+/** Anything written before Argon2id: "salt:hash", both hex. */
+async function verifyScrypt(password, stored) {
+  const [saltHex, hashHex] = stored.split(':');
+  if (!saltHex || !hashHex) return false;
+  const expected = Buffer.from(hashHex, 'hex');
+  if (expected.length !== KEYLEN) return false;
   const derived = await scryptAsync(password, Buffer.from(saltHex, 'hex'), KEYLEN);
   return timingSafeEqual(derived, expected);
 }
@@ -127,9 +181,10 @@ export function requireAuth(getPasswordHash) {
  * Per-IP throttle for password attempts.
  *
  * Two reasons, and the second is the sharper one. An 8-character minimum with
- * no lockout is guessable online; and every attempt runs scrypt on libuv's
- * 4-thread pool, so unauthenticated request spam starves the same pool the
- * broadcast's file I/O uses. Failures cost budget, successes clear it.
+ * no lockout is guessable online; and every attempt runs a memory-hard hash
+ * on libuv's 4-thread pool, so unauthenticated request spam starves the same
+ * pool the broadcast's file I/O uses, and allocates ~19 MiB a time while it
+ * does. Failures cost budget, successes clear it.
  */
 const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 8;
