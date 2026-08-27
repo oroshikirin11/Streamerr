@@ -296,6 +296,20 @@
     return () => window.removeEventListener('jsr-devmode', h);
   });
 
+  // Pages raise toasts through the layout rather than rendering their own
+  // banner: a message about something you just clicked has to be somewhere
+  // you are still looking, and a page-level banner ends up wherever the
+  // markup happens to sit — at the bottom of a long scrolling library, in
+  // the case that prompted this.
+  $effect(() => {
+    const h = (e) => {
+      toast = e.detail;
+      setTimeout(() => { if (toast === e.detail) toast = null; }, e.detail?.ms ?? 7000);
+    };
+    window.addEventListener('jsr-toast', h);
+    return () => window.removeEventListener('jsr-toast', h);
+  });
+
   const nav = $derived([
     { href: '/', label: 'Library', icon: 'M4 5h16v11H4zM2 19h20' },
     { href: '/queue', label: 'Schedule', icon: 'M4 6h16M4 12h16M4 18h10' },
@@ -577,7 +591,10 @@
   <!-- Raised above the pre-build chip when both occupy the corner. -->
   <div class="toast" class:error={toast.kind === 'error'}
        class:raised={stream.playing && (stream.status === 'starting'
-         || (stream.status === 'running' && stream.rebuilding))}>{toast.message}</div>
+         || (stream.status === 'running' && stream.rebuilding))}>
+    {toast.message}
+    {#if toast.href}<a href={toast.href}>{toast.hrefLabel ?? 'Open'}</a>{/if}
+  </div>
 {/if}
 
 <style>
@@ -661,13 +678,22 @@
   .login { width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px; }
   .pwfield { position: relative; display: flex; }
   .pwfield input { width: 100%; padding-right: 42px; }
+  /* Centred with margin, NOT transform. The global button:active rule sets
+     transform: scale(.97), which replaces a transform used for centring
+     outright — the button dropped half its height the moment it was pressed
+     and slid out from under the pointer, so the mouseup landed elsewhere and
+     the click was simply lost. That also was the jump it appeared to
+     animate. */
   .reveal {
-    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    position: absolute; right: 4px; top: 0; bottom: 0; margin: auto 0;
     display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
     background: transparent; border: none; border-radius: 8px;
     color: var(--muted); cursor: pointer;
   }
   .reveal:hover { color: var(--text); background: var(--surface-2); }
+  /* No press-scale on a toggle that lives inside a field: the colour change
+     is feedback enough, and any movement risks the same lost click. */
+  .reveal:active:not(:disabled) { transform: none; color: var(--accent); }
   .reveal:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* Fixed viewport: the app never scrolls as a page. Long content scrolls
@@ -863,6 +889,7 @@
      without covering the library, the queue or the transport bar — which
      is exactly what it did in the bottom-right corner. */
   .toast.raised { bottom: 64px; }
+  .toast a { color: inherit; text-decoration: underline; margin-left: 6px; }
   .toast.prebuild {
     border-left-color: var(--accent);
     display: flex; align-items: center; gap: 8px;
