@@ -22,6 +22,18 @@
    *  rather than rendering thousands of posters up front. */
   let shown = $state({});
   const SHELF_STEP = 24;
+  /** The items endpoint caps a response at 200, so a shelf holds a window
+   *  onto its library rather than the whole thing. Reaching the end of what
+   *  is loaded fetches the next window. */
+  const PAGE = 60;
+  /** Which library is shown alone; null means all of them. */
+  let onlyLibrary = $state(null);
+  /** Searches every shelf at once. Server-side, because a shelf only ever
+   *  holds a page of its library — filtering what happens to be loaded would
+   *  quietly miss most of a big one. */
+  let shelfSearch = $state('');
+  let searchTimer = null;
+  let searching = $state(false);
 
   /**
    * A shelf heading should read as a category, not as a folder on disk.
@@ -92,11 +104,13 @@
    * Jellyfin should not hide a working folder library.
    */
   async function loadShelves() {
+    const q = shelfSearch.trim();
     const next = await Promise.all(libraries.map(async (l) => {
       try {
-        const res = await api.items(l.id, {});
+        const res = await api.items(l.id, { limit: PAGE, ...(q ? { search: q } : {}) });
         return { library: l, items: res.items ?? [], total: res.total ?? 0 };
       } catch {
+        // One broken provider should not blank the page for the others.
         return null;
       }
     }));
@@ -104,15 +118,57 @@
     shown = Object.fromEntries(shelves.map((sh) => [sh.library.id, SHELF_STEP]));
   }
 
-  /** Reveal more of whichever shelves still have items left to show. */
-  function revealMore() {
-    let changed = false;
+  /** Debounced so typing does not fire a request per keystroke. */
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    searching = true;
+    searchTimer = setTimeout(async () => {
+      try { await loadShelves(); } finally { searching = false; }
+    }, 250);
+  }
+
+  let fetchingMore = false;
+  /**
+   * Reveal more, and fetch more when revealing runs out. Without the fetch
+   * this stopped dead at the first page and looked like the library simply
+   * ended there.
+   */
+  async function revealMore() {
     const next = { ...shown };
+    let changed = false;
     for (const sh of shelves) {
+      if (onlyLibrary && sh.library.id !== onlyLibrary) continue;
       const have = next[sh.library.id] ?? SHELF_STEP;
       if (have < sh.items.length) { next[sh.library.id] = have + SHELF_STEP; changed = true; }
     }
-    if (changed) shown = next;
+    if (changed) { shown = next; return; }
+
+    if (fetchingMore) return;
+    const hungry = shelves.find((sh) => (!onlyLibrary || sh.library.id === onlyLibrary)
+      && sh.items.length < sh.total);
+    if (!hungry) return;
+    fetchingMore = true;
+    try {
+      const q = shelfSearch.trim();
+      const res = await api.items(hungry.library.id, {
+        startIndex: hungry.items.length, limit: PAGE, ...(q ? { search: q } : {}),
+      });
+      const more = res.items ?? [];
+      if (more.length) {
+        // Replace the entry so the keyed each block sees a new array.
+        shelves = shelves.map((sh) => (sh.library.id === hungry.library.id
+          ? { ...sh, items: [...sh.items, ...more] } : sh));
+        shown = { ...shown, [hungry.library.id]: (shown[hungry.library.id] ?? SHELF_STEP) + SHELF_STEP };
+      } else {
+        // Guard against a provider that reports a total it will not serve.
+        shelves = shelves.map((sh) => (sh.library.id === hungry.library.id
+          ? { ...sh, total: sh.items.length } : sh));
+      }
+    } catch {
+      /* leave what is already rendered alone */
+    } finally {
+      fetchingMore = false;
+    }
   }
 
   /** The sentinel sits below the last shelf; seeing it means the reader has
@@ -295,9 +351,33 @@
   <header class="row">
     <h1>Library</h1>
   </header>
+  <div class="shelfbar">
+    <div class="chips">
+      <button class="chip" class:on={!onlyLibrary} onclick={() => (onlyLibrary = null)}>All</button>
+      {#each shelves as sh (sh.library.id)}
+        <!-- Clicking the active chip clears it, so the same button both
+             narrows to one shelf and returns to everything. -->
+        <button class="chip" class:on={onlyLibrary === sh.library.id}
+                aria-pressed={onlyLibrary === sh.library.id}
+                onclick={() => (onlyLibrary = onlyLibrary === sh.library.id ? null : sh.library.id)}>
+          {shelfTitle(sh.library)}
+        </button>
+      {/each}
+    </div>
+    <div class="spacer"></div>
+    <input class="find" type="search" bind:value={shelfSearch} oninput={onSearchInput}
+           placeholder="Search the library" aria-label="Search the library" />
+  </div>
+
+  {#if searching}
+    <p class="muted small">Searching…</p>
+  {:else if shelfSearch.trim() && !shelves.length}
+    <p class="muted">Nothing matches “{shelfSearch.trim()}”.</p>
+  {/if}
+
   <!-- One shelf per library. The old screen was two folder buttons, which
        made the first thing you saw a filing cabinet rather than a library. -->
-  {#each shelves as sh (sh.library.id)}
+  {#each shelves.filter((sh) => !onlyLibrary || sh.library.id === onlyLibrary) as sh (sh.library.id)}
     <section class="shelf">
       <header class="shead">
         <h2>{shelfTitle(sh.library)}</h2>
@@ -580,6 +660,21 @@
 
   /* Shelves. The header is sticky so you always know which library you are
      looking at once a long one runs past the top of the screen. */
+  .shelfbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin: 0 0 18px;
+  }
+  .shelfbar .spacer { flex: 1; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    padding: 5px 13px; border-radius: 999px; font-size: 13px;
+    background: var(--surface-2); border: 1px solid transparent; color: var(--muted);
+    cursor: pointer; transition: color .12s ease, border-color .12s ease, background .12s ease;
+  }
+  .chip:hover { color: var(--text); }
+  .chip.on { color: var(--accent); border-color: var(--accent); background: transparent; }
+  .find { width: min(260px, 100%); }
+
   .shelf { margin: 0 0 26px; }
   /* Fixed track width, not 1fr: with a 1fr grid a three-film shelf stretched
      its posters to the width of the page and one category filled the screen.
