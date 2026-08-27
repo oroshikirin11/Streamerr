@@ -500,9 +500,7 @@ gitignored (and written `0600`) so the repo stays publishable.
 Passwords are stored as Argon2id hashes with a per-password random salt —
 never in clear, and the hash never leaves the server. The stored value carries
 its own parameters, so they can be raised later without invalidating existing
-passwords. A password hashed by an older build used scrypt; it keeps working
-and is upgraded silently the next time it is entered correctly. Login is rate
-limited per address.
+passwords. Login is rate limited per address.
 
 Stream keys are redacted from every log line, including the Console page.
 

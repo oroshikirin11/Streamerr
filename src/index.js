@@ -18,7 +18,7 @@ import {
   normalizeStoredBitrates, normalizeStoredEncoder, ROOT,
 } from './config.js';
 import {
-  hashPassword, verifyPassword, needsRehash, createSession, destroySession,
+  hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
   throttleCheck, throttleFail, throttleReset, destroyOtherSessions,
 } from './auth.js';
@@ -493,25 +493,16 @@ app.post('/api/auth/login', async (req, res) => {
       error: `Too many attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`,
     });
   }
-  // Count the attempt BEFORE spending scrypt on it. Counting afterwards let
+  // Count the attempt BEFORE spending a hash on it. Counting afterwards let
   // a burst of parallel requests all pass the check while none had yet
   // recorded a failure — twelve concurrent guesses sailed through — and it
   // also meant the limiter could not protect the libuv threadpool, which is
-  // the more damaging half: scrypt runs there, alongside the broadcast's
+  // the more damaging half: the hash runs there, alongside the broadcast's
   // file I/O. A successful login clears the budget.
   throttleFail(ip);
   const ok = await verifyPassword(req.body?.password ?? '', passwordHash());
   if (!ok) return res.status(401).json({ error: 'Wrong password' });
   throttleReset(ip);
-  // A correct password against an older scrypt hash is the only moment the
-  // plaintext is in hand, so it is the only chance to upgrade it. Silent by
-  // design: nothing about the login changes for the user.
-  if (needsRehash(passwordHash())) {
-    try {
-      saveConfig({ auth: { passwordHash: await hashPassword(req.body?.password ?? '') } });
-      console.log('  upgraded the stored password hash to argon2id');
-    } catch { /* keep the working scrypt hash rather than risk locking out */ }
-  }
   const token = createSession();
   res.setHeader('Set-Cookie', sessionCookie(token, { secure: isSecure(req) }));
   res.json({ ok: true });

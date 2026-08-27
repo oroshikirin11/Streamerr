@@ -8,18 +8,13 @@
  * no compiler in the image, and no rebuild on a node bump. That was the whole
  * reason bcrypt was passed over originally and scrypt chosen instead; core
  * support removes the trade entirely.
- *
- * Passwords hashed by older builds are scrypt, and still verify. A correct
- * login against one of those is silently upgraded — see needsRehash.
  */
 
-import { argon2, randomBytes, scrypt, timingSafeEqual } from 'crypto';
+import { argon2, randomBytes, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 
-const scryptAsync = promisify(scrypt);
 const argon2Async = promisify(argon2);
 
-const KEYLEN = 64;
 const SALT_BYTES = 16;
 const TAG_BYTES = 32;
 
@@ -28,8 +23,7 @@ const TAG_BYTES = 32;
  * profile — this runs on an N100 beside the encoders that keep a broadcast
  * alive, and the login limiter allows several attempts before throttling, so
  * the memory is multiplied by whatever arrives at once. At these settings a
- * hash costs about 19ms, which is faster than the scrypt it replaces while
- * using comparable memory.
+ * hash costs about 19ms.
  */
 const ARGON = { memory: 19456, passes: 2, parallelism: 1, tagLength: TAG_BYTES };
 const PREFIX = 'argon2id';
@@ -44,8 +38,7 @@ const sessions = new Map(); // token -> { createdAt }
  * The stored string carries its own parameters —
  * "argon2id$m=19456,t=2,p=1$<salt>$<tag>" — so raising them later does not
  * invalidate every existing password; old ones keep verifying against the
- * settings they were made with. The legacy scrypt form has no "$" at all,
- * which is what tells the two apart.
+ * settings they were made with.
  */
 export async function hashPassword(password) {
   if (typeof password !== 'string' || password.length < 8) {
@@ -57,21 +50,10 @@ export async function hashPassword(password) {
     + `$${salt.toString('hex')}$${tag.toString('hex')}`;
 }
 
-/** True when a stored hash predates Argon2id and should be upgraded. */
-export function needsRehash(stored) {
-  return Boolean(stored) && !String(stored).startsWith(`${PREFIX}$`);
-}
-
-/** Constant-time check against either format. */
+/** Constant-time check of a password against a stored hash. */
 export async function verifyPassword(password, stored) {
   if (!stored || typeof password !== 'string') return false;
-  return needsRehash(stored)
-    ? verifyScrypt(password, String(stored))
-    : verifyArgon2(password, String(stored));
-}
-
-async function verifyArgon2(password, stored) {
-  const [, params, saltHex, tagHex] = stored.split('$');
+  const [, params, saltHex, tagHex] = String(stored).split('$');
   if (!params || !saltHex || !tagHex) return false;
   const m = /^m=(\d+),t=(\d+),p=(\d+)$/.exec(params);
   if (!m) return false;
@@ -92,16 +74,6 @@ async function verifyArgon2(password, stored) {
   } catch {
     return false;
   }
-}
-
-/** Anything written before Argon2id: "salt:hash", both hex. */
-async function verifyScrypt(password, stored) {
-  const [saltHex, hashHex] = stored.split(':');
-  if (!saltHex || !hashHex) return false;
-  const expected = Buffer.from(hashHex, 'hex');
-  if (expected.length !== KEYLEN) return false;
-  const derived = await scryptAsync(password, Buffer.from(saltHex, 'hex'), KEYLEN);
-  return timingSafeEqual(derived, expected);
 }
 
 export function createSession() {
