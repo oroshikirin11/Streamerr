@@ -33,6 +33,7 @@ import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
 import { SmbStreamLibrary } from './library/smbstream.js';
+import { thumbnail } from './library/thumbs.js';
 import { suggestRules } from './library/pathmap.js';
 import { dpush, dlist, teeConsole } from './debuglog.js';
 
@@ -935,11 +936,19 @@ app.get('/api/library/episodes', wrap(async (req, res) =>
   res.json(await library.episodes(req.query.seriesId, { seasonId: req.query.seasonId }))));
 
 /** Local artwork for the filesystem provider; Jellyfin serves its own. */
-app.get('/api/library/image/:id', (req, res) => {
+app.get('/api/library/image/:id', async (req, res) => {
   const p = library.imagePath?.(req.params.id);
   if (!p || !existsSync(p)) return res.status(404).end();
-  res.setHeader('Cache-Control', 'public, max-age=86400');
-  createReadStream(p).pipe(res);
+  // Serve a scaled copy when we can make one; the original is the fallback,
+  // so artwork never disappears just because ffmpeg had a bad day.
+  const scaled = await thumbnail(p, config.paths?.cache).catch(() => null);
+  // The url carries the source mtime, so a re-scraped image arrives under a
+  // new url and can be cached hard rather than re-fetched on a timer.
+  res.setHeader('Cache-Control', req.query.v
+    ? 'public, max-age=31536000, immutable'
+    : 'public, max-age=86400');
+  if (scaled) res.setHeader('Content-Type', 'image/jpeg');
+  createReadStream(scaled ?? p).pipe(res);
 });
 
 /** Tracks for one episode, plus which we'd pick — drives the track picker. */

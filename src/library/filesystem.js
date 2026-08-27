@@ -18,6 +18,14 @@ const POSTER_NAMES = ['poster.jpg', 'poster.png', 'folder.jpg', 'folder.png', 'c
 
 const id = (s) => createHash('sha1').update(s).digest('hex').slice(0, 16);
 
+/** Image url carrying the file's mtime, so replacing the artwork busts every
+ *  cached copy instead of waiting out a max-age. */
+function imageUrl(path) {
+  let v = 0;
+  try { v = Math.floor(statSync(path).mtimeMs); } catch { /* keep 0 */ }
+  return `/api/library/image/${id(path)}?v=${v}`;
+}
+
 /** Season/episode from the usual naming conventions. */
 export function parseEpisode(name, { allowBareNumber = true } = {}) {
   const stem = basename(name, extname(name));
@@ -267,7 +275,7 @@ export class FilesystemLibrary {
         year: /\((\d{4})\)/.exec(name)?.[1] ?? null,
         type: isMovie ? 'Movie' : 'Series',
         childCount: isMovie ? null : videos.length || null,
-        image: poster ? `/api/library/image/${id(poster)}` : null,
+        image: poster ? imageUrl(poster) : null,
       };
     });
 
@@ -293,7 +301,7 @@ export class FilesystemLibrary {
         id: id(sub),
         name,
         index: /(\d+)/.exec(name)?.[1] ? Number(/(\d+)/.exec(name)[1]) : null,
-        image: poster ? `/api/library/image/${id(poster)}` : null,
+        image: poster ? imageUrl(poster) : null,
       };
     });
   }
@@ -342,7 +350,7 @@ export class FilesystemLibrary {
           const still = stillsIn(fileDir, stillCache).get(file.slice(0, -extname(file).length));
           if (!still) return null;
           this._paths.set(id(still), still);
-          return `/api/library/image/${id(still)}`;
+          return imageUrl(still);
         })(),
       });
     }
