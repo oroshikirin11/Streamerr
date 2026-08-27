@@ -15,8 +15,10 @@
 
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'fs';
+import { createWriteStream, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 
 /** Wide enough for a 2x poster; stills need far less and simply come out
  *  smaller, since the scale filter only ever shrinks. */
@@ -42,14 +44,40 @@ function release() {
   else running -= 1;
 }
 
+export const isRemote = (src) => /^https?:\/\//i.test(src);
+
 /** Keyed on size and mtime as well as path: re-scraped artwork replaces the
- *  old thumbnail instead of being masked by it. */
+ *  old thumbnail instead of being masked by it. A remote url carries its own
+ *  version — Jellyfin's image tag — so the url alone is the key. */
 function keyFor(src) {
+  if (isRemote(src)) {
+    return createHash('sha1').update(`${src}:${MAX_W}`).digest('hex').slice(0, 16);
+  }
   const st = statSync(src);
   return createHash('sha1')
     .update(`${src}:${st.size}:${Math.floor(st.mtimeMs)}:${MAX_W}`)
     .digest('hex')
     .slice(0, 16);
+}
+
+/**
+ * Pull a remote image down once so ffmpeg scales a local file.
+ * Letting ffmpeg fetch the url itself would refetch on every miss and give no
+ * control over the timeout.
+ */
+async function fetchToDisk(url, dest) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 15_000);
+  try {
+    const res = await fetch(url, { signal: ctl.signal });
+    if (!res.ok || !res.body) return false;
+    await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
+    return existsSync(dest) && statSync(dest).size > 0;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -74,14 +102,22 @@ export async function thumbnail(src, cacheDir) {
       // Write-then-rename: a kill mid-encode must not leave a truncated JPEG
       // that then looks like a valid cache entry forever.
       const tmp = `${out}.${process.pid}.partial`;
+      let input = src;
+      let downloaded = null;
+      if (isRemote(src)) {
+        downloaded = `${out}.${process.pid}.src`;
+        if (!await fetchToDisk(src, downloaded)) { safeUnlink(downloaded); return null; }
+        input = downloaded;
+      }
       const ok = await run([
         '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-        '-i', src,
+        '-i', input,
         // Never upscale: min() keeps a small source at its own size.
         '-vf', `scale='min(${MAX_W},iw)':-2:flags=lanczos`,
         '-frames:v', '1', '-q:v', '4',
         '-f', 'mjpeg', tmp,
       ]);
+      if (downloaded) safeUnlink(downloaded);
       if (!ok || !existsSync(tmp)) { safeUnlink(tmp); return null; }
       renameSync(tmp, out);
       return out;

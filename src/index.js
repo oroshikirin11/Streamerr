@@ -33,7 +33,7 @@ import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
 import { SmbStreamLibrary } from './library/smbstream.js';
-import { thumbnail } from './library/thumbs.js';
+import { thumbnail, isRemote } from './library/thumbs.js';
 import { suggestRules } from './library/pathmap.js';
 import { dpush, dlist, teeConsole } from './debuglog.js';
 
@@ -938,10 +938,15 @@ app.get('/api/library/episodes', wrap(async (req, res) =>
 /** Local artwork for the filesystem provider; Jellyfin serves its own. */
 app.get('/api/library/image/:id', async (req, res) => {
   const p = library.imagePath?.(req.params.id);
-  if (!p || !existsSync(p)) return res.status(404).end();
+  // A provider may hand back a remote url (Jellyfin serves its own artwork);
+  // only a local path can be checked for existence here.
+  if (!p || (!isRemote(p) && !existsSync(p))) return res.status(404).end();
   // Serve a scaled copy when we can make one; the original is the fallback,
   // so artwork never disappears just because ffmpeg had a bad day.
   const scaled = await thumbnail(p, config.paths?.cache).catch(() => null);
+  // Remote art has no local fallback: if scaling failed, redirect rather than
+  // trying to stream a url through createReadStream.
+  if (!scaled && isRemote(p)) return res.redirect(302, p);
   // The url carries the source mtime, so a re-scraped image arrives under a
   // new url and can be cached hard rather than re-fetched on a timer.
   res.setHeader('Cache-Control', req.query.v

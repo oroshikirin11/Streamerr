@@ -209,9 +209,33 @@ export class JellyfinLibrary {
    * attribute, so these go straight into an <img> tag. The tag is a content
    * hash, which makes it a natural cache key.
    */
+  /**
+   * Artwork goes through our own image route rather than straight to
+   * Jellyfin.
+   *
+   * Pointing the browser at Jellyfin meant one request per poster to a second
+   * host on every visit, at whatever size and speed that host felt like —
+   * eighty-nine episode stills took over a second to trickle in, every time.
+   * Proxying lets them be scaled once, cached on disk, and served with an
+   * immutable url, so the second visit costs nothing. It also means artwork
+   * still appears when the browser cannot reach Jellyfin directly but the
+   * server can, which is the ordinary case for a remote panel.
+   *
+   * The tag is the version: Jellyfin changes it when the image changes, so
+   * it doubles as the cache-buster.
+   */
   imageUrl(id, type = 'Primary', tag, { maxHeight = 450 } = {}) {
     if (!tag) return null;
-    return `${this.url}/Items/${id}/Images/${type}?tag=${tag}&maxHeight=${maxHeight}`;
+    const remote = `${this.url}/Items/${id}/Images/${type}?tag=${tag}&maxHeight=${maxHeight}`;
+    const key = `${id}-${type}-${tag}`;
+    this._art ??= new Map();
+    this._art.set(key, remote);
+    return `/api/library/image/${key}?v=${tag}`;
+  }
+
+  /** Resolves an art id back to its Jellyfin url for the image route. */
+  imagePath(imageId) {
+    return this._art?.get(imageId) ?? null;
   }
 
   _summary(i) {
