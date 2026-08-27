@@ -28,6 +28,13 @@
   let selected = $state(new Set());
   // Episode ids whose still failed to load, so the row shows its tile instead.
   let brokenArt = $state(new Set());
+  // Measured against a real Jellyfin library: stills come back 356x200 in
+  // about 9ms, so a long series costs a couple of hundred milliseconds and a
+  // couple of megabytes to fetch in full. The cap only exists to stop a
+  // thousand-episode series firing a thousand requests at once; every
+  // ordinary show sits well inside it. Set below 89 it would have left the
+  // longest series in that library still popping in.
+  const EAGER_STILLS = 120;
   let starting = $state(false);
   /** How many were just appended to a running broadcast, for the hint. */
   let queued = $state(0);
@@ -364,7 +371,7 @@
   {/if}
 
   <ul class="eps">
-    {#each episodes as ep}
+    {#each episodes as ep, i}
       <li class:sel={selected.has(ep.id)}>
         <input type="checkbox" id={`ep-${ep.id}`}
                checked={selected.has(ep.id)} onchange={() => toggle(ep.id)} />
@@ -381,7 +388,17 @@
               <!-- Jellyfin serves stills from its own host, which the browser
                    may not be able to reach. Falling back to the tile keeps a
                    broken-image icon off the row. -->
-              <img src={ep.image} alt="" loading="lazy" decoding="async"
+              <!-- Deferring these was the wrong default. A season is a few
+                   dozen small images, and lazy loading only starts the
+                   request once a row is nearly on screen — so any flick of
+                   the wheel outruns it and rows arrive visibly blank. Fetch
+                   a normal season up front instead, at low priority below
+                   the fold so it never competes with the page itself, and
+                   only fall back to lazy past the point where a list is
+                   long enough for that to matter. -->
+              <img src={ep.image} alt="" decoding="async"
+                   loading={i < EAGER_STILLS ? 'eager' : 'lazy'}
+                   fetchpriority={i < 12 ? 'auto' : 'low'}
                    onerror={() => (brokenArt = new Set([...brokenArt, ep.id]))} />
             {:else}
               <span class="stub">{ep.episode != null ? ep.episode : '·'}</span>
