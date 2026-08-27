@@ -249,6 +249,11 @@ export class FilesystemLibrary {
   }
 
   async items(libraryId, { startIndex = 0, limit = 100, search } = {}) {
+    // The id map is filled by libraries(), so a client that asks for items
+    // first — a tab left open across a restart, or a rebuild after a refresh
+    // — would otherwise be told the library does not exist. Rebuilding the
+    // map costs one readdir per root.
+    if (!this._paths.has(libraryId)) await this.libraries();
     const root = this._paths.get(libraryId);
     if (!root) throw new Error('Unknown library');
 

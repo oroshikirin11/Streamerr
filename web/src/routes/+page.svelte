@@ -46,6 +46,33 @@
   };
   /** Honours the Library display setting; see config.ui.lazyImages. */
   let lazyImages = $state(false);
+  let refreshing = $state(false);
+
+  /**
+   * Nothing on this side caches listings, so this is mostly for Jellyfin:
+   * the server asks it to rescan, and media that was missing is media
+   * Jellyfin had not indexed. Its scan runs in the background, hence the
+   * wording of the confirmation rather than a claim that it is done.
+   */
+  async function refreshLibrary() {
+    refreshing = true;
+    try {
+      const r = await api.refreshLibrary();
+      // Re-fetch the libraries too, not just their contents: the server
+      // rebuilt its providers, and a source added or removed since this page
+      // loaded would otherwise be missing from the shelves.
+      libraries = await api.libraries();
+      await loadShelves();
+      window.dispatchEvent(new CustomEvent('jsr-toast', { detail: {
+        kind: 'info',
+        message: r?.note ?? 'Library refreshed.',
+      } }));
+    } catch (err) {
+      window.dispatchEvent(new CustomEvent('jsr-toast', { detail: { kind: 'error', message: err.message } }));
+    } finally {
+      refreshing = false;
+    }
+  }
 
   async function refreshLive() {
     try { live = (await api.streamStatus()).status !== 'stopped'; }
@@ -376,6 +403,10 @@
       {/each}
     </div>
     <div class="spacer"></div>
+    <button class="ghost small" onclick={refreshLibrary} disabled={refreshing}
+            title="Look for media added since this page was opened">
+      {refreshing ? 'Refreshing…' : 'Refresh'}
+    </button>
     <input class="find" type="search" bind:value={shelfSearch} oninput={onSearchInput}
            placeholder="Search the library" aria-label="Search the library" />
   </div>

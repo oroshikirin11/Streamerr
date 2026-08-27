@@ -64,19 +64,23 @@
       keyStored = cfg.owncast.streamKey === '__SET__';
       tokenStored = cfg.owncast.accessToken === '__SET__';
       accessToken = '';
-      jfKeyStored = cfg.library.jellyfin?.apiKey === '__SET__';
       streamKey = '';
       jellyfinKey = '';
-      cfg.library.pathMap ??= [];
+      cfg.library ??= {};
+      cfg.library.sources = (cfg.library.sources ?? []).map(shapeSource);
+      if (!cfg.library.sources.length) {
+        cfg.library.sources = [shapeSource({
+          id: Math.random().toString(36).slice(2, 10), name: 'Library', provider: 'filesystem',
+        })];
+      }
       cfg.preview ??= { enabled: true };
       cfg.ui ??= { lazyImages: false };
       cfg.runAhead ??= { enabled: true, ramMB: 'auto' };
-      cfg.library.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: true };
       cfg.tracks ??= {};
       cfg.tracks.languages ??= ['eng'];
       cfg.tracks.audioMode ??= 'original';
       cfg.tracks.subtitleMode ??= 'auto';
-      fsRoots = (cfg.library.filesystem?.roots || []).join('\n');
+      selectSource(Math.min(sel, cfg.library.sources.length - 1));
       syncPresetFromCfg();
     } catch (err) { error = err.message; }
   }
@@ -84,32 +88,74 @@
   const parseList = (s) => s.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
   let smbPassword = $state('');
 
+  /**
+   * Which source the editor below is pointed at. The form is the same one
+   * that existed when there was only ever one library — it just edits a
+   * selected entry now, so nothing about it had to be relearned.
+   */
+  let sel = $state(0);
+  const src = $derived(cfg?.library?.sources?.[sel] ?? null);
+
+  /** Fill in whatever the chosen provider needs but the entry lacks. */
+  function shapeSource(x) {
+    x.jellyfin ??= { url: '', apiKey: '' };
+    x.filesystem ??= { roots: [] };
+    x.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: true };
+    x.pathMap ??= [];
+    return x;
+  }
+
+  /** Secrets and the roots box are per source, so re-seed them on a switch. */
+  function selectSource(i) {
+    sel = i;
+    jellyfinKey = '';
+    smbPassword = '';
+    libResult = null;
+    const x = cfg.library.sources[i];
+    jfKeyStored = x?.jellyfin?.apiKey === '__SET__';
+    fsRoots = (x?.filesystem?.roots ?? []).join('\n');
+  }
+
+  function addSource() {
+    cfg.library.sources = [...cfg.library.sources, shapeSource({
+      id: Math.random().toString(36).slice(2, 10),
+      name: `Source ${cfg.library.sources.length + 1}`,
+      provider: 'filesystem',
+    })];
+    selectSource(cfg.library.sources.length - 1);
+  }
+
+  async function removeSource(i) {
+    const name = cfg.library.sources[i]?.name ?? 'this source';
+    if (!confirm(`Remove ${name}? Its media disappears from the library.`)) return;
+    cfg.library.sources = cfg.library.sources.filter((_, j) => j !== i);
+    selectSource(Math.max(0, Math.min(sel, cfg.library.sources.length - 1)));
+    await save('library');
+  }
+
   function libraryPayload() {
-    if (cfg.library.provider === 'jellyfin') {
-      return {
-        provider: 'jellyfin',
-        jellyfin: {
-          url: cfg.library.jellyfin.url,
-          ...(jellyfinKey ? { apiKey: jellyfinKey } : {}),
-        },
-        pathMap: cfg.library.pathMap,
-      };
-    }
-    if (cfg.library.provider === 'smb') {
-      return {
-        provider: 'smb',
-        smb: {
-          host: cfg.library.smb.host,
-          share: cfg.library.smb.share,
-          path: cfg.library.smb.path,
-          guest: cfg.library.smb.guest,
-          username: cfg.library.smb.guest ? '' : cfg.library.smb.username,
-          ...(cfg.library.smb.guest ? { password: '' }
-            : smbPassword ? { password: smbPassword } : {}),
-        },
-      };
-    }
-    return { provider: 'filesystem', filesystem: { roots: parseList(fsRoots) } };
+    // The whole list every time: sources are identified by id, and the
+    // server puts real credentials back wherever the panel echoed the
+    // sentinel, so an untouched key survives a save of anything else.
+    return {
+      sources: cfg.library.sources.map((x, i) => {
+        const out = { id: x.id, name: x.name?.trim() || `Source ${i + 1}`, provider: x.provider };
+        if (x.provider === 'jellyfin') {
+          out.jellyfin = { url: x.jellyfin.url, apiKey: i === sel && jellyfinKey ? jellyfinKey : (x.jellyfin.apiKey || '') };
+          out.pathMap = x.pathMap ?? [];
+        } else if (x.provider === 'smb' || x.provider === 'smbmount') {
+          out.smb = {
+            host: x.smb.host, share: x.smb.share, path: x.smb.path,
+            guest: x.smb.guest,
+            username: x.smb.guest ? '' : x.smb.username,
+            password: x.smb.guest ? '' : (i === sel && smbPassword ? smbPassword : (x.smb.password || '')),
+          };
+        } else {
+          out.filesystem = { roots: i === sel ? parseList(fsRoots) : (x.filesystem.roots ?? []) };
+        }
+        return out;
+      }),
+    };
   }
 
   async function save(section) {
@@ -188,9 +234,9 @@
     finally { testing = ''; }
   }
 
-  function addRule() { cfg.library.pathMap = [...cfg.library.pathMap, { from: '', to: '' }]; }
+  function addRule() { src.pathMap = [...src.pathMap, { from: '', to: '' }]; }
   function removeRule(i) {
-    cfg.library.pathMap = cfg.library.pathMap.filter((_, j) => j !== i);
+    src.pathMap = src.pathMap.filter((_, j) => j !== i);
   }
 
   async function changePassword() {
@@ -417,61 +463,78 @@
   <!-- Library -->
   <section class="card">
     <h3>Library</h3>
-    <div class="segc" role="radiogroup" aria-label="Library provider">
-      <button class:on={cfg.library.provider === 'jellyfin'}
-              onclick={() => (cfg.library.provider = 'jellyfin')}>Jellyfin</button>
-      <button class:on={cfg.library.provider === 'filesystem'}
-              onclick={() => (cfg.library.provider = 'filesystem')}>A folder</button>
-      <button class:on={cfg.library.provider === 'smb'}
-              onclick={() => (cfg.library.provider = 'smb')}>SMB share</button>
-    </div>
+    <!-- One row per place media lives. Hidden entirely while there is only
+         one, so a setup that never wants a second never sees the concept. -->
+    {#if cfg.library.sources.length > 1 || sel > 0}
+      <div class="srcbar">
+        {#each cfg.library.sources as x, i (x.id)}
+          <button class="chip" class:on={i === sel} onclick={() => selectSource(i)}>
+            {x.name?.trim() || `Source ${i + 1}`}
+          </button>
+        {/each}
+        <button class="chip add" onclick={addSource}>+ Add source</button>
+      </div>
+    {/if}
 
-    {#if cfg.library.provider === 'jellyfin'}
+    {#if src}
+      <label>Name</label>
+      <input bind:value={src.name} spellcheck="false" placeholder="Shows" />
+
+      <div class="segc" role="radiogroup" aria-label="Library provider">
+        <button class:on={src.provider === 'jellyfin'}
+                onclick={() => (src.provider = 'jellyfin')}>Jellyfin</button>
+        <button class:on={src.provider === 'filesystem'}
+                onclick={() => (src.provider = 'filesystem')}>A folder</button>
+        <button class:on={src.provider === 'smb'}
+                onclick={() => (src.provider = 'smb')}>SMB share</button>
+      </div>
+
+    {#if src.provider === 'jellyfin'}
       <label>Jellyfin URL</label>
-      <input bind:value={cfg.library.jellyfin.url} spellcheck="false" />
+      <input bind:value={src.jellyfin.url} spellcheck="false" />
       <label>API key</label>
       <input type="password" bind:value={jellyfinKey}
              placeholder={jfKeyStored ? 'leave blank to keep the saved key' : 'Dashboard → API Keys'} />
-    {:else if cfg.library.provider === 'smb'}
+    {:else if src.provider === 'smb'}
       <label>Server (hostname, IP, or a full smb:// address)</label>
-      <input bind:value={cfg.library.smb.host} spellcheck="false"
+      <input bind:value={src.smb.host} spellcheck="false"
              placeholder="nas.local  or  smb://user@nas/share/folder"
              onchange={() => {
                // A pasted smb:// URL or UNC path distributes into the
                // fields below, so what you see is exactly what mounts.
-               let h = cfg.library.smb.host.trim()
+               let h = src.smb.host.trim()
                  .replace(/^smb:\/\//i, '').replace(/^\\\\/, '').replace(/\\/g, '/');
                const at = h.indexOf('@');
                if (at !== -1) {
                  const cred = h.slice(0, at); h = h.slice(at + 1);
                  const colon = cred.indexOf(':');
-                 cfg.library.smb.username = colon === -1 ? cred : cred.slice(0, colon);
+                 src.smb.username = colon === -1 ? cred : cred.slice(0, colon);
                  if (colon !== -1) smbPassword = cred.slice(colon + 1);
-                 cfg.library.smb.guest = false;
+                 src.smb.guest = false;
                }
                const segs = h.split('/').filter(Boolean);
                if (segs.length > 1) {
-                 cfg.library.smb.host = segs[0];
-                 cfg.library.smb.share = segs[1];
-                 cfg.library.smb.path = segs.slice(2).join('/');
+                 src.smb.host = segs[0];
+                 src.smb.share = segs[1];
+                 src.smb.path = segs.slice(2).join('/');
                } else {
-                 cfg.library.smb.host = segs[0] ?? '';
+                 src.smb.host = segs[0] ?? '';
                }
              }} />
       <label>Share name</label>
-      <input bind:value={cfg.library.smb.share} spellcheck="false" placeholder="media" />
+      <input bind:value={src.smb.share} spellcheck="false" placeholder="media" />
       <label>Folder within the share (optional)</label>
-      <input bind:value={cfg.library.smb.path} spellcheck="false" placeholder="anime" />
+      <input bind:value={src.smb.path} spellcheck="false" placeholder="anime" />
       <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
-        <input type="checkbox" bind:checked={cfg.library.smb.guest} style="width:auto" />
+        <input type="checkbox" bind:checked={src.smb.guest} style="width:auto" />
         No password (guest share)
       </label>
-      {#if !cfg.library.smb.guest}
+      {#if !src.smb.guest}
         <label>Username</label>
-        <input bind:value={cfg.library.smb.username} spellcheck="false" />
+        <input bind:value={src.smb.username} spellcheck="false" />
         <label>Password</label>
         <input type="password" bind:value={smbPassword}
-               placeholder={cfg.library.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
+               placeholder={src.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
       {/if}
       <p class="muted small" style="margin-top:6px;">
         Read directly over the network — no mount, no privileges, works in
@@ -503,10 +566,20 @@
           : libResult.error}
       </div>
     {/if}
+
+    <div class="srcfoot">
+      {#if cfg.library.sources.length <= 1 && sel === 0}
+        <button onclick={addSource}>Add another source</button>
+        <span class="muted small">A Jellyfin server and a folder can run side by side.</span>
+      {:else}
+        <button class="danger" onclick={() => removeSource(sel)}>Remove this source</button>
+      {/if}
+    </div>
+    {/if}
   </section>
 
   <!-- Path mapping -->
-  {#if cfg.library.provider === 'jellyfin'}
+  {#if src?.provider === 'jellyfin'}
     <section class="card">
       <h3>Path mapping</h3>
       <p class="muted small">
@@ -514,7 +587,7 @@
         Jellyfin in Docker seeing <code>/media</code> where this sees
         <code>/extHdd</code>. Usually empty.
       </p>
-      {#each cfg.library.pathMap as r, i}
+      {#each src.pathMap as r, i}
         <div class="actions">
           <input bind:value={r.from} placeholder="/media/" spellcheck="false" />
           <span class="muted">→</span>
@@ -530,7 +603,7 @@
         </button>
       </div>
       {#if pathmap}
-        <div class="result" class:bad={!pathmap.noMappingNeeded && !cfg.library.pathMap.length}>
+        <div class="result" class:bad={!pathmap.noMappingNeeded && !src.pathMap.length}>
           {#if pathmap.noMappingNeeded}
             Every path Jellyfin reports is readable here — no mapping needed.
           {:else}
@@ -742,6 +815,21 @@
   .actions button { flex-shrink: 0; }
   .ok { color: var(--success); animation: okin .2s ease; }
   @keyframes okin { from { opacity: 0; transform: translateX(-4px); } }
+  .srcbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+  .srcbar .chip {
+    padding: 5px 13px; border-radius: 999px; font-size: 13px;
+    background: var(--surface-2); border: 1px solid transparent; color: var(--muted);
+  }
+  .srcbar .chip:hover { color: var(--text); }
+  .srcbar .chip.on { color: var(--accent); border-color: var(--accent); background: transparent; }
+  .srcbar .chip.add { border-style: dashed; border-color: var(--border); }
+  .srcfoot {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .srcfoot .danger { color: var(--danger); border-color: transparent; }
+  .srcfoot .danger:hover { border-color: var(--danger); }
+
   .segc {
     display: inline-flex; gap: 2px; margin-top: 10px; padding: 3px;
     background: var(--surface-2); border: 1px solid var(--border);

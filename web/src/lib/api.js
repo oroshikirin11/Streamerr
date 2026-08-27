@@ -67,6 +67,7 @@ export const api = {
     const q = new URLSearchParams({ libraryId, ...opts });
     return request('GET', `/api/library/items?${q}`);
   },
+  refreshLibrary: () => request('POST', '/api/library/refresh'),
   seasons: (seriesId) => request('GET', `/api/library/seasons?seriesId=${seriesId}`),
   episodes: (seriesId, seasonId) => {
     const q = new URLSearchParams({ seriesId });
