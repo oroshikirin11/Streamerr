@@ -87,6 +87,14 @@ const DEFAULTS = {
   preview: { enabled: true },
   // Shows the read-only Console page in the panel.
   devMode: false,
+  ui: {
+    // Defer artwork until it scrolls into view. Off by default because for
+    // an ordinary library it only makes posters arrive late — the browser
+    // will not even start the request until a row is nearly on screen, so
+    // scrolling outruns it. Worth turning on for a library big enough that
+    // requesting a whole shelf at once is the greater cost.
+    lazyImages: false,
+  },
   tracks: {
     // What the user understands. Used both to decide whether a dub is wanted
     // and to choose a subtitle language.

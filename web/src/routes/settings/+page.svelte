@@ -69,6 +69,7 @@
       jellyfinKey = '';
       cfg.library.pathMap ??= [];
       cfg.preview ??= { enabled: true };
+      cfg.ui ??= { lazyImages: false };
       cfg.runAhead ??= { enabled: true, ramMB: 'auto' };
       cfg.library.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: true };
       cfg.tracks ??= {};
@@ -643,6 +644,27 @@
       it costs the server no extra encoding work, only the stream's own
       bitrate to each open panel. Each panel can also hide it with the
       button on the play bar; this switch turns it off everywhere.
+    </p>
+  </section>
+
+  <!-- Library display -->
+  <section class="card">
+    <h3>Library display</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.ui.lazyImages} style="width:auto"
+             onchange={async () => {
+               await api.saveConfig({ ui: { lazyImages: cfg.ui.lazyImages } });
+               saved = 'ui';
+               setTimeout(() => { if (saved === 'ui') saved = ''; }, 2500);
+             }} />
+      Load artwork only as it scrolls into view
+      {#if saved === 'ui'}<span class="ok small">Saved</span>{/if}
+    </label>
+    <p class="muted small">
+      Off by default, and best left off for most libraries: the browser will
+      not start fetching a poster until it is nearly on screen, so scrolling
+      outruns it and the shelf fills in behind you. Turn it on for a library
+      large enough that requesting a whole shelf at once is the greater cost.
     </p>
   </section>
 

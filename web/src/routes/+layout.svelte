@@ -11,6 +11,9 @@
   let authed = $state(false);
   let passwordConfigured = $state(false);
   let password = $state('');
+  // Off on arrival, always: the field should never reveal a stored password
+  // just because the last visit left the toggle on.
+  let showPassword = $state(false);
   let loginError = $state('');
   let busy = $state(false);
 
@@ -318,12 +321,26 @@
           ? 'Enter your password to continue.'
           : 'Choose a password. The panel can start broadcasts and stores your stream key, so it should not be left open.'}
       </p>
-      <input
-        type="password"
-        bind:value={password}
-        placeholder={passwordConfigured ? 'Password' : 'At least 8 characters'}
-        autocomplete={passwordConfigured ? 'current-password' : 'new-password'}
-      />
+      <div class="pwfield">
+        <!-- type is swapped rather than the value copied about, so the
+             browser's own password manager still recognises the field. -->
+        <input
+          type={showPassword ? 'text' : 'password'}
+          bind:value={password}
+          placeholder={passwordConfigured ? 'Password' : 'At least 8 characters'}
+          autocomplete={passwordConfigured ? 'current-password' : 'new-password'}
+        />
+        <button type="button" class="reveal" onclick={() => (showPassword = !showPassword)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showPassword} title={showPassword ? 'Hide' : 'Show'}>
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/>
+            <circle cx="12" cy="12" r="2.6"/>
+            {#if showPassword}<path d="M4 20 20 4"/>{/if}
+          </svg>
+        </button>
+      </div>
       {#if loginError}<p class="err">{loginError}</p>{/if}
       <button class="primary" type="submit" disabled={busy || password.length < 1}>
         {passwordConfigured ? 'Sign in' : 'Create password'}
@@ -642,6 +659,16 @@
 
   .center { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
   .login { width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px; }
+  .pwfield { position: relative; display: flex; }
+  .pwfield input { width: 100%; padding-right: 42px; }
+  .reveal {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
+    background: transparent; border: none; border-radius: 8px;
+    color: var(--muted); cursor: pointer;
+  }
+  .reveal:hover { color: var(--text); background: var(--surface-2); }
+  .reveal:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* Fixed viewport: the app never scrolls as a page. Long content scrolls
      inside <main>, so the transport bar stays put on every tab. */

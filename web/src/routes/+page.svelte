@@ -15,6 +15,29 @@
 
   const currentLibrary = $derived(libraries.find((l) => l.id === libraryId));
 
+  /** Landing view: every library as its own shelf, so the first screen shows
+   *  media instead of two folders to click through. */
+  let shelves = $state([]);
+  /** How many of each shelf are rendered. Grown by the scroll sentinel
+   *  rather than rendering thousands of posters up front. */
+  let shown = $state({});
+  const SHELF_STEP = 24;
+
+  /**
+   * A shelf heading should read as a category, not as a folder on disk.
+   * "movies" and "tv" become "Movies" and "Shows", while a library someone
+   * deliberately named — "Anime", "Documentaries 4K" — keeps its own name.
+   */
+  const GENERIC_NAME = /^(movies?|films?|tv|shows?|tvshows|series|media|video)$/i;
+  const shelfTitle = (l) => {
+    if (!GENERIC_NAME.test((l.name ?? '').trim())) return l.name;
+    if (l.type === 'movies') return 'Movies';
+    if (l.type === 'tvshows') return 'Shows';
+    return (l.name ?? '').replace(/^./, (c) => c.toUpperCase());
+  };
+  /** Honours the Library display setting; see config.ui.lazyImages. */
+  let lazyImages = $state(false);
+
   async function refreshLive() {
     try { live = (await api.streamStatus()).status !== 'stopped'; }
     catch { live = false; }
@@ -49,18 +72,57 @@
     error = '';
     try {
       refreshLive();
+      api.config().then((c) => { lazyImages = Boolean(c.ui?.lazyImages); }).catch(() => {});
       libraries = await api.libraries();
       if (!libraries.length) {
         error = 'No libraries configured. Set one up in Settings.';
         return;
       }
-      // A single library has no choice to offer — skip straight to its grid.
-      if (libraries.length === 1) await enterLibrary(libraries[0]);
+      await loadShelves();
     } catch (err) {
       error = err.message;
     } finally {
       loading = false;
     }
+  }
+
+  /**
+   * One shelf per library, fetched in parallel. A library that fails to load
+   * is dropped rather than taking the whole page down with it — a broken
+   * Jellyfin should not hide a working folder library.
+   */
+  async function loadShelves() {
+    const next = await Promise.all(libraries.map(async (l) => {
+      try {
+        const res = await api.items(l.id, {});
+        return { library: l, items: res.items ?? [], total: res.total ?? 0 };
+      } catch {
+        return null;
+      }
+    }));
+    shelves = next.filter(Boolean).filter((sh) => sh.items.length);
+    shown = Object.fromEntries(shelves.map((sh) => [sh.library.id, SHELF_STEP]));
+  }
+
+  /** Reveal more of whichever shelves still have items left to show. */
+  function revealMore() {
+    let changed = false;
+    const next = { ...shown };
+    for (const sh of shelves) {
+      const have = next[sh.library.id] ?? SHELF_STEP;
+      if (have < sh.items.length) { next[sh.library.id] = have + SHELF_STEP; changed = true; }
+    }
+    if (changed) shown = next;
+  }
+
+  /** The sentinel sits below the last shelf; seeing it means the reader has
+   *  reached the end of what is rendered, so render more. */
+  function sentinel(node) {
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) revealMore();
+    }, { rootMargin: '600px' });
+    io.observe(node);
+    return { destroy: () => io.disconnect() };
   }
 
   async function enterLibrary(l) {
@@ -233,26 +295,43 @@
   <header class="row">
     <h1>Library</h1>
   </header>
-  <div class="folders">
-    {#each libraries as l}
-      <button class="folder" onclick={() => enterLibrary(l)} aria-label={l.name}>
-        <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor"
-             stroke-width="1.5" aria-hidden="true">
-          {#if l.type === 'movies'}
-            <path d="M4 5h16v14H4zM4 9h16M8 5v4M16 5v4M4 15h16M8 15v4M16 15v4"/>
-          {:else if l.type === 'tvshows'}
-            <path d="M3 8h18v11H3zM8 21h8M12 8L8 3M12 8l4-5"/>
-          {:else}
-            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-          {/if}
-        </svg>
-        <span class="fname">{l.name}</span>
-        <span class="muted small">
-          {l.type === 'movies' ? 'Movies' : l.type === 'tvshows' ? 'Shows' : 'Media'}
-        </span>
-      </button>
-    {/each}
-  </div>
+  <!-- One shelf per library. The old screen was two folder buttons, which
+       made the first thing you saw a filing cabinet rather than a library. -->
+  {#each shelves as sh (sh.library.id)}
+    <section class="shelf">
+      <header class="shead">
+        <h2>{shelfTitle(sh.library)}</h2>
+        <span class="count">{sh.total || sh.items.length}</span>
+        <div class="spacer"></div>
+        <button class="ghost small" onclick={() => enterLibrary(sh.library)}>
+          Browse and search
+        </button>
+      </header>
+      <div class="grid">
+        {#each sh.items.slice(0, shown[sh.library.id] ?? SHELF_STEP) as item, i (item.id)}
+          <button class="poster" onclick={() => openSeries(item)} aria-label={item.title}>
+            <div class="art">
+              {#if item.image}
+                <img src={item.image} alt="" decoding="async"
+                     loading={lazyImages ? 'lazy' : 'eager'}
+                     fetchpriority={i < 12 ? 'auto' : 'low'} />
+              {:else}
+                <span class="initial">{item.title.slice(0, 1)}</span>
+              {/if}
+              <span class="playbadge" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+            </div>
+            <p class="name">{item.title}</p>
+            {#if item.childCount}<p class="muted small">{item.childCount} episodes</p>{/if}
+          </button>
+        {/each}
+      </div>
+    </section>
+  {/each}
+  <!-- Grows every shelf that still has items left, so the page keeps
+       extending as you scroll instead of ending at an arbitrary cut. -->
+  <div use:sentinel class="sentinel" aria-hidden="true"></div>
 
 {:else if !series}
   <header class="row">
@@ -397,7 +476,7 @@
                    only fall back to lazy past the point where a list is
                    long enough for that to matter. -->
               <img src={ep.image} alt="" decoding="async"
-                   loading={i < EAGER_STILLS ? 'eager' : 'lazy'}
+                   loading={!lazyImages && i < EAGER_STILLS ? 'eager' : 'lazy'}
                    fetchpriority={i < 12 ? 'auto' : 'low'}
                    onerror={() => (brokenArt = new Set([...brokenArt, ep.id]))} />
             {:else}
@@ -498,6 +577,34 @@
     display: grid; gap: 18px 14px;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
+
+  /* Shelves. The header is sticky so you always know which library you are
+     looking at once a long one runs past the top of the screen. */
+  .shelf { margin: 0 0 26px; }
+  /* Fixed track width, not 1fr: with a 1fr grid a three-film shelf stretched
+     its posters to the width of the page and one category filled the screen.
+     Posters should be the same size on every shelf regardless of how full
+     it is, and the row should simply stop when it runs out. */
+  .shelf .grid {
+    grid-template-columns: repeat(auto-fill, 150px);
+    justify-content: start; gap: 16px 16px;
+  }
+  .shead {
+    display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px;
+    position: sticky; top: 0; z-index: 2;
+    background: linear-gradient(var(--bg) 72%, transparent);
+    padding: 10px 0 12px;
+  }
+  .shead h2 { margin: 0; font-size: 17px; font-weight: 500; letter-spacing: .1px; }
+  .shead .count {
+    font-size: 12px; color: var(--muted);
+    background: var(--surface-2); border-radius: 999px; padding: 2px 9px;
+  }
+  .shead .spacer { flex: 1; }
+  .shead button { opacity: 0; transition: opacity .14s ease; }
+  .shelf:hover .shead button,
+  .shead button:focus-visible { opacity: 1; }
+  .sentinel { height: 1px; }
   .poster { background: none; border: none; padding: 0; text-align: left; }
   .art {
     aspect-ratio: 2/3; border-radius: 8px; overflow: hidden;
