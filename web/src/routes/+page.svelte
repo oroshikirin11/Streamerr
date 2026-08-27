@@ -4,16 +4,13 @@
 
   let libraries = $state([]);
   // Null = showing the folder cards. The grid only exists inside a library.
-  let libraryId = $state(null);
-  let items = $state([]);
-  let total = $state(0);
-  let search = $state('');
+  /** Which shelf a series was opened from, so the back button names it. */
+  let fromLibrary = $state(null);
   let loading = $state(true);
   let error = $state('');
   /** Whether a broadcast is running — decides "Stream" vs "Add to queue". */
   let live = $state(false);
 
-  const currentLibrary = $derived(libraries.find((l) => l.id === libraryId));
 
   /** Landing view: every library as its own shelf, so the first screen shows
    *  media instead of two folders to click through. */
@@ -181,21 +178,9 @@
     return { destroy: () => io.disconnect() };
   }
 
-  async function enterLibrary(l) {
-    libraryId = l.id;
-    search = '';
-    items = [];
-    await loadItems();
-  }
-
-  async function loadItems() {
-    const res = await api.items(libraryId, search ? { search } : {});
-    items = res.items;
-    total = res.total;
-  }
-
-  async function openSeries(item) {
+  async function openSeries(item, from = null) {
     refreshLive();
+    fromLibrary = from;
     series = item;
     selected = new Set();
     seasonId = null;
@@ -344,10 +329,10 @@
 {#if loading}
   <p class="muted">Loading library…</p>
 
-{:else if error && !items.length}
+{:else if error && !shelves.length}
   <div class="card"><p class="err">{error}</p></div>
 
-{:else if !libraryId}
+{:else if !series}
   <header class="row">
     <h1>Library</h1>
   </header>
@@ -382,14 +367,10 @@
       <header class="shead">
         <h2>{shelfTitle(sh.library)}</h2>
         <span class="count">{sh.total || sh.items.length}</span>
-        <div class="spacer"></div>
-        <button class="ghost small" onclick={() => enterLibrary(sh.library)}>
-          Browse and search
-        </button>
       </header>
       <div class="grid">
         {#each sh.items.slice(0, shown[sh.library.id] ?? SHELF_STEP) as item, i (item.id)}
-          <button class="poster" onclick={() => openSeries(item)} aria-label={item.title}>
+          <button class="poster" onclick={() => openSeries(item, shelfTitle(sh.library))} aria-label={item.title}>
             <div class="art">
               {#if item.image}
                 <img src={item.image} alt="" decoding="async"
@@ -413,59 +394,9 @@
        extending as you scroll instead of ending at an arbitrary cut. -->
   <div use:sentinel class="sentinel" aria-hidden="true"></div>
 
-{:else if !series}
-  <header class="row">
-    {#if libraries.length > 1}
-      <button onclick={() => { libraryId = null; items = []; error = ''; }}>← Library</button>
-    {/if}
-    <h1 style="margin:0">{currentLibrary?.name ?? 'Library'}</h1>
-    <div class="spacer"></div>
-    <div class="search">
-      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-           stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input placeholder="Search" bind:value={search}
-             oninput={() => { clearTimeout(globalThis._t); globalThis._t = setTimeout(loadItems, 250); }} />
-    </div>
-  </header>
-
-  {#if !items.length}
-    {#if search}
-      <!-- An empty grid after a search reads as a broken library unless it
-           says which search emptied it. -->
-      <p class="muted">
-        Nothing matches “{search}”.
-        <button class="lnk inline" onclick={() => { search = ''; load(); }}>Clear the search</button>
-      </p>
-    {:else}
-      <p class="muted">Nothing here.</p>
-    {/if}
-  {:else}
-    <div class="grid">
-      {#each items as item}
-        <button class="poster" onclick={() => openSeries(item)} aria-label={item.title}>
-          <div class="art">
-            {#if item.image}
-              <img src={item.image} alt="" loading="lazy" />
-            {:else}
-              <span class="initial">{item.title.slice(0, 1)}</span>
-            {/if}
-            <span class="playbadge" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-            </span>
-          </div>
-          <p class="name">{item.title}</p>
-          {#if item.childCount}<p class="muted small">{item.childCount} episodes</p>{/if}
-        </button>
-      {/each}
-    </div>
-    {#if total > items.length}
-      <p class="muted small">Showing {items.length} of {total}</p>
-    {/if}
-  {/if}
-
 {:else}
   <header class="row">
-    <button onclick={() => { series = null; error = ''; }}>← {currentLibrary?.name ?? 'Library'}</button>
+    <button onclick={() => { series = null; error = ''; }}>← {fromLibrary ?? 'Library'}</button>
     <h1 style="margin:0">{series.title}</h1>
     <div class="spacer"></div>
     {#if selected.size}
