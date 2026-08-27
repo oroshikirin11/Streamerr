@@ -26,6 +26,8 @@
   let seasonId = $state(null);
   let episodes = $state([]);
   let selected = $state(new Set());
+  // Episode ids whose still failed to load, so the row shows its tile instead.
+  let brokenArt = $state(new Set());
   let starting = $state(false);
   /** How many were just appended to a running broadcast, for the hint. */
   let queued = $state(0);
@@ -370,11 +372,28 @@
              works from the keyboard too — a click handler on the <li> did
              not. -->
         <label class="rowlabel" for={`ep-${ep.id}`}>
-          <span class="num">
-            {ep.season != null && ep.episode != null ? `S${String(ep.season).padStart(2,'0')}E${String(ep.episode).padStart(2,'0')}` : '—'}
+          <!-- Every row gets a still frame of the same size, art or not: a
+               grid that only sometimes indents reads as broken. Without art
+               the tile carries the episode number, so the column still means
+               something. -->
+          <span class="still">
+            {#if ep.image && !brokenArt.has(ep.id)}
+              <!-- Jellyfin serves stills from its own host, which the browser
+                   may not be able to reach. Falling back to the tile keeps a
+                   broken-image icon off the row. -->
+              <img src={ep.image} alt="" loading="lazy" decoding="async"
+                   onerror={() => (brokenArt = new Set([...brokenArt, ep.id]))} />
+            {:else}
+              <span class="stub">{ep.episode != null ? ep.episode : '·'}</span>
+            {/if}
           </span>
-          <span class="t">{ep.title}</span>
-          {#if ep.duration}<span class="muted small">{fmtTime(ep.duration)}</span>{/if}
+          <span class="meta">
+            <span class="t">{ep.title}</span>
+            <span class="sub">
+              {ep.season != null && ep.episode != null ? `S${String(ep.season).padStart(2,'0')}E${String(ep.episode).padStart(2,'0')}` : '—'}
+              {#if ep.duration}<span class="dot">·</span>{fmtTime(ep.duration)}{/if}
+            </span>
+          </span>
         </label>
         <button class="ghost small" onclick={() => showTracks(ep)}>Tracks</button>
         <button class="ghost small" onclick={() => selectFrom(ep.id)}>From here</button>
@@ -498,7 +517,7 @@
   .eps { list-style: none; padding: 0; margin: 0; }
   .eps li {
     display: flex; align-items: center; gap: 12px;
-    padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 14px;
+    padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px;
     border-radius: var(--radius); cursor: pointer;
     transition: background .12s ease;
   }
@@ -509,8 +528,23 @@
     flex: 1; min-width: 0; cursor: pointer;
   }
   .eps li:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .num { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 62px; }
-  .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 16:9, because an episode still is a frame of the video — unlike the
+     2:3 posters on the series grid. Fixed size so every row aligns. */
+  .still {
+    flex: none; width: 96px; height: 54px; border-radius: 6px;
+    overflow: hidden; background: var(--surface-2);
+    border: 1px solid var(--border);
+    display: grid; place-items: center;
+  }
+  .still img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .stub {
+    font-variant-numeric: tabular-nums; color: var(--muted);
+    font-size: 15px; opacity: .5;
+  }
+  .meta { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+  .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .dot { margin: 0 5px; }
   button.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 4px 8px; }
   button.ghost:hover { border-color: var(--border); }
 

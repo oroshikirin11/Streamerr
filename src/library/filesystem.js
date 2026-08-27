@@ -96,6 +96,33 @@ function findPoster(dir) {
   return null;
 }
 
+const STILL_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
+
+/**
+ * Episode still sitting next to the video, which is what Jellyfin, Plex and
+ * tinyMediaManager all write: `Show - S01E01 - Title.jpg`, sometimes with a
+ * `-thumb` suffix. One readdir per directory, cached, because a 25-episode
+ * season would otherwise cost a hundred stat calls just to draw a list.
+ */
+function stillsIn(dir, cache) {
+  let found = cache.get(dir);
+  if (found) return found;
+  found = new Map();
+  try {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (!e.isFile()) continue;
+      const ext = extname(e.name).toLowerCase();
+      if (!STILL_EXTS.includes(ext)) continue;
+      const stem = e.name.slice(0, -ext.length).replace(/-(thumb|poster|landscape)$/i, '');
+      // A poster for the whole folder is not a still for one episode.
+      if (POSTER_NAMES.includes(e.name.toLowerCase())) continue;
+      if (!found.has(stem)) found.set(stem, join(dir, e.name));
+    }
+  } catch { /* unreadable directory — no stills, not an error */ }
+  cache.set(dir, found);
+  return found;
+}
+
 function listDirs(dir) {
   try {
     return readdirSync(dir, { withFileTypes: true })
@@ -281,6 +308,7 @@ export class FilesystemLibrary {
 
     const seriesDir = this._paths.get(seriesId) ?? dir;
     const out = [];
+    const stillCache = new Map();
 
     // Recursive: episodes live in `Show/Season 1/`, and a scan one level
     // deep found nothing at all for every show organised that way.
@@ -310,7 +338,12 @@ export class FilesystemLibrary {
         duration: null, // ffprobe on every file would make browsing slow
         path: full,
         sourcePath: full,
-        image: null,
+        image: (() => {
+          const still = stillsIn(fileDir, stillCache).get(file.slice(0, -extname(file).length));
+          if (!still) return null;
+          this._paths.set(id(still), still);
+          return `/api/library/image/${id(still)}`;
+        })(),
       });
     }
 
