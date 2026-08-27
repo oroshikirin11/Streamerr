@@ -10,6 +10,7 @@ import {
   readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, unlinkSync,
 } from 'fs';
 import { resolve, dirname, isAbsolute } from 'path';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,13 +30,18 @@ const DEFAULTS = {
     syncTitle: true,
   },
   library: {
-    provider: 'filesystem',
-    jellyfin: { url: '', apiKey: '' },
-    filesystem: { roots: [] },
-    // A local SMB/CIFS share, mounted by the service itself. guest:true
-    // covers passwordless NAS shares; credentials otherwise.
-    smb: { host: '', share: '', path: '', username: '', password: '', guest: true },
-    pathMap: [],
+    /**
+     * One entry per place media lives — a Jellyfin server for the shows, a
+     * folder for the music videos, a share for the rest. Each carries only
+     * the settings its own provider needs.
+     *
+     *   { id, name, provider, jellyfin|filesystem|smb: {...}, pathMap: [] }
+     *
+     * Empty by default; setup writes the first one. A config from before
+     * multiple sources existed is converted on load — see
+     * normalizeStoredLibrary.
+     */
+    sources: [],
   },
   encoder: {
     backend: 'auto',
@@ -189,6 +195,36 @@ export function normalizeStoredEncoder() {
     enc.device = '/dev/dri/renderD128';
   }
   return fixed.length ? fixed : null;
+}
+
+/**
+ * Convert a single-provider config into the sources list.
+ *
+ * Older builds stored one provider inline under `library`. Rather than make
+ * every reader understand both shapes, the old form is folded into a
+ * one-entry list at load; nothing downstream ever sees the legacy layout.
+ */
+export function normalizeStoredLibrary() {
+  const lib = config.library ?? (config.library = {});
+  if (Array.isArray(lib.sources) && lib.sources.length) return null;
+  if (!lib.provider) { lib.sources = Array.isArray(lib.sources) ? lib.sources : []; return null; }
+
+  const provider = lib.provider;
+  const name = provider === 'jellyfin' ? 'Jellyfin'
+    : provider === 'filesystem' ? 'Folder'
+      : 'SMB share';
+  const source = { id: randomUUID().slice(0, 8), name, provider, pathMap: lib.pathMap ?? [] };
+  if (provider === 'jellyfin') source.jellyfin = lib.jellyfin ?? {};
+  else if (provider === 'filesystem') source.filesystem = lib.filesystem ?? {};
+  else source.smb = lib.smb ?? {};
+
+  lib.sources = [source];
+  delete lib.provider;
+  delete lib.jellyfin;
+  delete lib.filesystem;
+  delete lib.smb;
+  delete lib.pathMap;
+  return name;
 }
 
 export function ensureDirs() {

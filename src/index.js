@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 
 import {
   config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, assertRtmpUrl,
-  normalizeStoredBitrates, normalizeStoredEncoder, ROOT,
+  normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT,
 } from './config.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
@@ -125,6 +125,13 @@ let lastEngine = null;
  * Reset when a broadcast starts, updated when tracks are switched live.
  */
 let trackIntent = {};
+// A config written before multiple sources existed is folded into the
+// sources list first, so nothing below ever sees the legacy shape.
+const movedLibrary = normalizeStoredLibrary();
+if (movedLibrary) {
+  console.warn(`! migrated the ${movedLibrary} library into the new sources list`);
+  saveConfig({ library: config.library });
+}
 let library = makeLibrary(config);
 
 /**
@@ -624,14 +631,18 @@ app.get('/smbmedia/*', async (req, res) => {
   if (!/^(::1|127\.0\.0\.1|::ffff:127\.0\.0\.1)$/.test(remote)) {
     return res.status(403).end();
   }
-  if (typeof library?.stream !== 'function') return res.status(404).end();
-  const expected = Buffer.from(library.bridgeToken ?? '');
-  const given = Buffer.from(String(req.query.t ?? ''));
+  if (!library?.hasBridge) return res.status(404).end();
+  // Each SMB source mints its own token, so the token identifies which one
+  // is being asked for — two shares cannot read each other's media.
+  const given = String(req.query.t ?? '');
+  const source = library.sourceForToken(given);
+  if (!source) return res.status(403).end();
+  const expected = Buffer.from(source.lib.bridgeToken);
+  const givenBuf = Buffer.from(given);
   // Byte length, not string length: one multi-byte character makes those two
   // differ, and timingSafeEqual then THROWS — out of this handler, past
   // Express 4, leaving the request hanging and the socket leaked.
-  if (!expected.length || given.length !== expected.length
-      || !timingSafeEqual(given, expected)) {
+  if (givenBuf.length !== expected.length || !timingSafeEqual(givenBuf, expected)) {
     return res.status(403).end();
   }
   let rel;
@@ -646,7 +657,7 @@ app.get('/smbmedia/*', async (req, res) => {
     return res.status(400).json({ error: 'Bad path' });
   }
   try {
-    const size = await library.size(rel);
+    const size = await source.lib.size(rel);
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
     let start = 0;
     let end = size - 1;
@@ -663,7 +674,7 @@ app.get('/smbmedia/*', async (req, res) => {
       'Content-Length': String(end - start + 1),
       'Content-Type': 'application/octet-stream',
     });
-    const s2 = await library.stream(rel, { start, end });
+    const s2 = await source.lib.stream(rel, { start, end });
     if (process.env.JSR_SMB_TRACE) {
       const t0 = Date.now();
       const reqs = (globalThis.__bridgeReqs ??= new Map());
@@ -918,6 +929,41 @@ const wrap = (fn) => async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
+
+/**
+ * Pick up media added since the panel was opened.
+ *
+ * For a folder or a share this only means dropping the client and rebuilding
+ * it, since both read the disk on every request anyway. For Jellyfin it means
+ * asking JELLYFIN to rescan — nothing on this side caches its listings, so a
+ * missing episode is almost always one Jellyfin has not indexed yet, and
+ * refetching our end would just re-read the same stale answer.
+ */
+app.post('/api/library/refresh', wrap(async (req, res) => {
+  const asked = [];
+  for (const src of config.library?.sources ?? []) {
+    if (src.provider !== 'jellyfin' || !src.jellyfin?.url || !src.jellyfin?.apiKey) continue;
+    try {
+      const r = await fetch(`${String(src.jellyfin.url).replace(/\/+$/, '')}/Library/Refresh`, {
+        method: 'POST',
+        headers: { Authorization: `MediaBrowser Token="${src.jellyfin.apiKey}"` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      asked.push({ name: src.name, ok: r.ok, status: r.status });
+    } catch (err) {
+      asked.push({ name: src.name, ok: false, error: err.message });
+    }
+  }
+  refreshLibrary();
+  res.json({
+    ok: true,
+    rescanned: asked,
+    // Jellyfin answers immediately and scans in the background, so a fresh
+    // listing may still be a moment away. Say so rather than implying the
+    // work is finished.
+    note: asked.length ? 'Jellyfin scans in the background; new items may take a moment.' : undefined,
+  });
+}));
 
 app.get('/api/library/libraries', wrap(async (req, res) =>
   res.json(await library.libraries())));
@@ -1380,6 +1426,7 @@ const { port, host } = config.server;
 server.listen(port, host, () => {
   console.log(`jellystreamerr listening on http://${host}:${port}`);
   console.log(`  target : ${rtmpTargetRedacted()}`);
-  console.log(`  library: ${config.library.provider}`);
+  const srcs = config.library?.sources ?? [];
+  console.log(`  library: ${srcs.length ? srcs.map((s) => `${s.name} (${s.provider})`).join(', ') : 'none configured'}`);
   if (!passwordHash()) console.log('  no password set — open the panel to run setup');
 });
