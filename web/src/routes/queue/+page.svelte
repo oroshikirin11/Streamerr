@@ -915,13 +915,21 @@
 
   .qctl { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
   .q li:hover .qctl, .q li:focus-within .qctl, .qctl.open { opacity: 1; }
-  .qctl .ok:hover:not(:disabled) { color: var(--success); }
   .hint { margin-top: 10px; }
-  .qctl .ic {
+  /* Not scoped to .qctl: the block rows put their remove control in .bctl,
+     which missed these rules entirely and fell back to the default bordered
+     button — a boxed X sitting in a row that has no other borders in it. */
+  .ic {
     display: inline-flex; align-items: center; justify-content: center;
-    width: 26px; height: 26px; padding: 0; border-radius: 6px;
-    background: transparent; border-color: transparent; color: var(--muted);
+    width: 28px; height: 28px; padding: 0; border-radius: 999px;
+    background: transparent; border: none; color: var(--muted);
+    transition: background .12s ease, color .12s ease;
   }
-  .qctl .ic:hover:not(:disabled) { background: var(--surface); color: var(--text); }
-  .qctl .rm:hover:not(:disabled) { color: var(--danger); }
+  .ic:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+  .ic:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .qctl .ok:hover:not(:disabled) { color: var(--success); }
+  .rm:hover:not(:disabled) {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+  }
 </style>
