@@ -178,6 +178,25 @@
     return { destroy: () => io.disconnect() };
   }
 
+  /**
+   * A film is one file. Opening a list of exactly one row to tick it and then
+   * press a button is three clicks to do the obvious thing, so clicking the
+   * poster does it: queued behind the broadcast if one is running, started if
+   * not. Nothing is lost by skipping the detail view — audio and subtitles
+   * can be changed live from the transport bar, and air times are programmed
+   * on the Schedule page after queueing.
+   */
+  async function playMovie(item) {
+    if (starting) return;
+    await refreshLive();
+    episodes = [{ ...item, season: null, episode: null }];
+    selected = new Set([item.id]);
+    trackOverride = null;
+    scheduling = false;
+    startTime = '';
+    await stream();
+  }
+
   async function openSeries(item, from = null) {
     refreshLive();
     fromLibrary = from;
@@ -370,7 +389,13 @@
       </header>
       <div class="grid">
         {#each sh.items.slice(0, shown[sh.library.id] ?? SHELF_STEP) as item, i (item.id)}
-          <button class="poster" onclick={() => openSeries(item, shelfTitle(sh.library))} aria-label={item.title}>
+          <button class="poster" disabled={starting}
+                  onclick={() => (item.type === 'Movie'
+                    ? playMovie(item)
+                    : openSeries(item, shelfTitle(sh.library)))}
+                  aria-label={item.type === 'Movie'
+                    ? `${live ? 'Queue' : 'Stream'} ${item.title}`
+                    : item.title}>
             <div class="art">
               {#if item.image}
                 <img src={item.image} alt="" decoding="async"
@@ -393,6 +418,14 @@
   <!-- Grows every shelf that still has items left, so the page keeps
        extending as you scroll instead of ending at an arbitrary cut. -->
   <div use:sentinel class="sentinel" aria-hidden="true"></div>
+
+  {#if queued}
+    <p class="queued">
+      Added {queued} to the queue.
+      <a href="/queue">Open Schedule</a> to see when it airs, or to program a time.
+      <button class="lnk" onclick={() => (queued = 0)} aria-label="Dismiss">×</button>
+    </p>
+  {/if}
 
 {:else}
   <header class="row">
