@@ -400,19 +400,19 @@
    * the button flashed 'Applying…' for a few milliseconds and then nothing
    * visible happened until the overlay appeared out of nowhere.
    */
-  let pending = $state(false);
+  let pending = $state('');   // '' | 'apply' | 'hide'
   let pendingTimer = null;
 
   async function apply() {
     busy = 'apply'; error = '';
     try {
       await save({ items, hidden });
-      pending = true;
+      pending = 'apply';
       clearTimeout(pendingTimer);
       // Cleared on a timer rather than on a signal: the panel is not told the
       // reserve depth, so there is nothing to count down from honestly. The
       // note says "about", and the timer outlasts a full bank.
-      pendingTimer = setTimeout(() => { pending = false; }, 20000);
+      pendingTimer = setTimeout(() => { pending = ''; }, 20000);
     } catch (err) { error = err.message; }
     busy = '';
   }
@@ -434,6 +434,13 @@
       // `dirty` is deliberately left alone: unsaved edits stay unsaved.
       await api.saveConfig({ overlay: { hidden: next } });
       hidden = next;
+      // Hiding goes through setOverlay exactly like Apply does, so it lands
+      // when the cushion drains too. Without this the button that is reached
+      // for BECAUSE something wrong is on air was the one that looked like it
+      // had done nothing.
+      pending = 'hide';
+      clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => { pending = ''; }, 20000);
     } catch (err) { error = err.message; }
     busy = '';
   }
@@ -501,17 +508,20 @@
       </button>
     </div>
   </div>
-  {#if pending}
-    <p class="pending" role="status">
-      <span class="spin" aria-hidden="true"></span>
-      Applied — going on air in about 15 seconds. The broadcast plays out what
-      it has already encoded first, so viewers see no interruption.
-    </p>
-  {/if}
   {#if hidden}
     <p class="warnbar">
       Overlays are hidden — nothing here is on air. Editing and Apply still
       work, and everything reappears when you show them again.
+    </p>
+  {/if}
+  {#if pending}
+    <p class="pending" role="status">
+      <span class="spin" aria-hidden="true"></span>
+      {pending === 'hide'
+        ? 'Taking the overlays off air — about 15 seconds.'
+        : 'Applied — going on air in about 15 seconds.'}
+      The broadcast plays out what it has already encoded first, so viewers
+      see no interruption.
     </p>
   {/if}
   {#if error}<p class="err">{error}</p>{/if}
