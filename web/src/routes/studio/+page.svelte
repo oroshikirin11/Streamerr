@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import mpegts from 'mpegts.js';
   import { api } from '$lib/api.js';
 
@@ -92,11 +92,20 @@
       cfg = await api.config();
       items = (cfg.overlay?.items ?? []).map((i) => ({ ...i, id: i.id ?? uid() }));
       hidden = cfg.overlay?.hidden === true;
+      applied = snapshot(items);
       await loadPictures();
     } catch (err) { error = err.message; }
     startFeed();
-    return stopFeed;
   });
+
+  // NOT `return stopFeed` from onMount. Svelte only calls a returned cleanup
+  // when the onMount callback is synchronous — an async one returns a
+  // Promise, which is silently ignored. So every visit to this page built
+  // another mpegts player on the same <video> and never tore the old one
+  // down: four visits, four demuxers decoding the same live stream into one
+  // element. That is what froze the preview and made the editor feel dead,
+  // because the main thread had no time left for pointer events.
+  onDestroy(stopFeed);
 
   /**
    * Hiding everything without deleting anything.
@@ -106,6 +115,25 @@
    * un-hiding then restores exactly the arrangement that was there before.
    */
   let hidden = $state(false);
+
+  /**
+   * What each item looked like when it was last saved, by id.
+   *
+   * The live picture behind the stage already has the applied overlays
+   * BURNT INTO IT by the encoder — it is the finished broadcast, not a
+   * clean backdrop. Drawing our own copy on top of that shows everything
+   * twice. So an item that is already on air, unchanged, renders its box
+   * and handles but not its content: the feed is showing the real thing,
+   * and that is the honest preview.
+   *
+   * The moment it is edited it renders fully again, which is useful rather
+   * than noisy — the burnt-in copy stays where it was until Apply, so you
+   * see the old position and the new one side by side.
+   */
+  let applied = $state({});
+  const snapshot = (list) => Object.fromEntries(list.map((i) => [i.id, JSON.stringify(i)]));
+  const burntIn = (i) => feed === 'live' && !hidden && i.enabled !== false
+    && applied[i.id] === JSON.stringify(i);
 
   // ── uploaded pictures ──────────────────────────────────────────────────
   let pictures = $state([]);
@@ -268,6 +296,7 @@
 
   async function save(overlay) {
     await api.saveConfig({ overlay });
+    applied = snapshot(overlay.items ?? items);
     dirty = false;
   }
 
@@ -384,7 +413,7 @@
                Left in, the box grew a whole line taller than the image and
                the resize handle sat well below the corner it belongs to. -->
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
-               class:pic={item.type === 'image'}
+               class:pic={item.type === 'image'} class:burnt={burntIn(item)}
                style={`left:${item.x * 100}%; top:${item.y * 100}%;
                        transform: translate(-50%,-50%) rotate(${item.rotation}deg);
                        ${item.type === 'image' ? ''
@@ -400,9 +429,11 @@
                    alt={item.file} draggable="false"
                    style={`width:${item.size * 100}cqw`} />
             {:else}
-              <span class="txt" class:outline={item.outline !== false}>
-                {item.text.replace('{title}', 'Episode title')}
-              </span>
+              <!-- No whitespace inside the span: `white-space: pre` renders
+                   the template's own newline and indentation as real space,
+                   which widened the box and pushed the glyphs off centre
+                   from where the encoder puts them. -->
+              <span class="txt" class:outline={item.outline !== false}>{item.text.replace('{title}', 'Episode title')}</span>
             {/if}
             {#if selected === item.id}
               <span class="handle rot" onpointerdown={(e) => startRotate(e, item)}
@@ -427,7 +458,10 @@
       </p>
     </div>
 
-    <div class="side">
+    <!-- Properties on the left, inventory on the right, picture between
+         them: what you are editing sits beside the thing it changes, and
+         the lists stay out of the way. -->
+    <div class="side left">
       {#if sel}
         <div class="card">
           <h3>Selected</h3>
@@ -504,7 +538,9 @@
           <p class="muted small">Select something on the frame, or add a new one.</p>
         </div>
       {/if}
+    </div>
 
+    <div class="side right">
       {#if items.length}
         <div class="card">
           <h3>On screen</h3>
@@ -586,8 +622,25 @@
   .head button.warn { color: var(--accent); }
   .head h1 { margin: 0; }
   .spacer { flex: 1; }
-  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
-  @media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
+  .cols {
+    display: grid; grid-template-columns: 300px minmax(0, 1fr) 320px;
+    gap: 16px; align-items: start;
+  }
+  .side.left { grid-column: 1; grid-row: 1; }
+  .stagewrap { grid-column: 2; grid-row: 1; }
+  .side.right { grid-column: 3; grid-row: 1; }
+  /* Two columns first — the picture keeps its width and the lists move
+     under it — then one, rather than squeezing three the whole way down. */
+  @media (max-width: 1240px) {
+    .cols { grid-template-columns: 280px minmax(0, 1fr); }
+    .side.right { grid-column: 1 / -1; grid-row: 2; }
+  }
+  @media (max-width: 860px) {
+    .cols { grid-template-columns: 1fr; }
+    .side.left { grid-column: 1; grid-row: 2; }
+    .stagewrap { grid-column: 1; grid-row: 1; }
+    .side.right { grid-column: 1; grid-row: 3; }
+  }
 
   .stage {
     position: relative; container-type: size;
@@ -616,15 +669,37 @@
   }
 
   .item {
-    position: absolute; cursor: grab; white-space: pre; line-height: 1.15;
-    padding: 2px 4px; border-radius: 4px;
+    position: absolute; cursor: grab;
+    /* Both of these exist to make the editor agree with the encoder.
+       The overlay is burnt by libass in DejaVu Sans (the ASS style's font),
+       so rendering here in the panel's UI font put the same string at a
+       different width and a different apparent size — the two copies were
+       visibly out of register. `normal` leading likewise: libass lays a
+       line out on the font's own metrics, and an invented 1.15 shifted the
+       vertical centre, because \an5 and translate(-50%,-50%) then centre
+       two different boxes. */
+    font-family: 'DejaVu Sans', DejaVu, Verdana, sans-serif;
+    line-height: normal;
+    border-radius: 4px;
   }
+  /* Already burnt into the picture behind: keep the box and the handles,
+     drop the duplicate. visibility, not display, so the outline still
+     traces the real extents of the text. */
+  .item.burnt > .txt, .item.burnt > .pic { visibility: hidden; }
+  .item.burnt { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
+  .item.burnt:hover, .item.burnt.on { outline: 1px dashed var(--accent); }
   /* No line box at all, so the outline hugs the picture and the resize
      handle sits on its actual corner. */
   .item.pic { font-size: 0; line-height: 0; padding: 0; }
   .item:active { cursor: grabbing; }
   .item.off { opacity: .35; }
   .item.on { outline: 1px dashed var(--accent); outline-offset: 3px; }
+  /* On the text itself, NOT on .item. Multi-line captions need their line
+     breaks kept, but on the container it also preserved the template's own
+     newlines between blocks — 12px of invisible whitespace that widened the
+     box and left the glyphs sitting off-centre inside it, so the editor
+     drew the caption ~14px left of where the encoder burns it. */
+  .txt { white-space: pre; }
   .txt.outline {
     text-shadow: 0 0 2px #000, 0 0 2px #000, 1px 1px 2px #000, -1px -1px 2px #000;
   }
