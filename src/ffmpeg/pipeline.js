@@ -2107,6 +2107,12 @@ export class PipelinePlayout extends EventEmitter {
       // `enable` on the overlay filter, which is read after the restore.
       overlayPath: overlayFile,
       overlayImages,
+      // A bouncing CAPTION is drawn by libass onto the same canvas, so it
+      // needs every frame exactly as a moving picture does. Without this it
+      // was animated at half rate and visibly stepped.
+      overlayAnimated: (this.profile?.overlay ?? []).some(
+        (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
+      ),
       // Deliberately a thunk, not a path. Baking touches the disk, which a
       // pure argv builder has no business doing — but only the builder knows
       // whether a band is going to be used, and a banded canvas carries no
@@ -2291,12 +2297,14 @@ export class PipelinePlayout extends EventEmitter {
       if (texts.length) {
         const moving = texts.filter((i) => i?.motion === 'bounce').length;
         bits.push(`${texts.length} caption${texts.length === 1 ? '' : 's'}`
-          + (moving ? ` (${moving} moving — free, they ride libass)` : ''));
+          + (moving ? ` (${moving} moving)` : ''));
       }
       out.push(`studio: ${bits.join(', ')}`);
       if (pics.some((i) => i?.motion === 'bounce' || /\.gif$/i.test(i?.file ?? ''))) {
         out.push('  a moving or animated picture forces the CPU composite'
           + ' and a full-rate canvas');
+      } else if (all.some((i) => i?.motion === 'bounce')) {
+        out.push('  a moving caption forces a full-rate canvas so it does not step');
       }
     }
 
@@ -2306,7 +2314,7 @@ export class PipelinePlayout extends EventEmitter {
     try {
       const rect = contentRect(v, this.profile);
       const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
-      const halfRate = !pics.some((i) => i?.motion === 'bounce'
+      const halfRate = !all.some((i) => i?.motion === 'bounce'
         || /\.gif$/i.test(i?.file ?? ''));
       if (sub && !sub.bitmap) {
         out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
@@ -3294,6 +3302,7 @@ export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
   overlayPath = null, overlayImages = [], overlayLayer = null, subBand = null,
+  overlayAnimated = false,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -3653,8 +3662,11 @@ export function buildSourceArgs({
      * picture are the two that genuinely change.
      */
     const perFrameImgs = imgList.some((i) => i?.animated || isMoving(i));
-    const canvasRate = ((!canvasImgs.filters.length || !perFrameImgs)
-      && halfRate(eff.rate)) || eff.rate;
+    // A moving caption lives in the ASS script rather than in imgList, so it
+    // has to be asked about separately — it is drawn onto this same canvas
+    // and is just as stepped at half rate.
+    const perFrame = overlayAnimated || (canvasImgs.filters.length && perFrameImgs);
+    const canvasRate = (!perFrame && halfRate(eff.rate)) || eff.rate;
     const layerSrc = layer
       ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${canvasRate})/TB,`
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
