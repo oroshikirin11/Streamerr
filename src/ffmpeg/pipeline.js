@@ -2203,8 +2203,7 @@ export class PipelinePlayout extends EventEmitter {
     try {
       const rect = contentRect(v, this.profile);
       const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
-      const halfRate = !imgs.some((i) => i?.motion === 'bounce'
-        || i?.animated || i?.when === 'intro' || i?.when === 'outro');
+      const halfRate = !imgs.some((i) => i?.motion === 'bounce' || i?.animated);
       if (sub && !sub.bitmap) {
         out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
           + `, uploaded and blended every frame`);
@@ -3525,8 +3524,20 @@ export function buildSourceArgs({
      * Not applied to a canvas carrying timed or animated pictures, whose
      * motion is the one thing on this surface that does need every frame.
      */
-    const canvasRate = (!canvasImgs.filters.length && halfRate(eff.rate))
-      || eff.rate;
+    /**
+     * Only a picture whose APPEARANCE changes per frame needs full rate.
+     *
+     * This used to trip on any picture drawn live, which quietly doubled the
+     * subtitle rasterisation too — the expensive half on a heavily typeset
+     * title — for pictures that look identical on every frame. A still is
+     * unaffected by the canvas being held for two video frames, and a timed
+     * one only switches at a boundary, which is the same one-frame tolerance
+     * already accepted for subtitle cues. An animated GIF and a moving
+     * picture are the two that genuinely change.
+     */
+    const perFrameImgs = imgList.some((i) => i?.animated || isMoving(i));
+    const canvasRate = ((!canvasImgs.filters.length || !perFrameImgs)
+      && halfRate(eff.rate)) || eff.rate;
     const layerSrc = layer
       ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${canvasRate})/TB,`
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`

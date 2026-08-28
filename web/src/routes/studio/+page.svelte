@@ -364,6 +364,25 @@
    * wrong phase and reads as a second, broken copy. Parked at its stored
    * position it claims nothing, and still selects, drags and deletes.
    */
+  /**
+   * What the current overlay set costs the encoder, in the operator's terms.
+   *
+   * Null when nothing is expensive, so the notice is absent rather than
+   * reassuring — a standing "this is fine" banner stops being read, which is
+   * exactly how the hidden-overlay warning got missed.
+   */
+  const liveCost = $derived.by(() => {
+    const on = items.filter((i) => i.type === 'image' && i.enabled !== false);
+    const live = on.filter((i) => i.motion === 'bounce' || /\.gif$/i.test(i.file ?? ''));
+    if (!live.length) return null;
+    const bits = [];
+    const moving = live.filter((i) => i.motion === 'bounce').length;
+    const gifs = live.length - moving;
+    if (moving) bits.push(`${moving} moving picture${moving === 1 ? '' : 's'}`);
+    if (gifs) bits.push(`${gifs} animated GIF${gifs === 1 ? '' : 's'}`);
+    return `${bits.join(' and ')} drawn every frame`;
+  });
+
   const ghostPos = (item, idx) => (moves(item) && !burntIn(item)
     ? bouncePos(item, idx)
     : { x: item.x, y: item.y });
@@ -624,6 +643,18 @@
       <button class="inline" onclick={toggleHidden} disabled={busy === 'hide'}>
         Show on broadcast
       </button>
+    </p>
+  {/if}
+  <!-- Independent of selection: the cost is a property of what is ON AIR,
+       and the per-item note under Movement only appears for the one picture
+       the operator happens to have clicked. -->
+  {#if liveCost}
+    <p class="perfnote">
+      <strong>Encoder cost:</strong> {liveCost}. Pictures that never move are
+      pre-rendered once and cost nothing per frame; moving or animated ones are
+      drawn on every frame and force the subtitle canvas to full rate. If the
+      console reports a clip encoding slower than realtime, this is the first
+      thing to reduce.
     </p>
   {/if}
   {#if pending && pending !== 'apply-hidden'}
