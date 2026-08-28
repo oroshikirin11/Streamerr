@@ -333,6 +333,8 @@ export class PipelinePlayout extends EventEmitter {
     // {ramBytes} — resolved by the caller; null disables the run-ahead.
     this.runAhead = runAhead;
     this._subCache = new Map();   // `${srcPath}:${typeIndex}` -> {path, fontsDir}
+    /** Still-layer bakes in flight, so restarts do not pile up renders. */
+    this._layerBaking = new Set();
     /** Set when a clip is encoded in parallel chunks instead of streamed. */
     this.scheduler = null;
     this._clipBase = 0;
@@ -1612,19 +1614,51 @@ export class PipelinePlayout extends EventEmitter {
       if (existsSync(out)) return out;
       const args = staticLayerArgs(baked, { width: rect.w, height: rect.h, out });
       if (!args) return null;
-      const r = spawnSync('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-      // No throw on failure: a layer that will not render is a picture the
-      // viewer does not see, never a broadcast that stops. The caller falls
-      // back to the transparent colour source and composites it live.
-      if (r.status !== 0 || !existsSync(out)) {
-        this.emit('warn', `overlay layer render failed: ${
-          String(r.stderr ?? '').trim().slice(0, 200) || `exit ${r.status}`}`);
-        return null;
+      /**
+       * A miss bakes in the BACKGROUND and gives this spawn nothing.
+       *
+       * This used to be spawnSync, on the event loop, inside _play — and
+       * _play is what setOverlay calls immediately after flushing the bank.
+       * So applying a picture threw away the buffer and then blocked the
+       * only thread that refills it, for as long as a full-frame PNG render
+       * takes. The publisher had nothing to send for all of it, which is a
+       * viewer-visible stall on Owncast, not a local hiccup. Same mistake
+       * that parked the decode probe: never run speculative ffmpeg beside a
+       * live encoder.
+       *
+       * Returning null is not a failure path — it is the live composite,
+       * which is what already happens whenever the render fails. The clip
+       * pays a per-frame picture this once; the next restart finds the file
+       * cached and gets the free version.
+       */
+      if (!this._layerBaking.has(out)) {
+        this._layerBaking.add(out);
+        this._detached(this._bakeLayer(args, out), 'baking picture layer');
       }
-      return out;
+      return null;
     } catch {
       return null;
     }
+  }
+
+  /** Render one still layer off the live path. Never throws at the caller. */
+  _bakeLayer(args, out) {
+    return new Promise((resolve) => {
+      let err = '';
+      const p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      p.stderr.on('data', (d) => { if (err.length < 400) err += String(d); });
+      p.on('error', (e) => { err ||= e.message; p.emit('close', -1); });
+      p.on('close', (code) => {
+        this._layerBaking.delete(out);
+        // A layer that will not render is a picture composited live, never a
+        // broadcast that stops.
+        if (code !== 0 || !existsSync(out)) {
+          this.emit('warn', `overlay layer render failed: ${
+            err.trim().slice(0, 200) || `exit ${code}`}`);
+        }
+        resolve();
+      });
+    });
   }
 
   /**
@@ -1908,10 +1942,13 @@ export class PipelinePlayout extends EventEmitter {
       // `enable` on the overlay filter, which is read after the restore.
       overlayPath: overlayFile,
       overlayImages,
-      // Rendered here rather than inside the builder: it spawns ffmpeg and
-      // touches the disk, which a pure argv builder has no business doing,
-      // and this runs once per clip instead of once per graph.
-      overlayLayer: this._overlayLayer(overlayImages),
+      // Deliberately a thunk, not a path. Baking touches the disk, which a
+      // pure argv builder has no business doing — but only the builder knows
+      // whether a band is going to be used, and a banded canvas carries no
+      // pictures, so its layer would be rendered and then thrown away. Asking
+      // lazily means the exact condition decides, with nothing duplicated
+      // here to drift out of step with it.
+      overlayLayer: () => this._overlayLayer(overlayImages),
       subBand: this._subtitleBand(cached?.path ?? null, {
         overlayPath: overlayFile,
         fontsDir: cached?.fontsDir ?? null,
@@ -3206,8 +3243,11 @@ export function buildSourceArgs({
 
     // A banded canvas carries subtitles alone, so it needs neither the
     // pre-rendered picture layer nor a per-frame picture composite.
-    const layer = !band && overlayLayer && duration != null && duration > 0
-      && existsSync(overlayLayer) ? overlayLayer : null;
+    // Asked for only when it can actually be used: resolving this is what
+    // triggers the bake, and a banded canvas has no pictures drawn into it.
+    const layerPath = band || duration == null || !(duration > 0) ? null
+      : (typeof overlayLayer === 'function' ? overlayLayer() : overlayLayer);
+    const layer = layerPath && existsSync(layerPath) ? layerPath : null;
     // Timed and animated pictures cannot be baked into a still, so they keep
     // the per-frame path on top of the layer.
     const canvasImgs = band ? { inputs: [], filters: [] } : canvasImageChain(
