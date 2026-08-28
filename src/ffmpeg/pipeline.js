@@ -39,7 +39,7 @@ import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { overlayAss } from './overlay-ass.js';
-import { imageOverlayChain, canvasImageChain } from './overlay-image.js';
+import { imageOverlayChain, vaapiImageOverlayChain } from './overlay-image.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -1775,15 +1775,7 @@ export class PipelinePlayout extends EventEmitter {
     // which is the unstreamable case the GPU graph exists to avoid. One
     // enabled logo was enough to trigger it on every subtitled clip.
     const video = this.selection?.video;
-    // Only TIMED pictures force the software path now — overlay_vaapi has no
-    // `enable`, so an intro/outro logo cannot be done on the GPU. A plain
-    // always-on picture composites there and leaves this decision alone.
-    const cpuOnlyPictures = (this.profile?.overlay ?? []).some(
-      (i) => i?.type === 'image' && i.enabled !== false && i.file
-        && i.when && i.when !== 'always',
-    );
     const gpuComposite = Boolean(this.profile?.gpuSubs)
-      && !cpuOnlyPictures
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
@@ -2688,6 +2680,22 @@ export function buildSourceArgs({
    */
   const gpuImages = imgList.length > 0
     && Boolean(profile.gpuSubs) && !profile.noGpuImages;
+  /**
+   * Pictures the software chain draws — which is all of them.
+   *
+   * That reads wrong until you notice WHERE this is used: only in the CPU
+   * fallthrough at the bottom, which a clip reaches for its own reasons —
+   * bitmap subtitles, a file the GPU cannot decode, a driver that failed
+   * the pillarbox probe. A clip already down there costs nothing extra to
+   * draw a picture on, so it gets one.
+   *
+   * What must never happen is a picture being the REASON. The GPU branches
+   * no longer refuse a clip for carrying one: they draw it with
+   * overlay_vaapi, or — if the driver will not — drop it and play the
+   * episode at full speed without it. Never a logo bought with the frame
+   * rate of the whole episode.
+   */
+  const cpuImgs = imgList;
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
@@ -2702,8 +2710,7 @@ export function buildSourceArgs({
   // Fixed-function chain for clips WITHOUT burned subtitles. This used to
   // exist only when subtitles forced it, which left subtitle-free 4K films
   // software-decoding on the CPU at 0.6x while the GPU sat idle.
-  if (profile.gpuFull && !sub.filter && !sub.needsComplex
-      && (!imgList.length || gpuImages)) {
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     const scalePart = selection?.video?.hdr
@@ -2714,17 +2721,14 @@ export function buildSourceArgs({
     const vaapiChain = (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
       ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
       : scalePart);
-    // With pictures this becomes the SAME shape the subtitle path uses — a
-    // transparent RGBA canvas carrying the overlay, uploaded once, and one
-    // overlay_vaapi — because that is the shape the device has been shown
-    // to accept. Bounded like the subtitle canvas: an unbounded generated
-    // input never ends, so the clip never advances.
-    const gpuImgs = canvasImageChain(gpuImages ? imgList : [], {
-      width: profile.width, height: profile.height,
-      firstInput: 2, inLabel: '1:v', outLabel: 'cvo',
+    // No subtitles means no canvas is needed at all: the picture uploads
+    // once as a single frame and the GPU composites it straight onto the
+    // video. One overlay_vaapi — the same count as the subtitle path the
+    // device already runs — and nothing per-frame on the CPU. This is the
+    // cheapest the feature can be.
+    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
+      width: profile.width, firstInput: 1, inLabel: 'b', outLabel: 'v',
     });
-    const capArgs = duration != null && duration > 0
-      ? ['-t', (Math.max(1, duration - offset) + 5).toFixed(3)] : [];
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -2734,20 +2738,14 @@ export function buildSourceArgs({
       '-extra_hw_frames', '8',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
-      ...(gpuImgs.filters.length
-        ? ['-f', 'lavfi', ...capArgs, '-i',
-          `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${effAll.rate},format=rgba`]
-        : []),
       ...gpuImgs.inputs,
       // Software-decoded frames have to be handed to the GPU explicitly.
       ...(gpuImgs.filters.length
         ? ['-filter_complex',
-          `${gpuImgs.filters.join(';')};[cvo]hwupload[ov];`
-          + `[0:v]${vaapiChain}[b];[b][ov]overlay_vaapi[v]`,
-          '-map', '[v]']
+          [`[0:v]${vaapiChain}[b]`, ...gpuImgs.filters].join(';'), '-map', '[v]']
         : ['-vf', vaapiChain, '-map', '0:v:0']),
       '-map', `0:a:${audioIdx}?`,
-      ...(gpuImgs.filters.length ? ['-shortest'] : []),
+      ...(gpuImgs.looping ? ['-shortest'] : []),
       ...be.encoderArgs(profEff),
       '-async_depth', '4',
       ...audioArgs(profile),
@@ -2765,7 +2763,6 @@ export function buildSourceArgs({
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
   if (profile.gpuSubs && sub.filter && !sub.needsComplex
-      && (!imgList.length || gpuImages)
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -2869,23 +2866,21 @@ export function buildSourceArgs({
     // is the shape the device has already proven it can do, and the extra
     // work is a small picture composited onto a canvas that is being built
     // and uploaded regardless.
-    const gpuImgs = canvasImageChain(gpuImages ? imgList : [], {
-      // The canvas is the CONTENT rectangle unless it has been padded up to
-      // the full frame, and a picture's coordinates are fractions of the
-      // frame either way.
-      width: canvasPad ? profile.width : rect.w,
-      height: canvasPad ? profile.height : rect.h,
-      firstInput: bgInput.length ? 3 : 2,
-      inLabel: 'cv', outLabel: 'cvo',
+    // A second overlay_vaapi after the subtitle composite: the picture
+    // uploads once and the GPU does one more pass per frame, which is as
+    // close to free as this gets. There is deliberately no software
+    // fallback — see gpuImages above. If the driver will not do it, the
+    // picture is simply absent and the episode plays at full speed.
+    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
+      width: profile.width, firstInput: bgInput.length ? 3 : 2,
+      inLabel: 'vpre', outLabel: 'v',
     });
-    const canvas = gpuImgs.filters.length
-      ? `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
-        + `setpts=PTS-STARTPTS,format=rgba${canvasPad}[cv];`
-        + `${gpuImgs.filters.join(';')};[cvo]hwupload[ov]`
-      : `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
-        + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov]`;
-    const graph = `${canvas};`
-      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composite}`;
+    const composited = gpuImgs.filters.length
+      ? `${composite.replace(/\[v\]$/, '[vpre]')};${gpuImgs.filters.join(';')}`
+      : composite;
+    const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+      + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composited}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -2956,7 +2951,7 @@ export function buildSourceArgs({
   // would otherwise produce "[o][v]", which is a parse error and not an
   // obviously wrong-looking one.
   const up = upload || 'null';
-  const imgs = imageOverlayChain(imgList, {
+  const imgs = imageOverlayChain(cpuImgs, {
     width: profile.width, firstInput: 1, inLabel: 'o', outLabel: 'vi',
   });
 
