@@ -231,6 +231,8 @@ const PUBLISH_FAIL_MS = 5_000;
 const SPEED_WINDOW_MS = 30_000;
 const SLOW_WINDOW_MS = 6_000;
 
+/** How often the publisher's stats line reaches the console. */
+const PUBLISHER_STAT_MS = 20_000;
 const BANK_SECONDS = 15;
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
 const BANK_MAX_BYTES = 48 * 1024 * 1024;
@@ -957,11 +959,35 @@ export class PipelinePlayout extends EventEmitter {
     p.stdin.on('error', () => { /* EPIPE while swapping sources */ });
 
     let stderr = '';
+    // -Infinity, not 0: the first stats line of a clip should appear at
+    // once rather than 20s in, and that must not depend on the epoch
+    // being large.
+    let lastStat = -Infinity;
     p.stderr.on('data', (d) => {
       const s = this._redact(d.toString());
       stderr += s;
       if (stderr.length > 32_000) stderr = stderr.slice(-16_000);
-      this.emit('log', s);
+      // ffmpeg writes its stats line twice a second, and at that rate it
+      // buries every other line in the console. It is also the least
+      // informative line here: this is the PUBLISHER, and `-re` pins it to
+      // 1.0x by design, so it can never show an encode falling behind —
+      // the panel's speed (the source's) is the one that moves. Sample it,
+      // and say whose it is, because reading it as the encoder's rate has
+      // cost real debugging time.
+      const keep = [];
+      for (const raw of s.split(/[\r\n]+/)) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (/^frame=.*\bspeed=/.test(line)) {
+          const now = Date.now();
+          if (now - lastStat < PUBLISHER_STAT_MS) continue;
+          lastStat = now;
+          keep.push(`[publisher, paced to 1x] ${line}`);
+        } else {
+          keep.push(line);
+        }
+      }
+      if (keep.length) this.emit('log', `${keep.join('\n')}\n`);
     });
 
     p.on('close', (code) => {
