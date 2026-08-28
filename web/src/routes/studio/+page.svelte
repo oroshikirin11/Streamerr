@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import mpegts from 'mpegts.js';
-  import { api } from '$lib/api.js';
+  import { api, connectStatus } from '$lib/api.js';
 
   /**
    * Overlay editor.
@@ -85,6 +85,30 @@
   function toggleFeed() {
     if (player) { stopFeed(); feed = 'off'; } else { startFeed(); }
   }
+
+  /**
+   * Follow the broadcast so the stage does not keep showing a dead frame.
+   *
+   * When a broadcast ends the socket simply stops delivering, and mpegts
+   * leaves the last decoded frame on screen — so the editor went on showing
+   * a still of a stream that is no longer running, with overlays ghosted
+   * against it as though they were on air. Tearing the player down clears
+   * the element and puts the stage back to its empty state; going live
+   * again brings it back.
+   */
+  let onAir = $state(false);
+  let closeStatus = null;
+
+  function watchBroadcast() {
+    closeStatus = connectStatus((msg) => {
+      if (msg.type !== 'stream') return;
+      const live = msg.payload?.status === 'running' || msg.payload?.status === 'preparing';
+      if (live === onAir) return;
+      onAir = live;
+      if (live) { if (!player) startFeed(); }
+      else { stopFeed(); feed = 'off'; }
+    });
+  }
   const sel = $derived(items.find((i) => i.id === selected) ?? null);
 
   onMount(async () => {
@@ -94,8 +118,11 @@
       hidden = cfg.overlay?.hidden === true;
       applied = snapshot(items);
       await loadPictures();
+      const s = await api.streamStatus().catch(() => null);
+      onAir = s?.status === 'running' || s?.status === 'preparing';
     } catch (err) { error = err.message; }
-    startFeed();
+    watchBroadcast();
+    if (onAir) startFeed();
   });
 
   // NOT `return stopFeed` from onMount. Svelte only calls a returned cleanup
@@ -105,7 +132,7 @@
   // down: four visits, four demuxers decoding the same live stream into one
   // element. That is what froze the preview and made the editor feel dead,
   // because the main thread had no time left for pointer events.
-  onDestroy(stopFeed);
+  onDestroy(() => { stopFeed(); closeStatus?.(); });
 
   /**
    * Hiding everything without deleting anything.
@@ -353,7 +380,10 @@
          the BROADCAST. Mixed together, the only destructive buttons sat
          next to the harmless ones. -->
     <div class="group">
-      <button onclick={toggleFeed} title="Show the picture that is going out behind your overlays">
+      <button onclick={toggleFeed} disabled={!onAir}
+              title={onAir
+                ? 'Show the picture that is going out behind your overlays'
+                : 'Nothing is on air to show'}>
         {feed === 'live' ? 'Hide the picture' : 'Show the picture'}
       </button>
     </div>
@@ -443,7 +473,12 @@
             {/if}
           </div>
         {/each}
-        {#if !items.length}
+        {#if !onAir}
+          <p class="empty">
+            Nothing is on air. Overlays still edit and apply — they go out
+            with the next broadcast.
+          </p>
+        {:else if !items.length}
           <p class="empty">Nothing on screen yet — add some text to place it here.</p>
         {/if}
         {#if feed === 'unsupported'}
