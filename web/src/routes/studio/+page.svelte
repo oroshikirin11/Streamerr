@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import mpegts from 'mpegts.js';
   import { api } from '$lib/api.js';
 
   /**
@@ -25,6 +26,43 @@
   let stage;                     // the frame element; all maths is relative to it
 
   const uid = () => Math.random().toString(36).slice(2, 10);
+
+  // ── the live picture behind the overlays ───────────────────────────────
+  // The same feed the floating preview uses: the publisher's own bytes, so
+  // what is behind the captions is genuinely what is going out. It runs
+  // about a bank-depth behind air, which is why placement is done against
+  // the frame rather than by eye-matching a moment.
+  let video;
+  let player = null;
+  let feed = $state('off');            // off | live | unsupported
+  let retryTimer = null;
+
+  function stopFeed() {
+    clearTimeout(retryTimer); retryTimer = null;
+    try { player?.destroy(); } catch { /* already gone */ }
+    player = null;
+  }
+
+  function startFeed() {
+    if (!video || player) return;
+    if (!mpegts.isSupported()) { feed = 'unsupported'; return; }
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    player = mpegts.createPlayer(
+      { type: 'mpegts', isLive: true, url: `${proto}//${location.host}/ws/preview` },
+      { enableStashBuffer: false, liveBufferLatencyChasing: true },
+    );
+    player.attachMediaElement(video);
+    // A splice cuts the socket by design; rebuild rather than sit frozen.
+    player.on(mpegts.Events.ERROR, () => {
+      stopFeed();
+      retryTimer = setTimeout(startFeed, 2000);
+    });
+    try { player.load(); player.play?.().catch(() => {}); feed = 'live'; } catch { stopFeed(); }
+  }
+
+  function toggleFeed() {
+    if (player) { stopFeed(); feed = 'off'; } else { startFeed(); }
+  }
   const sel = $derived(items.find((i) => i.id === selected) ?? null);
 
   onMount(async () => {
@@ -32,6 +70,8 @@
       cfg = await api.config();
       items = (cfg.overlay?.items ?? []).map((i) => ({ ...i, id: i.id ?? uid() }));
     } catch (err) { error = err.message; }
+    startFeed();
+    return stopFeed;
   });
 
   function add(kind) {
@@ -177,6 +217,9 @@
   <div class="head">
     <h1>Studio</h1>
     <div class="spacer"></div>
+    <button onclick={toggleFeed} title="Show the picture that is going out behind your overlays">
+      {feed === 'live' ? 'Hide the picture' : 'Show the picture'}
+    </button>
     <button onclick={() => add('text')}>Add text</button>
     <button onclick={() => add('nowplaying')} title="A caption bound to whatever is playing">Add now-playing</button>
     <button class="danger" onclick={clearAll} disabled={busy === 'clear' || !items.length}>Remove all</button>
@@ -191,6 +234,10 @@
          positioned as percentages so this scales to any window width. -->
     <div class="stagewrap">
       <div class="stage" bind:this={stage} onpointerdown={(e) => { if (e.target === stage) selected = null; }}>
+        <!-- Behind everything, and never a drag target: clicking the picture
+             should deselect, exactly as clicking bare stage does. -->
+        <video bind:this={video} class="feed" class:on={feed === 'live'}
+               muted playsinline disablepictureinpicture></video>
         <div class="grid" aria-hidden="true"></div>
         {#each items as item (item.id)}
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
@@ -213,6 +260,9 @@
         {/each}
         {#if !items.length}
           <p class="empty">Nothing on screen yet — add some text to place it here.</p>
+        {/if}
+        {#if feed === 'unsupported'}
+          <p class="empty">This browser cannot show the live picture; placement still works.</p>
         {/if}
       </div>
       <p class="muted small hint">
@@ -324,6 +374,12 @@
       linear-gradient(to bottom, transparent 33.2%, rgba(255,255,255,.07) 33.3%, transparent 33.4%,
         transparent 66.5%, rgba(255,255,255,.07) 66.6%, transparent 66.7%);
   }
+  .feed {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; background: #000;
+    opacity: 0; transition: opacity .25s ease; pointer-events: none;
+  }
+  .feed.on { opacity: 1; }
   .empty {
     position: absolute; inset: 0; display: grid; place-items: center;
     color: var(--muted); font-size: 13px; pointer-events: none;
