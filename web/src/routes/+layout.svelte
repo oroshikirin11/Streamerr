@@ -15,6 +15,16 @@
   // just because the last visit left the toggle on.
   let showPassword = $state(false);
   let loginError = $state('');
+  let pwInput = $state(null);
+  /**
+   * Focus the password box whenever the login screen appears — on first
+   * load and again whenever a session expires back to it. The autofocus
+   * attribute only fires on the initial page load, so it would miss the
+   * second case, which is the one that happens repeatedly.
+   */
+  $effect(() => {
+    if (ready && !authed) pwInput?.focus();
+  });
   let busy = $state(false);
 
   let stream = $state({ status: 'stopped', playing: null, queue: [] });
@@ -367,6 +377,7 @@
         <!-- type is swapped rather than the value copied about, so the
              browser's own password manager still recognises the field. -->
         <input
+          bind:this={pwInput}
           type={showPassword ? 'text' : 'password'}
           bind:value={password}
           placeholder={passwordConfigured ? 'Password' : 'At least 8 characters'}
