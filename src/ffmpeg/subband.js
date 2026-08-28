@@ -41,6 +41,14 @@
 
 /** Vertical alignments that measure from the bottom edge: \an1, \an2, \an3. */
 const BOTTOM_ALIGN = new Set([1, 2, 3]);
+/**
+ * Legacy SSA \a numbering -> ASS \an numbering. They are NOT the same: SSA
+ * 5/6/7 are the top row and 9/10/11 the middle, so reading \a5 as \an5
+ * turns a top-of-frame sign into a centred one and the band would be
+ * computed for the wrong edge. Anything not in this table is unknown, and
+ * unknown means refuse.
+ */
+const SSA_ALIGN = { 1: 1, 2: 2, 3: 3, 5: 7, 6: 8, 7: 9, 9: 4, 10: 5, 11: 6 };
 
 /**
  * Override tags that are safe inside a bottom-anchored line.
@@ -62,7 +70,7 @@ const SAFE_TAG = /^(?:i|b|u|s|c|fn|fsp|fs|fe|fade?|k[fo]?|K|alpha|[1-4][ac]|be|b
  * whole script the band for a tag that only changes opacity over time.
  * Everything still listed here can move ink, which is the actual test.
  */
-const UNSAFE_TAG = /^(?:pos|move|org|i?clip|p\d|an|a\d|fr[xyz]?|t\()/;
+const UNSAFE_TAG = /^(?:move|org|i?clip|p\d|fr[xyz]?|t\()/;
 
 function splitCsv(line, count) {
   // ASS's last field is free text and may itself contain commas.
@@ -113,6 +121,8 @@ function scanText(text, style) {
   // width. Measuring the whole cue as one run costs a two-line caption a
   // third line it never has, and that slack lands directly in the band.
   const segs = [''];
+  const posYs = [];
+  const aligns = new Set();
   let i = 0;
 
   while (i < text.length) {
@@ -124,6 +134,31 @@ function scanText(text, style) {
       for (const raw of block.split('\\').slice(1)) {
         const tag = raw.trim();
         if (!tag) continue;
+        /**
+         * Positioning is measured, not refused.
+         *
+         * \pos puts the cue's anchor at an absolute PlayRes coordinate, and
+         * which part of the text that anchor names depends on the alignment
+         * in force. Both are collected here and resolved by the caller,
+         * which knows the line count. Every y is kept, not just the last:
+         * one cue can reposition mid-line, and the band has to cover all of
+         * them.
+         */
+        const mp = /^pos\s*\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/.exec(tag);
+        if (mp) { posYs.push(num(mp[2], 0)); continue; }
+        // \an takes ASS numbering directly.
+        const ma = /^an\s*([1-9])\b/.exec(tag);
+        if (ma) { aligns.add(Number(ma[1])); continue; }
+        // \a is the legacy SSA form on a different numbering entirely, and
+        // reading it as \an silently turns "bottom" into "top". Digits only,
+        // so \alpha is not caught by it.
+        const ml = /^a\s*(\d+)$/.exec(tag);
+        if (ml) {
+          const ssa = SSA_ALIGN[Number(ml[1])];
+          if (!ssa) return { ok: false, reason: `\\a${ml[1]}` };
+          aligns.add(ssa);
+          continue;
+        }
         if (UNSAFE_TAG.test(tag)) {
           return { ok: false, reason: `\\${tag.slice(0, 12)}` };
         }
@@ -153,7 +188,7 @@ function scanText(text, style) {
     segs[segs.length - 1] += text[i];
     i += 1;
   }
-  return { ok: true, reason: null, fs, scaleY, bord, shad, segs };
+  return { ok: true, reason: null, fs, scaleY, bord, shad, segs, posYs, aligns };
 }
 
 /**
@@ -232,14 +267,28 @@ export function analyseAssBand(text, { width, height }) {
   let worst = 0; // topmost extent above the bottom edge, in PlayRes units
   for (const ev of events) {
     const style = styles.get(ev.style) ?? styles.values().next().value;
-    if (!BOTTOM_ALIGN.has(style.align)) {
-      return no(`style "${ev.style}" uses alignment ${style.align}`);
-    }
     if (ev.effect && /scroll|banner/i.test(ev.effect)) {
       return no(`event effect "${ev.effect.slice(0, 20)}"`);
     }
     const s = scanText(ev.text, style);
     if (!s.ok) return no(`positioning tag ${s.reason}`);
+
+    /**
+     * Which alignments this event can actually be drawn under.
+     *
+     * An override wins over the style, and a cue carrying more than one is
+     * measured under ALL of them rather than the last: the tags may apply to
+     * different runs, and the band has to hold whichever sits highest.
+     * Without an override the style decides, which is the old behaviour.
+     */
+    const aligns = s.aligns.size ? [...s.aligns] : [style.align];
+    // A style anchored anywhere but the bottom is only usable when the event
+    // pins it with \pos — otherwise its distance from an edge the band does
+    // not share is unknown, and that is exactly the case the whitelist exists
+    // to refuse.
+    if (!s.posYs.length && !aligns.every((a) => BOTTOM_ALIGN.has(a))) {
+      return no(`alignment ${aligns.join('/')} without \\pos`);
+    }
 
     const marginV = ev.marginV || style.marginV;
     const lineH = s.fs * (s.scaleY / 100) * 1.2; // libass default line spacing
@@ -252,7 +301,39 @@ export function analyseAssBand(text, { width, height }) {
       for (const ch of seg) w += emWidth(ch) * s.fs;
       total += Math.max(1, Math.ceil(w / usable));
     }
-    const extent = marginV + total * lineH + s.bord * 2 + s.shad;
+    const textH = total * lineH;
+    // Outline is drawn on both sides of the glyph and the shadow is offset
+    // away from it, so both add ink beyond the layout box.
+    const ink = s.bord * 2 + s.shad;
+
+    /**
+     * How far above the bottom edge this event can put ink.
+     *
+     * Unpositioned, that is the old measurement: MarginV is a distance from
+     * the bottom, so the extent is the margin plus the text.
+     *
+     * Positioned, \pos names an absolute y and the alignment says which part
+     * of the text lands on it -- the bottom row (\an1-3), the middle
+     * (\an4-6), or the top (\an7-9). Converting that to a top edge and then
+     * to a distance from the bottom is what makes a typeset script
+     * measurable instead of merely suspicious. A sign near the top of the
+     * frame produces a huge extent, which is correct: the band would have to
+     * be nearly the whole frame, and the caller's own cap then refuses it and
+     * falls back. Nothing is clipped either way.
+     */
+    let extent = 0;
+    for (const align of aligns) {
+      if (!s.posYs.length) {
+        extent = Math.max(extent, marginV + textH + ink);
+        continue;
+      }
+      for (const y of s.posYs) {
+        const top = BOTTOM_ALIGN.has(align) ? y - textH
+          : align >= 7 ? y
+            : y - textH / 2;
+        extent = Math.max(extent, playResY - top + ink);
+      }
+    }
     if (extent > worst) worst = extent;
   }
 
@@ -297,14 +378,33 @@ function gcd(a, b) {
  */
 export function bandScript(text, { playResY, newPlayResY }) {
   let replaced = false;
+  /**
+   * How far the coordinate origin moved.
+   *
+   * The band is the BOTTOM slice of the original space, so a point keeps its
+   * distance from the bottom edge and loses exactly the rows that were cut
+   * off the top. Margins need no help with this -- they are already measured
+   * from the bottom -- which is why the header rewrite alone was enough while
+   * every positioned script was being refused.
+   *
+   * \pos is different: its y is absolute in PlayRes units. Shrinking
+   * PlayResY underneath it without moving it would leave the text at the same
+   * number in a much shorter space, i.e. far below the canvas and invisible.
+   * Shifting by the delta puts it back exactly where it was on screen.
+   */
+  const delta = playResY - newPlayResY;
+  const shift = (line) => line.replace(
+    /(\\pos\s*\(\s*-?[\d.]+\s*,\s*)(-?[\d.]+)(\s*\))/g,
+    (_, head, y, tail) => `${head}${Number((Number(y) - delta).toFixed(3))}${tail}`,
+  );
   const out = text.split(/\r?\n/).map((line) => {
     if (!replaced && /^\s*PlayResY\s*:/i.test(line)) {
       replaced = true;
       return `PlayResY: ${newPlayResY}`;
     }
-    return line;
+    // Only event lines carry override tags; styles and headers have no \pos.
+    return /^\s*(?:Dialogue|Comment)\s*:/i.test(line) ? shift(line) : line;
   });
   if (!replaced) return null; // analyse() guarantees a header; refuse if not
-  void playResY;
   return out.join('\n');
 }
