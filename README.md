@@ -128,8 +128,15 @@ services:
     volumes:
       - ./config:/config            # settings + your stream key
       - ./cache:/app/cache          # extracted subtitles and fonts
+      - ./overlays:/app/overlays    # pictures you upload in Studio
       - /extHdd:/extHdd:ro          # your media, READ-ONLY — see path note
 ```
+
+The directories are created for you on first run; you only have to mount
+them. Leave `overlays` out and picture uploads still work — they just live
+inside the container, so they vanish the next time it is rebuilt, with
+nothing to say why. The cache is disposable and can be deleted safely;
+`config` and `overlays` are the two that hold anything you would miss.
 
 **3. Get the render group id right.** On the host:
 
