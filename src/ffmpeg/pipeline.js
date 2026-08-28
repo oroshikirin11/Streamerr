@@ -39,7 +39,7 @@ import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { overlayAss } from './overlay-ass.js';
-import { imageOverlayChain, vaapiImageOverlayChain } from './overlay-image.js';
+import { imageOverlayChain, vaapiImageOverlayChain, canvasImageChain } from './overlay-image.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -2891,16 +2891,44 @@ export function buildSourceArgs({
     // close to free as this gets. There is deliberately no software
     // fallback — see gpuImages above. If the driver will not do it, the
     // picture is simply absent and the episode plays at full speed.
-    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
-      width: profile.width, height: profile.height, firstInput: bgInput.length ? 3 : 2,
-      inLabel: 'vpre', outLabel: 'v',
+    /**
+     * Pictures are drawn onto the subtitle canvas, on the CPU, before it is
+     * uploaded — NOT as a second overlay_vaapi chained after the composite.
+     *
+     * Measured on the deployment, and the cost is per-PASS, not per-pixel:
+     * a picture scaled to 1306px and one at 384px slowed Mr. Robot by the
+     * same margin, which a blend proportional to area cannot explain.
+     * overlay_vaapi blends the whole 1920x1080 surface however small the
+     * logo is, so the second pass costs a full frame either way. Mr. Robot
+     * with burned subtitles already runs at 1.03x, so that pass puts it
+     * under realtime — 0.909x observed, stuttering, bank never refilling —
+     * while the same picture on Attack on Titan, which had 1.13x of
+     * headroom, cost nothing measurable. Subtitles off was fast for the
+     * same reason: no canvas, so the picture was the only pass.
+     *
+     * The canvas is already generated, drawn on and uploaded every frame
+     * for the subtitles. Compositing into it is close to free, because CPU
+     * overlay touches only the picture's own bounding box rather than the
+     * frame — so this trades a full-frame GPU pass for a few hundred
+     * thousand CPU pixels, and the GPU is the side with no headroom left.
+     *
+     * It also covers timed pictures, which the GPU path had to express by
+     * withholding an input because overlay_vaapi has no `enable`.
+     */
+    const canvasImgs = canvasImageChain(imgList, {
+      width: rect.w, firstInput: bgInput.length ? 3 : 2,
+      inLabel: 'sub', outLabel: 'cv',
     });
-    const composited = gpuImgs.filters.length
-      ? `${composite.replace(/\[v\]$/, '[vpre]')};${gpuImgs.filters.join(';')}`
-      : composite;
-    const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
-      + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
-      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composited}`;
+    const canvasHead = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+      + 'setpts=PTS-STARTPTS,format=rgba';
+    const canvasChain = canvasImgs.filters.length
+      // null carries the padding step across the relabel; the canvas has to
+      // stay RGBA to the upload or the composite becomes an opaque box.
+      ? `${canvasHead}[sub];${canvasImgs.filters.join(';')};`
+        + `[cv]null${canvasPad},hwupload[ov];`
+      : `${canvasHead}${canvasPad},hwupload[ov];`;
+    const graph = `${canvasChain}`
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -2915,7 +2943,7 @@ export function buildSourceArgs({
       '-f', 'lavfi', ...canvasCap,
       '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`,
       ...bgInput,
-      ...gpuImgs.inputs,
+      ...canvasImgs.inputs,
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),
