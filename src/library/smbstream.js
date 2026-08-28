@@ -312,10 +312,23 @@ export class SmbStreamLibrary {
       const q = search.toLowerCase();
       dirs = dirs.filter((n) => n.toLowerCase().includes(q));
     }
-    const page = dirs.slice(startIndex, startIndex + limit).map((name) => {
+    // A folder holding one video and no season folders is a film, and
+    // clicking it should start it rather than open a list of one. The
+    // filesystem provider has always done this; SMB called everything a
+    // series, so every film here opened a one-entry page.
+    const page = await Promise.all(dirs.slice(startIndex, startIndex + limit).map(async (name) => {
       const rel = root ? `${root}/${name}` : name;
-      return { id: this._remember(rel), title: name, type: 'Series' };
-    });
+      let only = null;
+      try {
+        const inner = await this._readdir(rel);
+        const vids = inner.filter((e) => !e.isDirectory() && isVideo(e.name));
+        const hasSeasons = inner.some((e) => e.isDirectory() && SEASON_DIR.test(e.name));
+        if (vids.length === 1 && !hasSeasons) only = `${rel}/${vids[0].name}`;
+      } catch { /* unreadable folder: treat as a series, as before */ }
+      return only
+        ? { id: this._remember(only), title: name, type: 'Movie', childCount: null }
+        : { id: this._remember(rel), title: name, type: 'Series' };
+    }));
     return { items: page, total: dirs.length };
   }
 
@@ -359,6 +372,9 @@ export class SmbStreamLibrary {
           episode: parsed.episode,
           size: e.size,
           rel: frel,
+          // No sidecar art over SMB, so the row would be blank. Point at the
+          // media and let the image route take a frame from it.
+          image: `/api/library/image/${this._remember(frel)}-frame?v=frame`,
         });
       }
     };
@@ -394,6 +410,17 @@ export class SmbStreamLibrary {
     const list = await this.episodes(seriesId);
     const i = list.findIndex((e) => e.id === currentId);
     return i >= 0 && i + 1 < list.length ? list[i + 1] : null;
+  }
+
+  /**
+   * Artwork ids are the media's own id with a -frame suffix; hand back the
+   * bridge url so the image route can grab a frame through it.
+   */
+  imagePath(imageId) {
+    const base = String(imageId ?? '').replace(/-frame$/, '');
+    if (base === imageId) return null;          // not one of ours
+    const rel = this._paths.get(base);
+    return rel == null ? null : this.resolvePath({ rel });
   }
 
   /** The bridge URL ffmpeg consumes. */

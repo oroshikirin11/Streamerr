@@ -49,8 +49,11 @@ export const isRemote = (src) => /^https?:\/\//i.test(src);
 const VIDEO_EXTS = new Set([
   '.mkv', '.mp4', '.avi', '.m4v', '.mov', '.ts', '.webm', '.mpg', '.mpeg', '.wmv',
 ]);
-/** Whether a resolved artwork path is really a video to take a frame from. */
-export const isVideoFile = (src) => VIDEO_EXTS.has(extname(String(src ?? '')).toLowerCase());
+/** Whether a resolved artwork path is really a video to take a frame from.
+ *  The query is stripped first: SMB media is a bridge url carrying a token,
+ *  and `.mkv?t=...` is not an extension. */
+const noQuery = (src) => String(src ?? '').split('?')[0];
+export const isVideoFile = (src) => VIDEO_EXTS.has(extname(noQuery(src)).toLowerCase());
 
 /** Keyed on size and mtime as well as path: re-scraped artwork replaces the
  *  old thumbnail instead of being masked by it. A remote url carries its own
@@ -180,7 +183,13 @@ export async function frameGrab(src, cacheDir) {
   if (!cacheDir) return null;
   let out;
   try {
-    out = join(cacheDir, 'thumbs', `${keyFor(src)}-frame.jpg`);
+    // Keyed without the query: an SMB bridge url carries a token that is
+    // minted fresh every restart, and keying on it would regenerate every
+    // still each time the service came back.
+    const key = isRemote(src)
+      ? createHash('sha1').update(`${noQuery(src)}:${MAX_W}`).digest('hex').slice(0, 16)
+      : keyFor(src);
+    out = join(cacheDir, 'thumbs', `${key}-frame.jpg`);
   } catch {
     return null;                       // vanished between listing and request
   }
