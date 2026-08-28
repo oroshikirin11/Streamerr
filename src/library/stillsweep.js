@@ -117,11 +117,14 @@ export class StillSweeper {
           seen += 1;
           if (seen <= skip) continue;
           scanned += 1;
+          // Films are skipped: the grid shows their poster, and since they
+          // play on click there is no episode list where a still would ever
+          // appear. Generating one is work nobody sees.
+          if (item.type === 'Movie') continue;
           let eps = [];
-          try {
-            eps = item.type === 'Movie' ? [item] : await src.lib.episodes(item.id);
-          } catch { continue; }
+          try { eps = await src.lib.episodes(item.id); } catch { continue; }
           for (const ep of eps) {
+            if (ep.type === 'Movie') continue;   // a film inside a folder
             const id = idOf(ep.image);
             if (!id) continue;
             let path;
