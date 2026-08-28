@@ -746,6 +746,16 @@
     position: relative; container-type: size;
     background: #0b0d10; border: 1px solid var(--border); border-radius: 12px;
     overflow: hidden; user-select: none; touch-action: none;
+    /* `overflow: hidden` alone does NOT clip an overlay whose opacity is
+       below 1. Opacity promotes the item to its own compositor layer, and a
+       layer is clipped by an ancestor only when that ancestor carries the
+       clip itself — `container-type: size` gives layout/style/size
+       containment but not paint, so the picture escaped the frame on the
+       side it overhung and the operator saw it spill outside the stage.
+       Broadcast output was never affected: the encoder crops geometrically
+       and does not care about any of this. Paint containment puts the clip
+       on the stage where the compositor can honour it. */
+    contain: paint;
   }
   /* Thirds, faint: placing to a grid is most of what makes an overlay look
      deliberate rather than dropped. */
