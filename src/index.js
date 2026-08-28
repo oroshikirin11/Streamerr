@@ -8,7 +8,9 @@
 import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
-import { existsSync, createReadStream, readdirSync } from 'fs';
+import {
+  existsSync, createReadStream, readdirSync, mkdirSync, statSync, writeFileSync, unlinkSync,
+} from 'fs';
 import { timingSafeEqual } from 'crypto';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -286,6 +288,22 @@ function syncOwncastTitle() {
 /** Whether panels should offer the floating preview window at all. */
 const previewEnabled = () => config.preview?.enabled !== false;
 
+/**
+ * The overlays that should actually be on air.
+ *
+ * Hiding and switching an item off are editor states, not engine ones: the
+ * engine is handed the list to draw and nothing else. Resolving both here
+ * means a hidden overlay is indistinguishable from no overlay downstream —
+ * and, because the engine compares the list it is given, toggling something
+ * that was already off costs no restart of the encoder.
+ */
+const overlayDir = () => config.paths.overlays
+  ?? join(config.paths.cache, 'overlays');
+
+const visibleOverlay = () => (config.overlay?.hidden
+  ? []
+  : (config.overlay?.items ?? []).filter((i) => i?.enabled !== false));
+
 function streamStatus() {
   if (!engine) {
     return { status: 'stopped', playing: null, queue: [], preview: previewEnabled() };
@@ -415,6 +433,7 @@ function buildEngine({ profile, selection }) {
     selection,
     // Extracted subtitle tracks and embedded fonts live here.
     cacheDir: config.paths.cache,
+    overlayDir: overlayDir(),
     resolveSelection: (item) => selectionFor(item, profile),
     runAhead: runAheadBudget(),
   });
@@ -835,10 +854,63 @@ app.put('/api/config', (req, res) => {
     };
   }
 
+  // Coerced on its own, not alongside the items below: a patch that carries
+  // items but no `hidden` must leave the hide state as it was. Folding it in
+  // there would read a missing key as false and quietly put hidden overlays
+  // back on air on the next unrelated save.
+  if (patch.overlay?.hidden !== undefined) {
+    patch.overlay = { ...patch.overlay, hidden: Boolean(patch.overlay.hidden) };
+  }
+
+  // Overlays end up inside an ASS script that libass renders into the live
+  // picture. The generator already strips braces and newlines from the text
+  // so no event can invent its own override tags, but the numbers arrive
+  // straight from a client and are worth pinning here too — the same reason
+  // the encoder fields above are clamped rather than trusted.
+  if (patch.overlay?.items !== undefined) {
+    const num = (v, lo, hi, dflt) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+    };
+    patch.overlay = {
+      ...patch.overlay,
+      items: (Array.isArray(patch.overlay.items) ? patch.overlay.items : [])
+        .slice(0, 32)
+        .map((it, i) => ({
+          id: String(it?.id ?? `ov${i}`).slice(0, 64),
+          type: it?.type === 'image' ? 'image' : 'text',
+          text: String(it?.text ?? '').slice(0, 300),
+          // Stripped to a bare filename. This names a file that gets
+          // composited into a public broadcast, so anything that could climb
+          // out of the uploads directory is removed rather than rejected.
+          file: String(it?.file ?? '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 128),
+          x: num(it?.x, 0, 1, 0.5),
+          y: num(it?.y, 0, 1, 0.5),
+          size: num(it?.size, 0.01, 1, 0.06),
+          rotation: num(it?.rotation, -360, 360, 0),
+          opacity: num(it?.opacity, 0, 1, 1),
+          colour: /^#[0-9a-f]{6}$/i.test(String(it?.colour)) ? it.colour : '#ffffff',
+          font: String(it?.font ?? '').slice(0, 64),
+          outline: it?.outline !== false,
+          when: ['intro', 'outro'].includes(it?.when) ? it.when : 'always',
+          seconds: num(it?.seconds, 1, 3600, 15),
+          enabled: it?.enabled !== false,
+        })),
+    };
+  }
+
   try {
     saveConfig(patch);
     refreshLibrary();
     scheduleAutoScan();
+    // Studio overlays are part of the encoder profile, which a broadcast
+    // freezes when it starts. Without this an Apply only reached the disk:
+    // the button went quiet, the config was correct, and nothing changed on
+    // air until the next broadcast. The engine decides whether the change is
+    // worth restarting the source for.
+    if (patch.overlay !== undefined && engine) {
+      engine.setOverlay(visibleOverlay());
+    }
     // Turning the preview off mid-broadcast takes effect immediately: every
     // open panel learns via the status push, and connected preview windows
     // are cut rather than left streaming a feature that is now disabled.
@@ -854,6 +926,100 @@ app.put('/api/config', (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// ── studio overlay pictures ────────────────────────────────────────────
+
+/**
+ * Uploads are matched by CONTENT, not by the name the client chose.
+ *
+ * These files become ffmpeg inputs on a live broadcast, so trusting a
+ * `.png` suffix would let any file at all be handed to a demuxer. The
+ * signature decides what it is, and the extension is then derived from
+ * that — which also means a mislabelled but genuine picture still works.
+ */
+const IMAGE_KINDS = [
+  { ext: 'png', magic: [0x89, 0x50, 0x4e, 0x47] },
+  { ext: 'gif', magic: [0x47, 0x49, 0x46, 0x38] },              // GIF8
+  { ext: 'jpg', magic: [0xff, 0xd8, 0xff] },
+];
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function imageKind(buf) {
+  if (!buf || buf.length < 12) return null;
+  for (const k of IMAGE_KINDS) {
+    if (k.magic.every((b, i) => buf[i] === b)) return k;
+  }
+  // RIFF....WEBP — the only one whose signature is not a simple prefix.
+  if (buf.slice(0, 4).toString('latin1') === 'RIFF'
+      && buf.slice(8, 12).toString('latin1') === 'WEBP') return { ext: 'webp' };
+  return null;
+}
+
+/** Bare filename, restricted charset — these are joined onto a directory. */
+const safeName = (n) => String(n ?? '')
+  .replace(/[^A-Za-z0-9._-]/g, '').replace(/^\.+/, '').slice(0, 128);
+
+app.get('/api/overlay/images', (req, res) => {
+  const dir = overlayDir();
+  if (!existsSync(dir)) return res.json([]);
+  const out = readdirSync(dir)
+    .filter((n) => /\.(png|gif|jpe?g|webp)$/i.test(n))
+    .map((n) => {
+      const s = statSync(join(dir, n));
+      return { name: n, bytes: s.size, at: s.mtimeMs };
+    })
+    .sort((a, b) => b.at - a.at);
+  res.json(out);
+});
+
+app.get('/api/overlay/images/:name', (req, res) => {
+  const name = safeName(req.params.name);
+  if (!name) return res.status(404).json({ error: 'No such picture' });
+  // sendFile rather than a piped createReadStream. The existsSync-then-open
+  // gap is real — deleting a picture while another open panel still has an
+  // <img> pointed at it hits it — and an unhandled 'error' on a piped
+  // stream reaches the process-level uncaughtException handler, which stops
+  // the engine. A late 404 on a thumbnail would have ended the broadcast.
+  res.sendFile(name, { root: overlayDir(), dotfiles: 'deny' }, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'No such picture' });
+  });
+});
+
+app.post('/api/overlay/images',
+  express.raw({ type: '*/*', limit: MAX_IMAGE_BYTES }),
+  (req, res) => {
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || !body.length) {
+      return res.status(400).json({ error: 'No picture was uploaded' });
+    }
+    const kind = imageKind(body);
+    if (!kind) {
+      return res.status(400).json({ error: 'That is not a PNG, GIF, JPEG or WebP' });
+    }
+    // Keep the user's name where it is usable, but force the extension to
+    // match what the bytes actually are.
+    const asked = safeName(req.query.name).replace(/\.[^.]*$/, '');
+    const base = asked || `overlay-${Date.now()}`;
+    let name = `${base}.${kind.ext}`;
+    const dir = overlayDir();
+    mkdirSync(dir, { recursive: true });
+    // Never silently replace: a name collision that overwrote an existing
+    // logo would change what is on air for an overlay the user did not touch.
+    for (let i = 2; existsSync(join(dir, name)); i += 1) name = `${base}-${i}.${kind.ext}`;
+    writeFileSync(join(dir, name), body);
+    res.json({ name, bytes: body.length });
+  });
+
+app.delete('/api/overlay/images/:name', (req, res) => {
+  const name = safeName(req.params.name);
+  const path = join(overlayDir(), name);
+  if (!name || !existsSync(path)) return res.status(404).json({ error: 'No such picture' });
+  // Overlays still pointing at it are left alone rather than rewritten: the
+  // engine skips a picture whose file is gone, so a delete cannot break a
+  // running broadcast, and the editor can show the dangling item plainly.
+  unlinkSync(path);
+  res.json({ ok: true });
 });
 
 // ── setup checks ───────────────────────────────────────────────────────
@@ -1181,7 +1347,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // receives it, and the overlay is a property of the output, not the clip.
   const profile = {
     ...config.encoder, backend: sel.backend,
-    overlay: config.overlay?.items ?? [],
+    overlay: visibleOverlay(),
   };
 
   // Resolve every item up front so a bad path fails before we go on air.

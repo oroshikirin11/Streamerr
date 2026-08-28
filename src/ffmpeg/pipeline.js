@@ -33,12 +33,13 @@ import { existsSync, readFileSync, statfsSync, writeFileSync } from 'fs';
 import { Writable } from 'stream';
 import { availableParallelism, cpus , totalmem } from 'os';
 import { EventEmitter } from 'events';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { overlayAss } from './overlay-ass.js';
+import { imageOverlayChain } from './overlay-image.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -247,7 +248,7 @@ export class PipelinePlayout extends EventEmitter {
    */
   constructor({
     target, profile, selection = null, statsPeriodMs = 500, cacheDir = null,
-    resolveSelection = null, runAhead = null,
+    resolveSelection = null, runAhead = null, overlayDir = null,
   }) {
     super();
     this.target = target;
@@ -271,6 +272,11 @@ export class PipelinePlayout extends EventEmitter {
     this.statsPeriodMs = statsPeriodMs;
     /** Where extracted subtitle tracks and fonts are kept. */
     this.cacheDir = cacheDir;
+    /**
+     * Uploaded overlay pictures. Deliberately not the cache: the cache is
+     * disposable and gets cleared, and a logo the user uploaded is not.
+     */
+    this.overlayDir = overlayDir;
     // {ramBytes} — resolved by the caller; null disables the run-ahead.
     this.runAhead = runAhead;
     this._subCache = new Map();   // `${srcPath}:${typeIndex}` -> {path, fontsDir}
@@ -832,6 +838,52 @@ export class PipelinePlayout extends EventEmitter {
       }), 'changing tracks');
     }
     this.emit('selection', selection);
+  }
+
+  /**
+   * Change the studio overlays on a broadcast that is already on air.
+   *
+   * Needed because libass reads the ASS file when the filter is built, not
+   * as it goes: writing a new file under a running source changes nothing,
+   * and the graph's SHAPE changes anyway when the last overlay is removed
+   * or the first one added. So the source is restarted at the playhead,
+   * which is the same move a track change makes.
+   *
+   * Written to `_box` as well as `profile` because a reshape rebuilds the
+   * profile from the box, and an overlay that lived only on the profile
+   * would vanish the next time an episode of a different shape came up.
+   */
+  setOverlay(items) {
+    const next = Array.isArray(items) ? items : [];
+    // Applying is a restart, so it must be worth one. The panel saves the
+    // whole config on every settings change, and re-cutting the encoder
+    // because someone edited an unrelated field is exactly the kind of
+    // self-inflicted stall this pipeline is built to avoid.
+    const same = JSON.stringify(this.profile?.overlay ?? []) === JSON.stringify(next);
+    this._box.overlay = next;
+    if (this.profile) this.profile.overlay = next;
+    if (same) return false;
+    if (!this.current || this.status !== 'running') return true;
+
+    const item = this.current.item;
+    const dur = this.current.duration;
+    // _play treats a position within a second of the end as "past it" and
+    // advances. Restarting here would therefore skip the rest of the
+    // episode to apply an overlay — so don't: the next clip picks the
+    // change up from the profile anyway, a second later.
+    if (dur && this.position >= dur - 1) return true;
+    // Same ordering as a track change, and for the same reason: extract
+    // while the old source still feeds the pipe, or the new source's
+    // subtitle filter re-reads the container and starves the publisher
+    // past Owncast's deadline.
+    const tok = (this._selToken = (this._selToken ?? 0) + 1);
+    this._detached(this._extract(item).finally(() => {
+      if (this._stopping || this._selToken !== tok) return;
+      if (this.current?.item !== item || this.status !== 'running') return;
+      this._bankFlush();
+      this._play(item, this.position, { duration: dur });
+    }), 'applying overlays');
+    return true;
   }
 
   setQueue(items) {
@@ -1406,7 +1458,66 @@ export class PipelinePlayout extends EventEmitter {
    * seek. Failing here returns null rather than throwing: an overlay must
    * never be the reason a broadcast does not start.
    */
-  _overlayFile(item, offset) {
+  /**
+   * Picture overlays, resolved to files on disk and this source's timeline.
+   *
+   * `offset` shifts the show/hide times for the same reason the ASS events
+   * are shifted: an input-side -ss rebases timestamps to zero, so an outro
+   * logo written in clip time would be scheduled in the past and never
+   * appear. Anything whose window has already closed is dropped rather than
+   * handed to ffmpeg as an extra input that draws nothing.
+   */
+  _overlayImages(item, offset = 0, span = null) {
+    const items = this.profile?.overlay ?? [];
+    if (!items.length || !this.overlayDir) return [];
+    const duration = this.current?.duration ?? item?.duration ?? null;
+    const out = [];
+    for (const it of items) {
+      if (it?.type !== 'image' || it.enabled === false || !it.file) continue;
+      // basename only: the filename reaches here from a client, and a path
+      // that could climb out of the uploads directory would let any file on
+      // the host be composited into a public broadcast.
+      const name = basename(String(it.file));
+      if (!name || name.startsWith('.')) continue;
+      const path = join(this.overlayDir, name);
+      if (!existsSync(path)) continue;
+
+      let start = null;
+      let end = null;
+      const secs = Math.max(1, Number(it.seconds) || 15);
+      if (it.when === 'intro') { start = 0; end = secs; }
+      else if (it.when === 'outro') {
+        if (!duration || duration <= secs) continue;   // unknown or too short
+        start = duration - secs; end = duration;
+      }
+      if (start != null) {
+        start -= offset; end -= offset;
+        if (end <= 0) continue;                        // already gone by here
+        // ...and not yet due within this span. Without it every chunk
+        // before an outro still carried the picture as an extra input, with
+        // a decode/scale/rotate branch and an overlay that draws nothing —
+        // once per chunk, per worker, for the whole episode.
+        if (span != null && start >= span) continue;
+        start = Math.max(0, start);
+      }
+      out.push({
+        path,
+        x: it.x, y: it.y, size: it.size, rotation: it.rotation,
+        opacity: it.opacity,
+        animated: /\.gif$/i.test(name),
+        start, end,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * @param {string} [tag] distinguishes the chunked variant, which writes
+   *   the same overlay against a different time base. One filename for both
+   *   would let a clip transition rewrite the file under workers that are
+   *   still opening it.
+   */
+  _overlayFile(item, offset, tag = '') {
     const items = this.profile?.overlay ?? [];
     if (!items.length || !this.cacheDir) return null;
     try {
@@ -1418,7 +1529,7 @@ export class PipelinePlayout extends EventEmitter {
         title: item?.title ?? '',
       });
       if (!ass) return null;
-      const out = join(this.cacheDir, `overlay-${process.pid}.ass`);
+      const out = join(this.cacheDir, `overlay-${process.pid}${tag}.ass`);
       writeFileSync(out, ass);
       return out;
     } catch {
@@ -1565,7 +1676,15 @@ export class PipelinePlayout extends EventEmitter {
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       offset,
-      overlayPath: this._overlayFile(item, offset),
+      // Offset 0: every graph restores the clip's timeline before drawing
+      // the ASS, so the file is written in clip time. Shifting it here as
+      // well applied the correction twice — harmless for an 'always'
+      // caption, but it moved an intro/outro window by twice the seek, and
+      // setOverlay() made a non-zero offset the normal case rather than a
+      // rare one. Pictures below DO take the offset: they are timed by
+      // `enable` on the overlay filter, which is read after the restore.
+      overlayPath: this._overlayFile(item, 0),
+      overlayImages: this._overlayImages(item, offset),
       profile: this.profile,
       selection: this.selection,
       tsOffset: this.timeline,
@@ -1630,8 +1749,19 @@ export class PipelinePlayout extends EventEmitter {
 
     // Exactly the conditions buildSourceArgs uses to pick the GPU
     // composite. If it is available, it beats any number of CPU workers.
+    //
+    // Pictures are part of those conditions now: buildSourceArgs refuses
+    // the GPU graphs when a clip carries any, because they composite on the
+    // CPU. Without mirroring that here this returned 1 for a GPU box, the
+    // single-process path was taken, and buildSourceArgs then fell to the
+    // CPU anyway — libass burning subtitles on one core with no workers,
+    // which is the unstreamable case the GPU graph exists to avoid. One
+    // enabled logo was enough to trigger it on every subtitled clip.
     const video = this.selection?.video;
+    const hasPictures = (this.profile?.overlay ?? [])
+      .some((i) => i?.type === 'image' && i.enabled !== false && i.file);
     const gpuComposite = Boolean(this.profile?.gpuSubs)
+      && !hasPictures
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
@@ -1656,6 +1786,14 @@ export class PipelinePlayout extends EventEmitter {
     // deliver until two chunks are in hand, or the card dies after the
     // short opener and the publisher starves through chunk 1's encode.
     const cover = flushed && Boolean(this.publisher) && !this._stopping;
+    // A fresh name per scheduler, not one shared "-chunk" file. Stopping a
+    // scheduler SIGKILLs its workers, but delivery is asynchronous relative
+    // to us — so the next _playChunked could rewrite the file underneath a
+    // worker still opening it. A counter makes that impossible instead of
+    // unlikely.
+    this._chunkGen = (this._chunkGen ?? 0) + 1;
+    const chunkOverlay = this._overlayFile(item, 0, `-chunk${this._chunkGen}`);
+
     const sched = new ChunkScheduler({
       srcPath: item.srcPath,
       startOffset: offset,
@@ -1685,6 +1823,17 @@ export class PipelinePlayout extends EventEmitter {
         tsOffset: this._clipBase + (start - offset),
         extractedPath: cached?.path ?? null,
         fontsDir: cached?.fontsDir ?? null,
+        // Written once, outside this callback: workers run in parallel and
+        // rewriting the file underneath one that is opening it is a race.
+        // Offset 0, not the chunk's start — every chunk graph restores the
+        // clip's own timeline before the overlay is drawn.
+        overlayPath: chunkOverlay,
+        // Per chunk, unlike the ASS above: pictures are timed by `enable`
+        // on the overlay filter, which reads `t` AFTER the chain has undone
+        // the -ss rebasing — so it counts from this chunk's own start, not
+        // the clip's. These are plain descriptors with nothing written to
+        // disk, so building them per chunk costs nothing and races nothing.
+        overlayImages: this._overlayImages(item, start, dur),
       }),
     });
 
@@ -2468,10 +2617,18 @@ const item = (self) => self.current?.item?.title ?? 'clip';
 export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
-  overlayPath = null,
+  overlayPath = null, overlayImages = [],
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
+
+  // Pictures composite on the CPU. The two GPU graphs below are shaped by a
+  // per-driver probe (pickPillarboxGraph) after several arrangements were
+  // found to fail silently or die outright on real hardware; threading extra
+  // inputs through them would put that back in play for a feature that is
+  // used a few frames at a time. So a clip carrying pictures takes the CPU
+  // route, and clips without them are completely unaffected.
+  const imgList = (overlayImages ?? []).filter((i) => i?.path);
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
@@ -2486,7 +2643,7 @@ export function buildSourceArgs({
   // Fixed-function chain for clips WITHOUT burned subtitles. This used to
   // exist only when subtitles forced it, which left subtitle-free 4K films
   // software-decoding on the CPU at 0.6x while the GPU sat idle.
-  if (profile.gpuFull && !sub.filter && !sub.needsComplex) {
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imgList.length) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     const scalePart = selection?.video?.hdr
@@ -2524,7 +2681,7 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (profile.gpuSubs && sub.filter && !sub.needsComplex
+  if (profile.gpuSubs && sub.filter && !sub.needsComplex && !imgList.length
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -2656,7 +2813,12 @@ export function buildSourceArgs({
   // from the episode's BEGINNING over video at the restart position. The
   // GPU path has always carried this shift on its canvas; this is the CPU
   // path's equivalent.
-  const cpuChain = sub.filter
+  // Everything up to the encoder's own upload/format step. Pictures have to
+  // land after scale and pad — on the padded frame, so a corner logo sits in
+  // the corner of what viewers see — but before the frame is handed to the
+  // encoder, which on the GPU backends is no longer something libav filters
+  // can draw on.
+  const preUpload = sub.filter
     ? [
       `scale=${rect.w}:${rect.h},setsar=1`,
       ...(offset > 0 ? [`setpts=PTS+${Number(offset).toFixed(3)}/TB`] : []),
@@ -2664,25 +2826,49 @@ export function buildSourceArgs({
       ...(offset > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
-      upload,
     ]
-    : [base, upload];
+    : [base];
+  const cpuChain = [...preUpload, upload];
 
-  const filterArgs = sub.needsComplex
-    ? [
+  // The overlay ASS is written in the CLIP's timeline, and every graph that
+  // burns it has to be looking at clip time when it does. The chains above
+  // already are — they re-add `offset` around their subtitles filter — but
+  // the bitmap graph has no such shift, so it needs its own. Without this
+  // the two branches would want the file written on two different time
+  // bases, which is exactly how an outro caption ended up firing early.
+  const ovPost = !sub.postFilter ? ''
+    : offset > 0
+      ? `,setpts=PTS+${Number(offset).toFixed(3)}/TB${sub.postFilter},setpts=PTS-STARTPTS`
+      : sub.postFilter;
+
+  // A no-op rather than an empty label: a backend with nothing to upload
+  // would otherwise produce "[o][v]", which is a parse error and not an
+  // obviously wrong-looking one.
+  const up = upload || 'null';
+  const imgs = imageOverlayChain(imgList, {
+    width: profile.width, firstInput: 1, inLabel: 'o', outLabel: 'vi',
+  });
+
+  let filterArgs;
+  if (sub.needsComplex || imgs.filters.length) {
+    const parts = [];
+    if (sub.needsComplex) {
       // Bitmap subtitles (DVD/PGS subpictures) carry pixel positions in the
       // SOURCE frame's coordinate space. Compositing after scale+pad placed
       // them at source coordinates on the padded 1080p frame — upper-left,
       // wrong size. Overlay at native size first; scaling then carries the
       // subtitles along with the picture.
-      '-filter_complex',
-      `[0:v:0][${sub.overlayInput}]overlay[s];[s]${base}${sub.postFilter ?? ''}[o];[o]${upload}[v]`,
-      '-map', '[v]',
-    ]
-    : [
-      '-vf', cpuChain.filter(Boolean).join(','),
-      '-map', '0:v:0',
-    ];
+      parts.push(`[0:v:0][${sub.overlayInput}]overlay[s]`);
+      parts.push(`[s]${base}${ovPost}[o]`);
+    } else {
+      parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
+    }
+    parts.push(...imgs.filters);
+    parts.push(`[${imgs.filters.length ? 'vi' : 'o'}]${up}[v]`);
+    filterArgs = ['-filter_complex', parts.join(';'), '-map', '[v]'];
+  } else {
+    filterArgs = ['-vf', cpuChain.filter(Boolean).join(','), '-map', '0:v:0'];
+  }
 
   // Hardware decode without -hwaccel_output_format, so frames land back in
   // system memory ready for the software filters. libass cannot touch GPU
@@ -2700,8 +2886,13 @@ export function buildSourceArgs({
     // Input-side seek: fast, and the only form that skips decoding work.
     ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
     '-i', srcPath,
+    ...imgs.inputs,
     ...filterArgs,
     '-map', `0:a:${audioIdx}?`,
+    // A looping GIF is an infinite input: without this the process outlives
+    // the episode, _advance() never fires and the next clip never starts.
+    // The same trap the generated subtitle canvas had to be bounded against.
+    ...(imgs.looping ? ['-shortest'] : []),
     ...be.encoderArgs(profEff),
     ...audioArgs(profile),
     // Continue the published timeline instead of restarting at zero.
@@ -2721,13 +2912,13 @@ export function buildSourceArgs({
  */
 export function buildChunkArgs({
   srcPath, start, dur, out, profile, selection = null, tsOffset = 0,
-  extractedPath = null, fontsDir = null,
+  extractedPath = null, fontsDir = null, overlayPath = null, overlayImages = [],
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
-    { extractedPath, fontsDir });
+    { extractedPath, fontsDir, overlayPath });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
   // Source-rate matching applies to every path, not just the GPU one —
   // duplicating 24fps to 30 is wasted work and judder wherever it happens.
@@ -2741,7 +2932,7 @@ export function buildChunkArgs({
   const rect = contentRect(selection?.video, profile);
   // Same timestamp correction as the streaming path: chunks start at -ss
   // `start`, so subtitle timestamps must be shifted to match.
-  const cpuChain = sub.filter
+  const preUpload = sub.filter
     ? [
       `scale=${rect.w}:${rect.h},setsar=1`,
       ...(start > 0 ? [`setpts=PTS+${Number(start).toFixed(3)}/TB`] : []),
@@ -2749,31 +2940,56 @@ export function buildChunkArgs({
       ...(start > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
-      upload,
     ]
-    : [base, upload];
+    : [base];
+  const cpuChain = [...preUpload, upload];
 
-  const filterArgs = sub.needsComplex
-    ? [
+  // The overlay's ASS is written in the CLIP's own timeline, so its event
+  // times only line up where the source's `-ss` rebasing has been undone.
+  // The CPU chain above already does that around its subtitles filter and
+  // gets this for nothing; the bitmap graph has no such shift, so an
+  // intro/outro overlay on a chunk starting at 300s would sit 300s in the
+  // past and never fire. 'always' events survive either way, which is
+  // exactly why this is worth stating rather than testing once and trusting.
+  const ovPost = !sub.postFilter ? ''
+    : Number(start) > 0
+      ? `,setpts=PTS+${Number(start).toFixed(3)}/TB${sub.postFilter},setpts=PTS-STARTPTS`
+      : sub.postFilter;
+
+  const up = upload || 'null';
+  const imgs = imageOverlayChain((overlayImages ?? []).filter((i) => i?.path), {
+    width: profile.width, firstInput: 1, inLabel: 'o', outLabel: 'vi',
+  });
+
+  let filterArgs;
+  if (sub.needsComplex || imgs.filters.length) {
+    const parts = [];
+    if (sub.needsComplex) {
       // Bitmap subtitles (DVD/PGS subpictures) carry pixel positions in the
       // SOURCE frame's coordinate space. Compositing after scale+pad placed
       // them at source coordinates on the padded 1080p frame — upper-left,
       // wrong size. Overlay at native size first; scaling then carries the
       // subtitles along with the picture.
-      '-filter_complex',
-      `[0:v:0][${sub.overlayInput}]overlay[s];[s]${base}${sub.postFilter ?? ''}[o];[o]${upload}[v]`,
-      '-map', '[v]',
-    ]
-    : [
-      '-vf', cpuChain.filter(Boolean).join(','),
-      '-map', '0:v:0',
-    ];
+      parts.push(`[0:v:0][${sub.overlayInput}]overlay[s]`);
+      parts.push(`[s]${base}${ovPost}[o]`);
+    } else {
+      parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
+    }
+    parts.push(...imgs.filters);
+    parts.push(`[${imgs.filters.length ? 'vi' : 'o'}]${up}[v]`);
+    filterArgs = ['-filter_complex', parts.join(';'), '-map', '[v]'];
+  } else {
+    filterArgs = ['-vf', cpuChain.filter(Boolean).join(','), '-map', '0:v:0'];
+  }
 
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     ...be.deviceArgs(profile),
     '-ss', Number(start).toFixed(3),
     '-i', srcPath,
+    ...imgs.inputs,
+    // After every input, or ffmpeg reads it as an input option belonging to
+    // whichever -i follows and the chunk stops being bounded.
     '-t', Number(dur).toFixed(3),
     ...filterArgs,
     '-map', `0:a:${audioIdx}?`,

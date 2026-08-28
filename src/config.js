@@ -118,8 +118,11 @@ const DEFAULTS = {
    * pixels: a 4:3 episode and a widescreen one go out at different sizes in
    * the same broadcast, and pixels would move a caption between them.
    */
-  overlay: { items: [] },
-  paths: { cache: './cache', run: './run' },
+  overlay: { items: [], hidden: false },
+  // `overlays` holds uploaded pictures. Separate from the cache on purpose:
+  // the cache is disposable and gets cleared, and a logo the user uploaded
+  // is not something to lose with it.
+  paths: { cache: './cache', run: './run', overlays: './overlays' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
   // Run-ahead cache: when the encoders outpace the broadcast, let them
   // keep going and hold the finished chunks in RAM instead of throttling

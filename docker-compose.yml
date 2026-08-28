@@ -57,6 +57,12 @@ services:
       # fast local storage, not the media array.
       - ./cache:/app/cache
 
+      # Pictures uploaded for studio overlays. Deliberately not inside the
+      # cache: the cache is disposable, and these are files the user put
+      # there. Without this volume they would live only in the container and
+      # disappear the next time it is recreated.
+      - ./overlays:/app/overlays
+
       # The media library, read-only: this service never writes to it.
       #
       # IMPORTANT: mount it at the SAME path the panel will resolve to, and

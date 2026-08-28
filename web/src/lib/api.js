@@ -47,6 +47,23 @@ export const api = {
   get: (p) => request('GET', p),
   post: (p, b) => request('POST', p, b),
   put: (p, b) => request('PUT', p, b),
+  del: (p) => request('DELETE', p),
+
+  /**
+   * Overlay pictures go up as raw bytes, not multipart: the server needs the
+   * file and nothing else, and this keeps a form-parser dependency out of a
+   * service whose only upload is this one.
+   */
+  uploadOverlayImage: async (file) => {
+    const res = await fetch(`/api/overlay/images?name=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? `Upload failed (${res.status})`);
+    return data;
+  },
 
   authStatus: () => request('GET', '/api/auth/status'),
   login: (password) => request('POST', '/api/auth/login', { password }),

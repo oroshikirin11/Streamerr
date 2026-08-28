@@ -102,6 +102,15 @@ export function overlayAss(items, {
     const size = Math.max(8, Math.round((Number(item.size) || 0.05) * height));
     tags.push(`\\fs${size}`);
     tags.push(`\\c${assColour(item.colour)}`);
+    // ASS alpha runs backwards from what a slider means: &H00& is opaque and
+    // &HFF& is invisible. \alpha sets fill and border together, so a
+    // half-transparent caption fades its outline with it instead of leaving
+    // a hard black edge around ghost text.
+    if (item.opacity != null && Number(item.opacity) < 1) {
+      const a = Math.round((1 - clamp01(item.opacity)) * 255)
+        .toString(16).toUpperCase().padStart(2, '0');
+      tags.push(`\\alpha&H${a}&`);
+    }
     if (item.outline !== false) tags.push('\\bord2', '\\3c&H00000000&');
     if (item.font) tags.push(`\\fn${String(item.font).replace(/[{}\\,]/g, '')}`);
 
