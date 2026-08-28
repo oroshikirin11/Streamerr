@@ -57,12 +57,57 @@
     }
   }
 
+  let watchdog = null;
+  let wdFrames = 0;
+  let wdBuf = 0;
+  let wdStuck = 0;
+  let attempts = 0;
+
   function stopFeed() {
     clearTimeout(retryTimer); retryTimer = null;
+    clearInterval(watchdog); watchdog = null;
     // The shape came from the feed; without it, fall back to the config.
     liveAspect = null;
     try { player?.destroy(); } catch { /* already gone */ }
     player = null;
+  }
+
+  /**
+   * Rebuild the player after the feed goes away, backing off if it keeps
+   * failing so a broken preview stays quiet instead of reconnecting forever.
+   * Never while off air — watchBroadcast owns that transition.
+   */
+  function retryFeed(delay = 2000) {
+    stopFeed();
+    if (!onAir) return;
+    const wait = Math.min(delay * 2 ** Math.min(attempts, 4), 30_000);
+    attempts += 1;
+    retryTimer = setTimeout(startFeed, wait);
+  }
+
+  /**
+   * Backstop for a wedged decoder, same as the floating preview's: the
+   * decoded-frame counter is the honest signal, because currentTime keeps
+   * advancing over a frozen picture on an MSE stall. Frames stuck while
+   * bytes still arrive means rebuild; frames stuck with nothing arriving is
+   * a paused broadcast, where holding the last frame is correct.
+   */
+  function checkStall() {
+    if (!video || !player) return;
+    if (video.paused) {
+      video.play?.().catch(() => {});
+      if (++wdStuck >= 2) { wdStuck = 0; retryFeed(300); }
+      return;
+    }
+    const frames = video.getVideoPlaybackQuality?.().totalVideoFrames
+      ?? Math.round(video.currentTime * 30);
+    const buf = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
+    const framesMoved = frames > wdFrames;
+    const bufMoved = buf - wdBuf > 0.2;
+    wdFrames = frames;
+    wdBuf = buf;
+    if (framesMoved || !bufMoved) { wdStuck = 0; return; }
+    if (++wdStuck >= 2) { wdStuck = 0; retryFeed(300); }
   }
 
   function startFeed() {
@@ -75,11 +120,28 @@
     );
     player.attachMediaElement(video);
     // A splice cuts the socket by design; rebuild rather than sit frozen.
-    player.on(mpegts.Events.ERROR, () => {
-      stopFeed();
-      retryTimer = setTimeout(startFeed, 2000);
-    });
-    try { player.load(); player.play?.().catch(() => {}); feed = 'live'; } catch { stopFeed(); }
+    player.on(mpegts.Events.ERROR, () => retryFeed(2000));
+    // The connection reached real data, so the next resync is not a failure
+    // to back off from.
+    player.on(mpegts.Events.MEDIA_INFO, () => { attempts = 0; });
+    /**
+     * The one that was missing, and the reason applying an overlay froze
+     * this stage while the floating preview carried on.
+     *
+     * Applying is a source restart, and the server closes the preview
+     * socket CLEANLY across that splice — mpegts reports LOADING_COMPLETE,
+     * not ERROR. With only an ERROR handler nothing fired, the player stayed
+     * attached and non-null, and the stage held its last decoded frame for
+     * the rest of the broadcast. Observed directly: two player inits at
+     * startup, then one per apply, because only the floating preview — which
+     * has always handled this event — was coming back.
+     */
+    player.on(mpegts.Events.LOADING_COMPLETE, () => retryFeed(300));
+    try {
+      player.load(); player.play?.().catch(() => {}); feed = 'live';
+      wdFrames = 0; wdBuf = 0; wdStuck = 0;
+      watchdog = setInterval(checkStall, 3000);
+    } catch { stopFeed(); }
   }
 
   function toggleFeed() {
@@ -105,7 +167,7 @@
       const live = msg.payload?.status === 'running' || msg.payload?.status === 'preparing';
       if (live === onAir) return;
       onAir = live;
-      if (live) { if (!player) startFeed(); }
+      if (live) { attempts = 0; if (!player) startFeed(); }
       else { stopFeed(); feed = 'off'; }
     });
   }
