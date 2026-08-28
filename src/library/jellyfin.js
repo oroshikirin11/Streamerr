@@ -25,8 +25,7 @@ export class JellyfinLibrary {
    * @param {string} opts.apiKey
    * @param {Array<{from,to}>} [opts.pathMap]
    */
-  constructor({ url, apiKey, pathMap = [], stills = false }) {
-    this._stills = stills;
+  constructor({ url, apiKey, pathMap = [] }) {
     this.url = String(url || '').replace(/\/+$/, '');
     this.apiKey = apiKey;
     this.pathMap = pathMap;
@@ -267,30 +266,12 @@ export class JellyfinLibrary {
       // multi-version items, where Path points at the folder.
       path: e.Path ?? null,
       sourcePath: source?.Path ?? null,
-      image: this.imageUrl(e.Id, 'Primary', e.ImageTags?.Primary, { maxHeight: 200 })
-        // Jellyfin downloads episode stills from a metadata provider, so a
-        // show it never matched — or one whose provider has no stills —
-        // comes back with no tag at all and left the row blank. Fall back
-        // to the file, which the image route turns into a frame.
-        ?? this.frameUrl(e.Id, source?.Path ?? e.Path ?? null),
+      // No generated fallback here on purpose: Jellyfin is the one source
+      // that supplies stills of its own, and where it has none the file is
+      // usually as far from us as it is from Jellyfin. Making pictures is
+      // for sources that have no artwork at all.
+      image: this.imageUrl(e.Id, 'Primary', e.ImageTags?.Primary, { maxHeight: 200 }),
     };
   }
 
-  /**
-   * Artwork url for an episode Jellyfin has no image for, pointing at the
-   * media so the image route can take a frame from it.
-   *
-   * The path is mapped and verified here rather than at request time: an
-   * unreachable path (Jellyfin in a container reporting /media) should show
-   * as no artwork, not as a broken tile.
-   */
-  frameUrl(id, reported) {
-    if (!this._stills || !reported) return null;
-    let local;
-    try { local = mapAndVerify(reported, this.pathMap); } catch { return null; }
-    const key = `${id}-frame`;
-    this._art ??= new Map();
-    this._art.set(key, local);
-    return `/api/library/image/${key}?v=frame`;
-  }
 }

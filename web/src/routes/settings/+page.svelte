@@ -793,6 +793,7 @@
       </div>
     {/if}
 
+    {#if src.provider !== 'jellyfin'}
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
       <input type="checkbox" style="width:auto"
              checked={src.generateStills ?? stillsDefault(src.provider)}
@@ -800,11 +801,7 @@
       Make episode pictures from the video when there are none
     </label>
     <p class="muted small">
-      {#if src.provider === 'jellyfin'}
-        Jellyfin supplies its own, so this only affects episodes it has none
-        for. Off by default: those files are usually as far away from us as
-        they are from Jellyfin.
-      {:else if src.provider === 'smb' || src.provider === 'smbmount'}
+      {#if src.provider === 'smb' || src.provider === 'smbmount'}
         Off by default over a share &mdash; each picture is a seek across the
         network, so opening a 37-episode season asks for 37 of them. Made
         once and cached, so the cost is only the first visit.
@@ -813,6 +810,7 @@
         first view and cached afterwards.
       {/if}
     </p>
+    {/if}
 
     <div class="actions">
       <button class="primary" onclick={() => save('library')}>Save</button>

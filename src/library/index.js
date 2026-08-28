@@ -27,6 +27,9 @@ import { CompositeLibrary } from './composite.js';
  */
 export const stillsDefault = (provider) => provider === 'filesystem' || !provider;
 
+/** Sources that can make their own stills. Jellyfin supplies its own. */
+export const stillsApply = (provider) => provider !== 'jellyfin';
+
 function makeSource(src, cfg, reuseToken = null) {
   const stills = src.generateStills ?? stillsDefault(src.provider);
   if (src.provider === 'jellyfin') {
@@ -34,7 +37,6 @@ function makeSource(src, cfg, reuseToken = null) {
       url: src.jellyfin?.url,
       apiKey: src.jellyfin?.apiKey,
       pathMap: src.pathMap ?? [],
-      stills,
     });
   }
   if (src.provider === 'smb') {
