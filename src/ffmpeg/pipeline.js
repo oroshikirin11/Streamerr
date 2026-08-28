@@ -39,7 +39,7 @@ import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { overlayAss } from './overlay-ass.js';
-import { imageOverlayChain, vaapiImageOverlayChain, gpuCanDraw } from './overlay-image.js';
+import { imageOverlayChain, canvasImageChain } from './overlay-image.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -1537,6 +1537,23 @@ export class PipelinePlayout extends EventEmitter {
     }
   }
 
+  /**
+   * Give up a GPU capability, permanently enough to survive the retry.
+   *
+   * Writing it to `profile` alone did NOT work, and never has: _play's very
+   * first act is `this.profile = { ...this._box, ...shape }`, so a demotion
+   * set just before calling _play was erased before the new command was
+   * built. The retry then spawned a byte-identical filtergraph and failed
+   * exactly the same way — which is how a driver rejecting one graph turned
+   * into a dead clip instead of a fallback. The box is the source of truth,
+   * so the box is what has to change.
+   */
+  _demote(fields) {
+    Object.assign(this._box, fields);
+    Object.assign(this.profile, fields);
+    this._demoted = { ...(this._demoted ?? {}), ...fields };
+  }
+
   _shapeFor(video) {
     const box = { width: this._box.width, height: this._box.height };
     const mode = this._box.frameSize ?? 'fixed';
@@ -2382,6 +2399,25 @@ export class PipelinePlayout extends EventEmitter {
           return;
         }
 
+        // Pictures are demoted BEFORE subtitles, and separately. A picture
+        // composite failing says nothing about the subtitle composite, and
+        // the subtitle one is the expensive thing to give up — dropping it
+        // sends a 1080p episode to CPU burn-in for the rest of the
+        // broadcast. Retrying without the picture keeps everything else on
+        // the GPU and costs the viewer one logo.
+        if (!this._sawBlock && this.current
+            && !this.profile?.noGpuImages && !this._gpuImgDemoted
+            && (this.profile?.overlay ?? []).some(
+              (i) => i?.type === 'image' && i.enabled !== false && i.file)) {
+          this._gpuImgDemoted = true;
+          this._demote({ noGpuImages: true });
+          this.emit('warn', 'This driver would not composite a picture overlay on '
+            + `the GPU — drawing it on the CPU instead for this broadcast. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
         if (!this._sawBlock && this.profile?.gpuSubs && this.selection?.subtitle
             && !this._gpuSubsDemoted && this.current) {
           this._gpuSubsDemoted = true;
@@ -2391,11 +2427,9 @@ export class PipelinePlayout extends EventEmitter {
           // demoting everything sent full-HD episodes to the CPU for the
           // rest of the broadcast for no reason.
           if (contentRect(this.selection?.video, this.profile).bars) {
-            this.profile.barsFailed = true;
-            this._demoted = { barsFailed: true };
+            this._demote({ barsFailed: true });
           } else {
-            this.profile.gpuSubs = false;
-            this._demoted = { gpuSubs: true };
+            this._demote({ gpuSubs: false });
           }
           this.emit('warn', 'GPU subtitle compositing failed on this driver — '
             + `retrying this clip with CPU burn-in. (${tail})`);
@@ -2470,9 +2504,19 @@ export class PipelinePlayout extends EventEmitter {
   _rearmGpu() {
     if (this.profile?.swDecode) delete this.profile.swDecode;
     if (!this._demoted) return;
-    if (this._demoted.barsFailed) delete this.profile.barsFailed;
-    if (this._demoted.gpuSubs) this.profile.gpuSubs = true;
-    this._demoted = null;
+    // Both, or the next _play rebuilds the profile from the box and undoes
+    // the re-arm exactly as it used to undo the demotion.
+    for (const store of [this.profile, this._box]) {
+      if (this._demoted.barsFailed) delete store.barsFailed;
+      if (this._demoted.gpuSubs === false) store.gpuSubs = true;
+    }
+    // noGpuImages is deliberately NOT re-armed. A driver that refused the
+    // picture composite will refuse it on the next clip too, and re-arming
+    // would buy a failed spawn and a stumble at every episode boundary for
+    // a capability we already know is absent. It resets when the broadcast
+    // does, which is when the device might genuinely be different.
+    const keep = this._demoted.noGpuImages ? { noGpuImages: true } : null;
+    this._demoted = keep;
     this._gpuSubsDemoted = false;
   }
 
@@ -2643,7 +2687,7 @@ export function buildSourceArgs({
    * here at all and sends the whole clip to the software path.
    */
   const gpuImages = imgList.length > 0
-    && Boolean(profile.gpuSubs) && gpuCanDraw(imgList);
+    && Boolean(profile.gpuSubs) && !profile.noGpuImages;
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
@@ -2670,11 +2714,17 @@ export function buildSourceArgs({
     const vaapiChain = (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
       ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
       : scalePart);
-    // Composited after the pad, so a logo placed in a corner sits in the
-    // corner of the frame viewers actually see, not of the inner picture.
-    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
-      width: profile.width, firstInput: 1, inLabel: 'b', outLabel: 'v',
+    // With pictures this becomes the SAME shape the subtitle path uses — a
+    // transparent RGBA canvas carrying the overlay, uploaded once, and one
+    // overlay_vaapi — because that is the shape the device has been shown
+    // to accept. Bounded like the subtitle canvas: an unbounded generated
+    // input never ends, so the clip never advances.
+    const gpuImgs = canvasImageChain(gpuImages ? imgList : [], {
+      width: profile.width, height: profile.height,
+      firstInput: 2, inLabel: '1:v', outLabel: 'cvo',
     });
+    const capArgs = duration != null && duration > 0
+      ? ['-t', (Math.max(1, duration - offset) + 5).toFixed(3)] : [];
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -2684,13 +2734,20 @@ export function buildSourceArgs({
       '-extra_hw_frames', '8',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
+      ...(gpuImgs.filters.length
+        ? ['-f', 'lavfi', ...capArgs, '-i',
+          `color=c=black@0.0:s=${profile.width}x${profile.height}:r=${effAll.rate},format=rgba`]
+        : []),
       ...gpuImgs.inputs,
       // Software-decoded frames have to be handed to the GPU explicitly.
       ...(gpuImgs.filters.length
-        ? ['-filter_complex', [`[0:v]${vaapiChain}[b]`, ...gpuImgs.filters].join(';'), '-map', '[v]']
+        ? ['-filter_complex',
+          `${gpuImgs.filters.join(';')};[cvo]hwupload[ov];`
+          + `[0:v]${vaapiChain}[b];[b][ov]overlay_vaapi[v]`,
+          '-map', '[v]']
         : ['-vf', vaapiChain, '-map', '0:v:0']),
       '-map', `0:a:${audioIdx}?`,
-      ...(gpuImgs.looping ? ['-shortest'] : []),
+      ...(gpuImgs.filters.length ? ['-shortest'] : []),
       ...be.encoderArgs(profEff),
       '-async_depth', '4',
       ...audioArgs(profile),
@@ -2803,19 +2860,32 @@ export function buildSourceArgs({
     // Input 0 is the clip, 1 the subtitle canvas, and 2 the black background
     // when the driver's pillarbox shape needs one — so pictures start after
     // whichever of those exist, or they would read the wrong stream.
-    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
-      width: profile.width, firstInput: bgInput.length ? 3 : 2,
-      inLabel: 'vpre', outLabel: 'v',
+    //
+    // Pictures are drawn ONTO the subtitle canvas, on the CPU, before it is
+    // uploaded — NOT as a second overlay_vaapi after the composite. Chaining
+    // two of them looked clean and cost a live broadcast: it worked on the
+    // development GPU and returned -22 from h264_vaapi on the deployment's
+    // iHD driver. This keeps the graph at exactly ONE overlay_vaapi, which
+    // is the shape the device has already proven it can do, and the extra
+    // work is a small picture composited onto a canvas that is being built
+    // and uploaded regardless.
+    const gpuImgs = canvasImageChain(gpuImages ? imgList : [], {
+      // The canvas is the CONTENT rectangle unless it has been padded up to
+      // the full frame, and a picture's coordinates are fractions of the
+      // frame either way.
+      width: canvasPad ? profile.width : rect.w,
+      height: canvasPad ? profile.height : rect.h,
+      firstInput: bgInput.length ? 3 : 2,
+      inLabel: 'cv', outLabel: 'cvo',
     });
-    // Every composite shape above ends by producing [v]. When pictures
-    // follow, that output becomes the input to the picture chain instead,
-    // and the chain produces the real [v].
-    const composited = gpuImgs.filters.length
-      ? `${composite.replace(/\[v\]$/, '[vpre]')};${gpuImgs.filters.join(';')}`
-      : composite;
-    const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
-      + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
-      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composited}`;
+    const canvas = gpuImgs.filters.length
+      ? `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+        + `setpts=PTS-STARTPTS,format=rgba${canvasPad}[cv];`
+        + `${gpuImgs.filters.join(';')};[cvo]hwupload[ov]`
+      : `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+        + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov]`;
+    const graph = `${canvas};`
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',

@@ -148,7 +148,28 @@ export function vaapiImageOverlayChain(images, {
 
   list.forEach((img, i) => {
     const idx = firstInput + i;
-    if (img.animated) { inputs.push('-ignore_loop', '0'); looping = true; }
+    /**
+     * Timing without `enable`, done at the INPUT instead of the filter.
+     *
+     * overlay_vaapi has no timeline support, which is why timed pictures
+     * used to send the whole clip to the software path. They do not need
+     * one: the filter draws whatever frames the secondary input currently
+     * has, so bounding WHEN that input has frames is the same thing.
+     * `-itsoffset` withholds it until the window opens, `-t` ends it, and
+     * repeatlast=0 stops the last frame being held forever afterwards.
+     * Measured on a 10s clip with a 4-7s window: off at 1s, on at 5s, off
+     * at 9s.
+     */
+    const timed = img.start != null && img.end != null;
+    const span = timed ? Math.max(0.04, img.end - img.start) : 0;
+    if (timed && img.start > 0) inputs.push('-itsoffset', img.start.toFixed(3));
+    if (img.animated) {
+      inputs.push('-ignore_loop', '0');
+      if (!timed) looping = true;        // unbounded only when it never ends
+    } else if (timed) {
+      inputs.push('-loop', '1');         // a still needs looping to have a span
+    }
+    if (timed) inputs.push('-t', span.toFixed(3));
     inputs.push('-i', img.path);
 
     // All of this runs once, on a single frame, before the picture is ever
@@ -178,5 +199,25 @@ export function vaapiImageOverlayChain(images, {
   return { inputs, filters, looping };
 }
 
-/** Pictures the GPU compositor can take: everything except timed ones. */
-export const gpuCanDraw = (images) => (images ?? []).every((i) => i?.start == null);
+/**
+ * Pictures drawn onto the RGBA overlay canvas, on the CPU, before it is
+ * uploaded and composited by the single overlay_vaapi the driver has
+ * already proven it can do.
+ *
+ * The alternative — a second overlay_vaapi chained after the first — is
+ * what took a live broadcast down: it ran on the development GPU and
+ * returned -22 from h264_vaapi on the deployment's iHD driver. One graph
+ * shape, probed once, is the rule here for a reason.
+ *
+ * The trailing format=rgba is load-bearing: overlay may hand back a format
+ * without an alpha channel, and the canvas has to stay transparent
+ * everywhere nothing was drawn or the composite becomes an opaque box over
+ * the picture.
+ */
+export function canvasImageChain(images, opts = {}) {
+  const r = imageOverlayChain(images, opts);
+  if (!r.filters.length) return r;
+  const last = r.filters.length - 1;
+  r.filters[last] = r.filters[last].replace(/\[(\w+)\]$/, ',format=rgba[$1]');
+  return r;
+}
