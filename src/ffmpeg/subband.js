@@ -50,10 +50,19 @@ const BOTTOM_ALIGN = new Set([1, 2, 3]);
  * height is computed from their worst case below; position-changing tags are
  * not allowed at all.
  */
-const SAFE_TAG = /^(?:i|b|u|s|c|fn|fs|fsp|fe|k[fo]?|K|alpha|[1-4][ac]|be|blur|bord|[xy]bord|shad|[xy]shad|fsc[xy]|q|r|h|N|n)/;
+const SAFE_TAG = /^(?:i|b|u|s|c|fn|fsp|fs|fe|fade?|k[fo]?|K|alpha|[1-4][ac]|be|blur|bord|[xy]bord|shad|[xy]shad|fsc[xy]|q|r|h|N|n)/;
 
 /** Tags that move or reshape a line relative to an edge the band lacks. */
-const UNSAFE_TAG = /^(?:pos|move|org|i?clip|p\d|an|a\d|fr[xyz]?|t\(|fad|fade)/;
+/**
+ * `fad`/`fade` are NOT here: they animate alpha and nothing else.
+ *
+ * A fade cannot move a glyph, resize one, or put ink anywhere the same cue
+ * would not have put it fully opaque — so it cannot affect where the band
+ * has to be. Refusing it was over-cautious rather than wrong, and it cost a
+ * whole script the band for a tag that only changes opacity over time.
+ * Everything still listed here can move ink, which is the actual test.
+ */
+const UNSAFE_TAG = /^(?:pos|move|org|i?clip|p\d|an|a\d|fr[xyz]?|t\()/;
 
 function splitCsv(line, count) {
   // ASS's last field is free text and may itself contain commas.
