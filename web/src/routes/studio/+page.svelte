@@ -413,7 +413,7 @@
                Left in, the box grew a whole line taller than the image and
                the resize handle sat well below the corner it belongs to. -->
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
-               class:pic={item.type === 'image'} class:burnt={burntIn(item)}
+               class:isimg={item.type === 'image'} class:burnt={burntIn(item)}
                style={`left:${item.x * 100}%; top:${item.y * 100}%;
                        transform: translate(-50%,-50%) rotate(${item.rotation}deg);
                        ${item.type === 'image' ? ''
@@ -689,8 +689,13 @@
   .item.burnt { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
   .item.burnt:hover, .item.burnt.on { outline: 1px dashed var(--accent); }
   /* No line box at all, so the outline hugs the picture and the resize
-     handle sits on its actual corner. */
-  .item.pic { font-size: 0; line-height: 0; padding: 0; }
+     handle sits on its actual corner.
+     Named `isimg`, NOT `pic`: `pic` is the <img> inside, and that rule
+     carries pointer-events:none so the picture never swallows the drag.
+     Sharing the name applied it to the CONTAINER too, which made every
+     picture overlay unclickable — no grab cursor, no drag, while text
+     worked fine. */
+  .item.isimg { font-size: 0; line-height: 0; padding: 0; }
   .item:active { cursor: grabbing; }
   .item.off { opacity: .35; }
   .item.on { outline: 1px dashed var(--accent); outline-offset: 3px; }
