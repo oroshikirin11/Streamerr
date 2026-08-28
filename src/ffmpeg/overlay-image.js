@@ -75,7 +75,13 @@ export function imageOverlayChain(images, {
     // finite input — one less way for the process to hang.
     const steps = ['format=rgba'];
     const w = Math.max(2, Math.round((Number(img.size) || 0.2) * width));
-    steps.push(`scale=${w}:-1`);
+    // -2, not -1: -1 preserves aspect exactly and will happily produce an
+    // ODD height. Odd-sized surfaces are a well-known way to make a VAAPI
+    // upload fail, and this same scale feeds the hardware path — a 933x877
+    // logo asked for 1543 wide gives an odd height, which is the most
+    // likely reason h264_vaapi returned -22 on the deployment's driver
+    // while the same graph ran here. Rounding to even costs at most a pixel.
+    steps.push(`scale=${w}:-2`);
     const rot = Number(img.rotation) || 0;
     if (rot) {
       // Radians, and the canvas has to grow or the corners are clipped.
@@ -175,7 +181,9 @@ export function vaapiImageOverlayChain(images, {
     // All of this runs once, on a single frame, before the picture is ever
     // handed to the GPU — which is why a logo can be free.
     const steps = ['format=rgba'];
-    steps.push(`scale=${Math.max(2, Math.round((Number(img.size) || 0.2) * width))}:-1`);
+    // -2 for the same reason as the software path: this frame is uploaded
+    // to the GPU, and an odd height is a good way to be told -22.
+    steps.push(`scale=${Math.max(2, Math.round((Number(img.size) || 0.2) * width))}:-2`);
     const rot = Number(img.rotation) || 0;
     if (rot) {
       const rad = (rot * Math.PI / 180).toFixed(6);
