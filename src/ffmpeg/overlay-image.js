@@ -107,9 +107,23 @@ export function imageOverlayChain(images, {
     // the safe choice and is the opposite — it passes the main picture
     // through WITHOUT the overlay, so a logo appeared for exactly one frame
     // and then disappeared. Verified by encoding a frame and looking at it.
+    /**
+     * format=auto, because overlay's DEFAULT is yuv420.
+     *
+     * On the canvas path the main input is RGBA, so the default converts
+     * the whole 1920x1080 canvas to YUV to blend and the trailing
+     * format=rgba converts it back — two full-frame colourspace passes per
+     * frame, for a logo that might be 300px wide. That is why the cost was
+     * the same for a full-frame picture and a corner one: none of it was
+     * the blend. Measured over 480 frames: 0.43s on the default against
+     * 0.16s with auto, on a 0.03s baseline — 3x the overlay's own cost.
+     *
+     * auto rather than rgb so the CPU burn-in path, where the main input
+     * really is YUV, keeps picking yuv420 exactly as before.
+     */
     filters.push(
       `[${cur}][img${i}]overlay=${place(frac(img.x, 0.5), frac(img.y, 0.5))}`
-      + `:eof_action=repeat${timed}[${next}]`,
+      + `:eof_action=repeat:format=auto${timed}[${next}]`,
     );
     cur = next;
   });
