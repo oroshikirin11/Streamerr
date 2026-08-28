@@ -320,12 +320,28 @@
 
   function bouncePos(item, idx) {
     const size = Number(item.size) || 0.2;
-    const ar = picAspect[item.file];
-    // Height as a fraction of the FRAME: width is size*frameW, height is
-    // that over the picture's aspect, expressed against frameH.
-    const ih = ar ? Math.min(1, (size * aspect) / ar) : size;
-    const rx = Math.max(0.0001, 1 - size);
-    const ry = Math.max(0.0001, 1 - ih);
+    const ar = picAspect[item.file] || 1;
+    // Work in units where the frame is 1 wide and 1/aspect tall, so both
+    // axes share a scale and the rotation maths below is the ordinary one.
+    const w = size;
+    const h = size / ar;
+    /**
+     * The bounce is bounded by the ROTATED box, not the upright one.
+     *
+     * The encoder rotates the picture before it reaches overlay, with
+     * ow=rotw(a):oh=roth(a) — so the w and h that overlay bounces against
+     * are the rotated bounding box, which is larger for any angle that is
+     * not a multiple of 180 degrees. Ignoring that here gave the preview a
+     * bigger travel range than the broadcast had, so the two turned at
+     * different points on the edges: not a phase difference but a different
+     * path, which is what made it look wrong rather than merely late.
+     */
+    const a = ((Number(item.rotation) || 0) * Math.PI) / 180;
+    const rw = Math.abs(w * Math.cos(a)) + Math.abs(h * Math.sin(a));
+    const rh = Math.abs(w * Math.sin(a)) + Math.abs(h * Math.cos(a));
+    const rhf = Math.min(1, rh * aspect);          // as a fraction of frame HEIGHT
+    const rx = Math.max(0.0001, 1 - Math.min(1, rw));
+    const ry = Math.max(0.0001, 1 - rhf);
     const t = clock + idx * 3.1;
     const v = Math.min(1, Math.max(0, Number(item.speed) ?? BOUNCE_SPEED));
     const tri = (u, r) => Math.abs(((u % (2 * r)) + 2 * r) % (2 * r) - r);
@@ -333,10 +349,24 @@
     // does it — which in fractions means the vertical rate is scaled by the
     // frame's aspect. Equal fractional speeds would tilt the angle.
     return {
-      x: tri(v * t, rx) + size / 2,
-      y: tri(v * aspect * t, ry) + ih / 2,
+      x: tri(v * t, rx) + rw / 2,
+      y: tri(v * aspect * t, ry) + rhf / 2,
     };
   }
+
+  /**
+   * Animate the ghost only while it is OURS to animate.
+   *
+   * Once an item is burnt in, the feed already shows the real picture moving
+   * and this box is just its marker. It cannot line up: the preview runs a
+   * bank-depth behind air and the editor has no frame-accurate media clock,
+   * so an animated marker chases the real picture around the frame at the
+   * wrong phase and reads as a second, broken copy. Parked at its stored
+   * position it claims nothing, and still selects, drags and deletes.
+   */
+  const ghostPos = (item, idx) => (moves(item) && !burntIn(item)
+    ? bouncePos(item, idx)
+    : { x: item.x, y: item.y });
 
   /** Only run a frame loop while something is actually moving. */
   $effect(() => {
@@ -627,8 +657,8 @@
                the resize handle sat well below the corner it belongs to. -->
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
                class:isimg={item.type === 'image'} class:burnt={burntIn(item)}
-               style={`left:${(moves(item) ? bouncePos(item, idx).x : item.x) * 100}%;
-                       top:${(moves(item) ? bouncePos(item, idx).y : item.y) * 100}%;
+               style={`left:${ghostPos(item, idx).x * 100}%;
+                       top:${ghostPos(item, idx).y * 100}%;
                        transform: translate(-50%,-50%);
                        ${item.type === 'image' ? ''
                          : `font-size:${item.size * 100}cqh; color:${item.colour};`}
