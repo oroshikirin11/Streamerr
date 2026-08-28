@@ -1786,7 +1786,21 @@ export class PipelinePlayout extends EventEmitter {
       }
 
       const band = analyseAssBand(src, { width: rect.w, height: rect.h });
-      if (!band.safe) return null;
+      /**
+       * Say why, because otherwise there is no way to tell.
+       *
+       * A refused band is invisible from outside: the clip simply runs with
+       * a full-height canvas, which is exactly what it looked like before
+       * the band existed. Whether that is one stray typeset sign or the
+       * dialogue itself decides whether the title is worth doing anything
+       * about, and the analyser already knows.
+       */
+      if (!band.safe) {
+        this.emit('log', `[band] full-height canvas — ${band.reason}\n`);
+        return null;
+      }
+      this.emit('log', `[band] ${rect.w}x${band.bandHeight} canvas`
+        + ` — ${(100 - (band.bandHeight / rect.h) * 100).toFixed(0)}% less to rasterise\n`);
 
       if (!existsSync(out)) {
         const text = bandScript(src, band);
