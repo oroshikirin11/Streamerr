@@ -807,6 +807,12 @@
           <input type="range" min="5" max="100" step="1" value={(sel.opacity ?? 1) * 100}
                  oninput={(e) => patch(sel.id, { opacity: +e.currentTarget.value / 100 })} />
 
+          <!-- Pictures only. Motion is carried by the picture descriptors the
+               overlay filters read; a caption rides libass instead and never
+               sees the field, so offering it for text was offering something
+               that silently did nothing. Text motion wants ASS \move, which
+               is a different (and cheaper) implementation. -->
+          {#if sel.type === 'image'}
           <!-- Movement is described, never keyframed: the position is an
                expression the encoder evaluates per frame, so a moving
                picture is applied once like any other and costs no extra
@@ -837,6 +843,7 @@
               to realtime this can be what tips it into stalling — watch the
               console for a slow-clip report after applying.
             </p>
+          {/if}
           {/if}
 
           {#if sel.type !== 'image'}
