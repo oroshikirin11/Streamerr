@@ -250,6 +250,12 @@ export class PipelinePlayout extends EventEmitter {
   }) {
     super();
     this.target = target;
+    /**
+     * The configured output box. `this.profile` is this with the shape of
+     * whatever is on air folded in, so every downstream consumer — filters,
+     * chunker, hold cards — reads one profile and needs no special case.
+     */
+    this._box = { ...profile };
     this.profile = profile;
     this.selection = selection;
     /**
@@ -918,6 +924,12 @@ export class PipelinePlayout extends EventEmitter {
     // flush cut the stream on a packet boundary instead of mid-packet.
     this._published = 0;
     this._drainGen = 0;
+    // Backpressure state belongs to the process that caused it. A drain
+    // that parked on the PREVIOUS publisher's stdin left this latched with
+    // a 'drain' listener on a pipe that will never fire again, so every
+    // drain against the replacement returned at the guard and the source
+    // sat blocked forever behind a publisher that was ready and waiting.
+    this._bankDraining = false;
     const args = [
       '-hide_banner', '-nostdin',
       // The publisher sets the pace for everything. Sources run as fast as
@@ -995,6 +1007,13 @@ export class PipelinePlayout extends EventEmitter {
       this.publisher = null;
       if (this._watch) { clearInterval(this._watch); this._watch = null; }
       this._killSource();
+
+      // A deliberate shape swap, not the broadcast ending: the socket is
+      // now closed, so the replacement can safely connect.
+      if (this._reshaping && !this._stopping) {
+        this._finishReshape();
+        return;
+      }
 
       // An off-air break, not an ending: hold the engine and set the alarm.
       if (this._break && !this._stopping) {
@@ -1362,6 +1381,81 @@ export class PipelinePlayout extends EventEmitter {
     this._advance();
   }
 
+  /**
+   * Output frame size for a clip.
+   *
+   * Default: always the configured box, with bars padded in. With trimBars
+   * the frame IS the content rectangle — which contentRect fits inside the
+   * box, so this can only ever shrink the frame, never grow it. A 4K source
+   * still lands at the configured height.
+   */
+  _shapeFor(video) {
+    const box = { width: this._box.width, height: this._box.height };
+    const mode = this._box.frameSize ?? 'fixed';
+    if (mode === 'fixed' || !video?.width || !video?.height) return box;
+
+    if (mode === 'source') {
+      // The source's DISPLAY size: anamorphic material is stored narrow and
+      // stretched at playback, and encoding the stored size would squash it.
+      let vw = video.width;
+      const m = /^(\d+):(\d+)$/.exec(video.sar ?? '');
+      if (m && +m[1] > 0 && +m[2] > 0) vw = vw * (+m[1] / +m[2]);
+      const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+      // No ceiling by design, but not unbounded either: past 8K this is a
+      // broken probe rather than a real file, and encoders reject it anyway.
+      const w = Math.min(7680, even(vw));
+      const h = Math.min(4320, even(video.height));
+      return { width: w, height: h };
+    }
+
+    const r = contentRect(video, this._box);   // 'fit' — capped by the box
+    return { width: r.w, height: r.h };
+  }
+
+  /**
+   * Swap the publisher to a new frame shape.
+   *
+   * FLV announces width/height once, at connect, and the publisher owns a
+   * single RTMP session — so a clip of a different shape cannot join the
+   * one already running. Owncast sees this as the stream ending and a new
+   * one starting, which is why trimBars is opt-in. Everything banked
+   * belongs to the old shape and is dropped rather than fed to the new
+   * session as frames of the wrong size.
+   */
+  _reshape(item, offset, duration, shape) {
+    this._reshaping = { item, offset, duration };
+    this.emit('warn', `Switching output to ${shape.width}x${shape.height} for `
+      + `${item?.title ?? 'the next clip'} — viewers reconnect once.`);
+    this._killSource();
+    this._bank = [];
+    this._bankBytes = 0;
+    // The replacement is brought up from the old publisher's close, not
+    // here: Owncast accepts a single publisher, so connecting before the
+    // previous RTMP session has actually gone is how you get refused.
+    const p = this.publisher;
+    if (!p) { this._finishReshape(); return; }
+    try { p.kill('SIGKILL'); } catch { this._finishReshape(); }
+  }
+
+  /** Bring the new session up at the shape the pending clip needs. */
+  _finishReshape() {
+    const next = this._reshaping;
+    if (!next) return;
+    this._reshaping = null;
+    // A fresh RTMP session restarts the viewer's clock, so the published
+    // timeline starts over with it rather than resuming mid-episode.
+    this.timeline = 0;
+    this._clipBase = 0;
+    this._spawnPublisher();
+    // The publisher's close cleared the watchdog; the broadcast is
+    // continuing, so it has to be re-armed or nothing supervises it again.
+    if (!this._watch) {
+      this._watch = setInterval(() => this._checkHealth(), 2000);
+      this._watch.unref?.();
+    }
+    this._play(next.item, next.offset, { duration: next.duration });
+  }
+
   /** Start (or restart) the source at a given offset within a clip. */
   _play(item, offset = 0, { duration = null } = {}) {
     // Restarting the countdown (watchdog respawn, resume after pause) must
@@ -1381,6 +1475,19 @@ export class PipelinePlayout extends EventEmitter {
       this._advance();
       return;
     }
+    // Fold this clip's shape into the profile before anything reads it.
+    // A change needs a new RTMP session, so hand off to _reshape and let it
+    // call back into _play once the new publisher is up.
+    const shape = this._shapeFor(this.selection?.video);
+    const shapeChanged = shape.width !== this.profile.width
+      || shape.height !== this.profile.height;
+    if (shapeChanged && this.publisher && !this._reshaping) {
+      this.profile = { ...this._box, ...shape };
+      this._reshape(item, offset, duration ?? item?.duration ?? null, shape);
+      return;
+    }
+    this.profile = { ...this._box, ...shape };
+
     this._killSource();
     this.holding = false;
     this.current = { item, offset, duration: duration ?? item.duration ?? null };

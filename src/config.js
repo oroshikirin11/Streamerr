@@ -67,6 +67,23 @@ const DEFAULTS = {
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
     // costs more than the decode saved. Measure with `cli.js benchmark`.
     hwDecode: false,
+    /**
+     * How the output frame is sized.
+     *
+     *   'fixed'  always width x height, bars padded in. The original
+     *            behaviour, and the only one that never reconnects.
+     *   'fit'    the content rectangle: 4:3 and scope keep their shape
+     *            instead of carrying bars. width x height stays a CEILING,
+     *            so a 4K source still comes down to it.
+     *   'source' the source's own display size, with NO ceiling — a 4K
+     *            file is encoded at 4K. Best quality where the hardware
+     *            can take it, unplayable where it cannot.
+     *
+     * Anything but 'fixed' costs a reconnect when the shape changes: the
+     * publisher owns one RTMP session and FLV announces the frame size
+     * once, at connect.
+     */
+    frameSize: 'fixed',
     // Retained for config compatibility only — the engine now ALWAYS
     // extracts embedded subtitles before their first broadcast. Burning them
     // straight from the container makes ffmpeg read the whole file a second
@@ -197,6 +214,16 @@ export function normalizeStoredEncoder() {
   clamp('height', 16, 4320, 1080);
   clamp('fps', 1, 240, 30);
   clamp('gopSeconds', 1, 60, 2);
+  if (enc.trimBars !== undefined) {
+    // Short-lived boolean predecessor; true meant what 'fit' means now.
+    fixed.push(`trimBars=${JSON.stringify(enc.trimBars)}→frameSize=${enc.trimBars ? 'fit' : 'fixed'}`);
+    enc.frameSize = enc.trimBars ? 'fit' : 'fixed';
+    delete enc.trimBars;
+  }
+  if (enc.frameSize !== undefined && !['fixed', 'fit', 'source'].includes(enc.frameSize)) {
+    fixed.push(`frameSize=${JSON.stringify(enc.frameSize)}→fixed`);
+    enc.frameSize = 'fixed';
+  }
   if (enc.device !== undefined && !/^\/dev\/dri\/[A-Za-z0-9_-]+$/.test(String(enc.device))) {
     fixed.push(`device=${JSON.stringify(enc.device)}→/dev/dri/renderD128`);
     enc.device = '/dev/dri/renderD128';

@@ -88,6 +88,15 @@
    */
   const encoderList = $derived(encoders?.encoders ?? options?.encoderBackends ?? []);
 
+  /** Frame-size mode, tolerating a config written by an older build. */
+  const frameSize = $derived(
+    ['fixed', 'fit', 'source'].includes(cfg?.encoder?.frameSize)
+      ? cfg.encoder.frameSize
+      : (cfg?.encoder?.trimBars ? 'fit' : 'fixed'));
+  /** A concrete 4:3 size for the explanation, derived from the chosen height. */
+  const fitExample = $derived(
+    `${Math.round(((+cfg?.encoder?.height || 1080) * 4 / 3) / 2) * 2}×${+cfg?.encoder?.height || 1080}`);
+
   /** Point every dropdown at whatever is actually stored. */
   function syncPickers() {
     fpsSel = pick(FPS_PRESETS, cfg.encoder.fps);
@@ -299,6 +308,7 @@
           videoBitrate: cfg.encoder.videoBitrate,
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
+          frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
@@ -550,6 +560,41 @@
       Keyframe interval must divide Owncast's segment length. Two seconds is
       what its documentation recommends; changing it can break segmenting.
     </p>
+
+    <label style="margin-top:14px;">Frame size</label>
+    <div class="segc" role="radiogroup" aria-label="Frame size">
+      <button class:on={frameSize === 'fixed'}
+              onclick={() => (cfg.encoder.frameSize = 'fixed')}>Always the same</button>
+      <button class:on={frameSize === 'fit'}
+              onclick={() => (cfg.encoder.frameSize = 'fit')}>Fit the picture</button>
+      <button class:on={frameSize === 'source'}
+              onclick={() => (cfg.encoder.frameSize = 'source')}>Match the file</button>
+    </div>
+    <p class="muted small">
+      {#if frameSize === 'fixed'}
+        Every clip is sent at {cfg.encoder.width}&times;{cfg.encoder.height}, with
+        black bars added around anything that is not that shape. The stream
+        never reconnects.
+      {:else if frameSize === 'fit'}
+        Bars are dropped: a 4:3 episode goes out at {fitExample} instead of
+        {cfg.encoder.width}&times;{cfg.encoder.height} &mdash; about a fifth less to
+        encode &mdash; and a scope film loses its top and bottom bars.
+        <strong>{cfg.encoder.width}&times;{cfg.encoder.height} stays the maximum</strong>,
+        so a 4K file still comes down to it.
+      {:else}
+        Each file is sent at its own size, <strong>with no maximum</strong> &mdash; a
+        4K file is encoded at 4K, which most machines cannot do in real time.
+        The resolution above is ignored. Choose this only if you know the
+        hardware can keep up.
+      {/if}
+    </p>
+    {#if frameSize !== 'fixed'}
+      <p class="warnline">
+        The frame size is fixed for one connection, so moving between clips of
+        different shapes reconnects the stream and viewers see it drop for a
+        moment. Within a series that never happens.
+      </p>
+    {/if}
 
     <label>Encoder</label>
     {#if encoderList.length}
