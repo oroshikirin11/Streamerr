@@ -36,9 +36,31 @@
   let player = null;
   let feed = $state('off');            // off | live | unsupported
   let retryTimer = null;
+  /**
+   * The frame's shape, which is NOT fixed at 16:9.
+   *
+   * With the frame-size modes a 4:3 episode broadcasts at 1440x1080. A
+   * stage locked to 16:9 would letterbox that picture inside itself, and an
+   * overlay placed near an edge would then sit on the bar rather than on
+   * the picture — while appearing correct here. So the stage takes its
+   * shape from what is actually going out: the live video's intrinsic size
+   * when there is one, the configured output otherwise.
+   */
+  let liveAspect = $state(null);
+  const aspect = $derived(
+    liveAspect
+    ?? ((+cfg?.encoder?.width || 1920) / (+cfg?.encoder?.height || 1080)));
+
+  function onMeta() {
+    if (video?.videoWidth > 0 && video?.videoHeight > 0) {
+      liveAspect = video.videoWidth / video.videoHeight;
+    }
+  }
 
   function stopFeed() {
     clearTimeout(retryTimer); retryTimer = null;
+    // The shape came from the feed; without it, fall back to the config.
+    liveAspect = null;
     try { player?.destroy(); } catch { /* already gone */ }
     player = null;
   }
@@ -233,10 +255,12 @@
     <!-- The frame. 16:9 because that is the configured output; items are
          positioned as percentages so this scales to any window width. -->
     <div class="stagewrap">
-      <div class="stage" bind:this={stage} onpointerdown={(e) => { if (e.target === stage) selected = null; }}>
+      <div class="stage" bind:this={stage} style={`aspect-ratio:${aspect}`}
+           onpointerdown={(e) => { if (e.target === stage) selected = null; }}>
         <!-- Behind everything, and never a drag target: clicking the picture
              should deselect, exactly as clicking bare stage does. -->
         <video bind:this={video} class="feed" class:on={feed === 'live'}
+               onloadedmetadata={onMeta} onresize={onMeta}
                muted playsinline disablepictureinpicture></video>
         <div class="grid" aria-hidden="true"></div>
         {#each items as item (item.id)}
@@ -360,7 +384,7 @@
   @media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
 
   .stage {
-    position: relative; aspect-ratio: 16 / 9; container-type: size;
+    position: relative; container-type: size;
     background: #0b0d10; border: 1px solid var(--border); border-radius: 12px;
     overflow: hidden; user-select: none; touch-action: none;
   }
@@ -376,7 +400,7 @@
   }
   .feed {
     position: absolute; inset: 0; width: 100%; height: 100%;
-    object-fit: contain; background: #000;
+    object-fit: fill; background: #000;
     opacity: 0; transition: opacity .25s ease; pointer-events: none;
   }
   .feed.on { opacity: 1; }
