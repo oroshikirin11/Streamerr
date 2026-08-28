@@ -380,6 +380,48 @@ export class PipelinePlayout extends EventEmitter {
     this._watch.unref?.();
   }
 
+  /**
+   * Encoded-but-unaired content on the chunked path, in seconds: the
+   * delivered-but-unaired window plus the cache that has not been handed
+   * over yet. Zero on the streaming path, where nothing encodes ahead.
+   */
+  _cachedAhead(pos = this._onAir().position) {
+    const sc = this.scheduler;
+    if (!sc) return 0;
+    const edge = sc._startOf?.(sc.nextToWrite) ?? pos;
+    return Math.max(0, edge - pos) + (sc.cachedSeconds?.() ?? 0);
+  }
+
+  /**
+   * Reserve the broadcast can spend before a stall reaches air, with the
+   * axis it should be drawn against.
+   *
+   * On the streaming path that is the bank and nothing else. On the chunked
+   * path the bank is only a thin delivery window in front of a RAM cushion
+   * that can hold minutes, so reporting the bank alone understated the real
+   * reserve badly — the meter read near zero while the cache was full.
+   *
+   * _cachedAhead already spans delivered-but-unaired PLUS the undelivered
+   * cache, so it IS the total: adding the bank to it would count the
+   * delivery window twice.
+   */
+  _reserve() {
+    const perSecond = this._kbps * 125;
+    const sc = this.scheduler;
+    if (!sc) {
+      return {
+        seconds: (this._bankBytes ?? 0) / perSecond,
+        max: this._bankMax / perSecond,
+      };
+    }
+    return {
+      seconds: this._cachedAhead(),
+      // The cushion the cache is allowed to build, so a minutes-deep
+      // reserve is not drawn pegged against a 15-second bank axis.
+      max: sc.aheadSeconds ?? (this._bankMax / perSecond),
+    };
+  }
+
   _checkHealth() {
     // The chunked path has no single source process, but it still has a
     // bank and a publisher — and those are what the checks below actually
@@ -625,12 +667,7 @@ export class PipelinePlayout extends EventEmitter {
       // regions are exactly the instant-seek territory: 'delivered'
       // content the viewer has not seen yet belongs to the AHEAD band,
       // not the behind one it used to inflate.
-      cachedAhead: (() => {
-        const sc = this.scheduler;
-        if (!sc) return 0;
-        const edge = sc._startOf?.(sc.nextToWrite) ?? air.position;
-        return Math.max(0, edge - air.position) + (sc.cachedSeconds?.() ?? 0);
-      })(),
+      cachedAhead: this._cachedAhead(air.position),
       cachedBehind: (() => {
         const ks = this.scheduler?.keptStart?.();
         return ks == null ? 0 : Math.max(0, air.position - ks);
@@ -1955,9 +1992,10 @@ export class PipelinePlayout extends EventEmitter {
         // succession through every rebuild.
         speed: this.scheduler ? (this.scheduler.speed?.() ?? speed) : speed,
         drops: b.dropFrames,
-        // Bank reserve in seconds — how much stall the broadcast can absorb.
-        buffer: (this._bankBytes ?? 0) / (this._kbps * 125),
-        bufferMax: this._bankMax / (this._kbps * 125),
+        // Reserve in seconds — how much stall the broadcast can absorb.
+        // Bank on the streaming path, bank+cache on the chunked one.
+        buffer: this._reserve().seconds,
+        bufferMax: this._reserve().max,
       });
     });
     s.stdio[3]?.on('data', (d) => parser.push(d));

@@ -66,14 +66,26 @@
   /** Server-side switch (Settings) — hides the preview everywhere when off. */
   const previewAllowed = $derived(live && stream.preview !== false);
 
-  /** Bank reserve over the last ~45s, for the sidebar sparkline. */
+  /**
+   * Reserve over the last ~45s, for the sidebar sparkline. The server sends
+   * the bank on the streaming path and bank+cache on the chunked one, with
+   * the axis to match — a RAM cushion of minutes drawn against a 15s bank
+   * axis would sit pegged at full and say nothing.
+   */
   let bufPts = $state([]);
   let bufMax = $state(15);
   const lastBuf = $derived(bufPts.length ? bufPts[bufPts.length - 1] : 0);
+  /** Proportional, so it still means "nearly dry" on a minutes-deep cache,
+   *  with a 3s floor so a 15s bank keeps the threshold it always had. */
+  const bufLow = $derived(lastBuf < Math.max(3, bufMax * 0.2));
   const bufLine = $derived(bufPts
     .map((v, i) => `${((i / Math.max(1, bufPts.length - 1)) * 100).toFixed(1)},`
       + `${(24 - Math.min(1, v / bufMax) * 21).toFixed(1)}`)
     .join(' '));
+  /** Minutes once seconds stop being readable at a glance. */
+  const fmtBuf = (v) => (v < 90
+    ? `${Math.round(v)}s`
+    : `${Math.floor(v / 60)}m ${Math.round(v % 60)}s`);
 
   onMount(() => {
     const tick = setInterval(() => {
@@ -188,7 +200,13 @@
         if (msg.payload.cachedBehind != null) stream.cachedBehind = msg.payload.cachedBehind;
         if (msg.payload.rebuilding != null) stream.rebuilding = msg.payload.rebuilding;
         if (msg.payload.buffer != null && !counting && !paused) {
-          if (msg.payload.bufferMax) bufMax = msg.payload.bufferMax;
+          if (msg.payload.bufferMax) {
+            // Points plotted against a different axis are not comparable —
+            // carrying them across a chunked/streaming switch would draw a
+            // full bank as an empty cache, or the reverse.
+            if (Math.abs(msg.payload.bufferMax - bufMax) > 0.5) bufPts = [];
+            bufMax = msg.payload.bufferMax;
+          }
           bufPts = [...bufPts.slice(-89), msg.payload.buffer];
         }
       } else if (msg.type === 'error' || msg.type === 'warn') {
@@ -388,11 +406,12 @@
       {#if live && !counting && !paused && bufPts.length > 1}
         <!-- Encoded-but-unaired reserve: the slack the broadcast can spend
              before a slow scene shows on air. -->
-        <div class="bufrow" title="Buffered ahead of air — reserve the encoder has banked">
+        <div class="bufrow"
+             title="Encoded ahead of air — the stall the broadcast can absorb before it reaches viewers">
           <svg class="buf" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-            <polyline points={bufLine} class:low={lastBuf < 3} />
+            <polyline points={bufLine} class:low={bufLow} />
           </svg>
-          <span class="buflab" class:low={lastBuf < 3}>{Math.round(lastBuf)}s</span>
+          <span class="buflab" class:low={bufLow}>{fmtBuf(lastBuf)}</span>
         </div>
       {/if}
       <nav>
