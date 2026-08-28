@@ -72,10 +72,69 @@ function windowFor(item, duration) {
  * @param {string} [o.title]    substituted for {title} in text
  * @returns {string|null} an ASS script, or null if nothing is visible
  */
+/**
+ * A bouncing caption, as a run of \move legs.
+ *
+ * The picture path gets its bounce from an ffmpeg expression evaluated per
+ * frame. libass has no expression language, but it does not need one: our
+ * bounce is PIECEWISE LINEAR, and \move interpolates linearly over an
+ * event. So one event per leg — corner to edge — reproduces the path
+ * exactly rather than approximating it, and costs libass nothing, because
+ * the subtitle canvas is rasterised every frame regardless.
+ *
+ * Same closed form as bouncePlace() in overlay-image.js, evaluated on the
+ * MEDIA timeline so a caption keeps its place across a splice exactly as a
+ * picture does.
+ *
+ * The one inexact part is the text's extent. ffmpeg gives the picture path
+ * `w` and `h`; nothing here knows how wide a string renders, so it is
+ * estimated from the font size and the longest line. An estimate that is off
+ * only changes how close to the edge the caption turns — it is clamped so it
+ * can never leave the frame.
+ */
+const MAX_LEGS = 4000;
+
+function bounceLegs(item, {
+  width, height, start, end, extentW, extentH, index = 0,
+}) {
+  const speed = Math.min(1, Math.max(0.01, Number(item.speed) || 0.06));
+  const v = Math.max(1, speed * width);              // px/second, both axes
+  const rx = Math.max(1, width - extentW);
+  const ry = Math.max(1, height - extentH);
+  const tri = (u, r) => Math.abs(((u % (2 * r)) + 2 * r) % (2 * r) - r);
+  const at = (t) => {
+    const u = v * (t + index * 3.1);
+    return [
+      Math.round(tri(u, rx) + extentW / 2),
+      Math.round(tri(u, ry) + extentH / 2),
+    ];
+  };
+  // A leg ends whenever EITHER axis turns, which is every rx/v and ry/v.
+  const turns = new Set([start, end]);
+  for (const r of [rx, ry]) {
+    const period = r / v;
+    if (!(period > 0.01)) continue;
+    for (let k = Math.ceil((start + index * 3.1) / period); turns.size < MAX_LEGS; k += 1) {
+      const t = k * period - index * 3.1;
+      if (t >= end) break;
+      if (t > start) turns.add(t);
+    }
+  }
+  const times = [...turns].sort((a, b) => a - b);
+  const legs = [];
+  for (let i = 0; i < times.length - 1; i += 1) {
+    legs.push({ from: times[i], to: times[i + 1], a: at(times[i]), b: at(times[i + 1]) });
+  }
+  return legs;
+}
+
 export function overlayAss(items, {
   width = 1920, height = 1080, duration = null, startOffset = 0, title = '',
 } = {}) {
   const events = [];
+  // Staggers bouncing captions against each other, and against bouncing
+  // pictures, exactly as the picture path does.
+  let idx = 0;
   for (const item of items ?? []) {
     if (!item || item.enabled === false) continue;
     const win = windowFor(item, duration);
@@ -116,6 +175,37 @@ export function overlayAss(items, {
 
     const text = assText(String(item.text ?? '').replace(/\{title\}/g, title));
     if (!text) continue;
+
+    if (item.motion === 'bounce') {
+      /**
+       * The extent, estimated. See bounceLegs: nothing here can ask libass
+       * how wide a string renders, so the caption's box is derived from its
+       * font size and longest line, and clamped so an estimate that is off
+       * can only change where it turns, never let it leave the frame.
+       */
+      const lines = text.split('\\N');
+      const longest = Math.max(1, ...lines.map((l) => l.replace(/\{[^}]*\}/g, '').length));
+      const extentW = Math.min(width * 0.9, longest * size * 0.55);
+      const extentH = Math.min(height * 0.9, lines.length * size * 1.2);
+      // \pos is what \move replaces; everything else about the caption is
+      // unchanged, so it keeps its size, colour, outline and rotation.
+      const rest = tags.filter((t) => !t.startsWith('\\pos('));
+      const legs = bounceLegs(item, {
+        width, height, start: win[0], end: win[1], extentW, extentH, index: idx,
+      });
+      for (const leg of legs) {
+        const from = leg.from - startOffset;
+        const to = leg.to - startOffset;
+        if (to <= 0) continue;
+        events.push(
+          `Dialogue: 0,${hms(Math.max(0, from))},${hms(to)},Ov,,0,0,0,,`
+          + `{\\move(${leg.a[0]},${leg.a[1]},${leg.b[0]},${leg.b[1]})${rest.join('')}}${text}`,
+        );
+      }
+      idx += 1;
+      continue;
+    }
+
     events.push(
       `Dialogue: 0,${hms(Math.max(0, start))},${hms(end)},Ov,,0,0,0,,{${tags.join('')}}${text}`,
     );

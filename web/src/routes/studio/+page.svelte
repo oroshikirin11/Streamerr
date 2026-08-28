@@ -320,6 +320,37 @@
 
   function bouncePos(item, idx) {
     const size = Number(item.size) || 0.2;
+    /**
+     * A caption's extent is ESTIMATED, with the same formula the encoder
+     * uses in overlay-ass.js — deliberately, rather than measuring the real
+     * DOM box here. Measuring would be more accurate on this side only, and
+     * the two would then disagree; sharing one estimate makes the preview
+     * exact with respect to what actually goes out, which is the property
+     * that matters.
+     */
+    if (item.type !== 'image') {
+      const body = String(item.text ?? '').replace('{title}', 'Episode title');
+      const lines = body.split('\n');
+      const longest = Math.max(1, ...lines.map((l) => l.length));
+      // The encoder ROUNDS the font size to whole pixels, and the bounce
+      // range is derived from it. Using the exact fraction here left the
+      // range 1.8px wider, which is invisible for one leg and compounds with
+      // every reflection — 45px adrift after five minutes. Round the same
+      // way and the two stay locked together indefinitely.
+      const outH = +cfg?.encoder?.height || 1080;
+      const fs = Math.max(8, Math.round(size * outH));
+      const ew = Math.min(0.9, (longest * fs * 0.55) / (aspect * outH));
+      const eh = Math.min(0.9, (lines.length * fs * 1.2) / outH);
+      const rxT = Math.max(0.0001, 1 - ew);
+      const ryT = Math.max(0.0001, 1 - eh);
+      const tT = clock + idx * 3.1;
+      const vT = Math.min(1, Math.max(0, Number(item.speed) ?? BOUNCE_SPEED));
+      const triT = (u, r) => Math.abs(((u % (2 * r)) + 2 * r) % (2 * r) - r);
+      return {
+        x: triT(vT * tT, rxT) + ew / 2,
+        y: triT(vT * aspect * tT, ryT) + eh / 2,
+      };
+    }
     const ar = picAspect[item.file] || 1;
     // Work in units where the frame is 1 wide and 1/aspect tall, so both
     // axes share a scale and the rotation maths below is the ordinary one.
@@ -812,7 +843,6 @@
                sees the field, so offering it for text was offering something
                that silently did nothing. Text motion wants ASS \move, which
                is a different (and cheaper) implementation. -->
-          {#if sel.type === 'image'}
           <!-- Movement is described, never keyframed: the position is an
                expression the encoder evaluates per frame, so a moving
                picture is applied once like any other and costs no extra
@@ -836,6 +866,7 @@
             <!-- Stated where the choice is made, not in a log after the fact.
                  The cost is real and invisible from the editor: the operator
                  has no way to know a moving picture changes which graph runs. -->
+            {#if sel.type === 'image'}
             <p class="perfnote">
               <strong>Costs encoder headroom.</strong> The GPU can only place a
               picture once, so a moving one is drawn on the CPU, and the subtitle
@@ -843,7 +874,7 @@
               to realtime this can be what tips it into stalling — watch the
               console for a slow-clip report after applying.
             </p>
-          {/if}
+            {/if}
           {/if}
 
           {#if sel.type !== 'image'}
