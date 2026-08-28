@@ -176,37 +176,71 @@ export function vaapiImageOverlayChain(images, {
     // All of this runs once, on a single frame, before the picture is ever
     // handed to the GPU — which is why a logo can be free.
     const steps = ['format=rgba'];
-    /**
-     * Bounded by the FRAME, not just by the requested width.
-     *
-     * An overlay surface larger than the main frame is what iHD rejects:
-     * measured on the deployment, a 1536x1536 picture on a 1920x1080 frame
-     * returned -22 from h264_vaapi, and 1056x1056 on the same frame was
-     * accepted. The width alone is not the constraint — a tall picture asked
-     * for 80% of the width is 1536 high on a 1080 frame and overflows.
-     *
-     * force_original_aspect_ratio=decrease keeps the shape while fitting
-     * inside the box; force_divisible_by=2 keeps both sides even, which
-     * hardware surfaces want anyway.
-     */
-    const w = Math.max(2, Math.round((Number(img.size) || 0.2) * width));
-    steps.push(`scale=w=${Math.min(w, width)}:h=${height}`
-      + ':force_original_aspect_ratio=decrease:force_divisible_by=2');
+    // Even, because hardware surfaces want even dimensions and -2 only
+    // makes the HEIGHT even.
+    const w = Math.max(2, Math.round((Number(img.size) || 0.2) * width / 2) * 2);
+    // Scaled to the requested fraction of the frame width and NOT clamped to
+    // the frame. Overflow is handled by the crop below, which is both the
+    // correct thing for a picture dragged half off the edge and what the
+    // editor already shows — its stage clips rather than shrinking.
+    steps.push(`scale=w=${w}:h=-2`);
     const rot = Number(img.rotation) || 0;
     if (rot) {
       const rad = (rot * Math.PI / 180).toFixed(6);
       steps.push(`rotate=${rad}:c=none:ow=rotw(${rad}):oh=roth(${rad})`);
     }
+    const fx = frac(img.x, 0.5).toFixed(4);
+    const fy = frac(img.y, 0.5).toFixed(4);
+    /**
+     * Crop to the part of the picture that actually lands on the frame.
+     *
+     * This is the fix for a hard `h264_vaapi -22 (Invalid argument)` that
+     * KILLED a live broadcast, and the constraint is narrower than it first
+     * looked: it is not that the overlay SURFACE must fit inside the main
+     * frame, it is that the PLACED RECTANGLE must. Measured on the
+     * deployment's iHD driver — a 384-wide logo centred at x=0.8 sits at
+     * 1344..1728 and composites fine; the same logo at size 0.8 is 1536
+     * wide, sits at 768..2304, overhangs the 1920 edge by 384, and the
+     * encoder dies. Same story vertically, which is why a 1536x1536 picture
+     * failed while 1056x1056 in the same position was accepted.
+     *
+     * Cropping first means the surface handed to the GPU is always inside
+     * the frame, so the overhang can never reach the driver — and a picture
+     * dragged half off the edge shows its visible half instead of taking
+     * the broadcast down.
+     *
+     * Positions are fractions and clamped to 0..1, so the picture's centre
+     * is always on the frame and at least half of it always survives the
+     * crop; the width and height below cannot reach zero.
+     *
+     * Commas inside an option value would end the filter, hence esc().
+     */
+    const esc = (s) => s.replace(/,/g, '\\,');
+    const ox = `(${width}*${fx}-iw/2)`;       // desired left edge, may be < 0
+    const oy = `(${height}*${fy}-ih/2)`;
+    const even = (s) => `floor((${s})/2)*2`;
+    const cropX = `max(0,-${ox})`;
+    const cropY = `max(0,-${oy})`;
+    const cropW = even(`min(iw-${cropX},${width}-max(0,${ox}))`);
+    const cropH = even(`min(ih-${cropY},${height}-max(0,${oy}))`);
+    steps.push(esc(`crop=w=${cropW}:h=${cropH}:x=${cropX}:y=${cropY}`));
     steps.push('hwupload');
     filters.push(`[${idx}:v]${steps.join(',')}[img${i}]`);
 
     const next = i === list.length - 1 ? outLabel : `ov${i}`;
     const op = img.opacity != null && Number(img.opacity) < 1
       ? `:alpha=${Math.max(0, Math.min(1, Number(img.opacity))).toFixed(3)}` : '';
+    /**
+     * Placement clamped to the frame, which is the same arithmetic seen from
+     * the other side: `w`/`h` here are the CROPPED size, so when nothing was
+     * cropped this is exactly the old centred expression, and when the
+     * picture overhung an edge it lands flush against that edge — which is
+     * where the visible part belongs.
+     */
     filters.push(
       `[${cur}][img${i}]overlay_vaapi=`
-      + `x=(main_w*${frac(img.x, 0.5).toFixed(4)})-(w/2)`
-      + `:y=(main_h*${frac(img.y, 0.5).toFixed(4)})-(h/2)`
+      + `x=${esc(`max(0,min(main_w-w,main_w*${fx}-w/2))`)}`
+      + `:y=${esc(`max(0,min(main_h-h,main_h*${fy}-h/2))`)}`
       + `${op}:eof_action=repeat[${next}]`,
     );
     cur = next;

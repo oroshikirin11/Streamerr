@@ -863,6 +863,26 @@ export class PipelinePlayout extends EventEmitter {
     this._box.overlay = next;
     if (this.profile) this.profile.overlay = next;
     if (same) return false;
+    /**
+     * A new overlay set is a new experiment, so clear the one-shot picture
+     * demotion.
+     *
+     * Both of these are latched for the whole broadcast, which was right
+     * while a refusal was believed to be a driver capability. It is not: a
+     * refusal is geometry — an overlay rectangle overhanging the frame edge
+     * — and the crop in vaapiImageOverlayChain now makes that
+     * unconstructable. Leaving them latched had two costs, both seen live:
+     * a picture stayed switched off for the rest of the broadcast even
+     * after the operator resized the one that failed, and, worse, the
+     * second failure of a broadcast found `_gpuImgDemoted` already true,
+     * fell past the handler that exists to drop the picture, and STOPPED
+     * the stream. Dropping a logo is the intended failure; ending the
+     * broadcast is not.
+     */
+    this._gpuImgDemoted = false;
+    delete this._box.noGpuImages;
+    if (this.profile) delete this.profile.noGpuImages;
+    if (this._demoted) delete this._demoted.noGpuImages;
     if (!this.current || this.status !== 'running') return true;
 
     const item = this.current.item;
