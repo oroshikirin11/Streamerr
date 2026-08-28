@@ -889,6 +889,11 @@ app.put('/api/config', (req, res) => {
           size: num(it?.size, 0.01, 1, 0.06),
           rotation: num(it?.rotation, -360, 360, 0),
           opacity: num(it?.opacity, 0, 1, 1),
+          // Movement is a closed-form expression the encoder evaluates per
+          // frame, so an unknown kind must fall back to standing still
+          // rather than reaching the filter graph as a literal.
+          motion: it?.motion === 'bounce' ? 'bounce' : 'none',
+          speed: num(it?.speed, 0.01, 0.4, 0.06),
           colour: /^#[0-9a-f]{6}$/i.test(String(it?.colour)) ? it.colour : '#ffffff',
           font: String(it?.font ?? '').slice(0, 64),
           outline: it?.outline !== false,

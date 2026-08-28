@@ -43,7 +43,7 @@ import { analyseAssBand, bandScript } from './subband.js';
 import { overlayAss } from './overlay-ass.js';
 import {
   imageOverlayChain, vaapiImageOverlayChain, canvasImageChain,
-  splitStaticImages, staticLayerArgs,
+  splitStaticImages, staticLayerArgs, isMoving,
 } from './overlay-image.js';
 
 /**
@@ -1632,6 +1632,10 @@ export class PipelinePlayout extends EventEmitter {
         path,
         x: it.x, y: it.y, size: it.size, rotation: it.rotation,
         opacity: it.opacity,
+        // Without these two the whole feature is inert: the builders read
+        // the descriptor, not the config item, so a motion left out here
+        // never reaches the filter graph however correct the rest is.
+        motion: it.motion, speed: it.speed,
         animated: /\.gif$/i.test(name),
         start, end,
       });
@@ -3032,9 +3036,17 @@ export function buildSourceArgs({
    * opaque black box never gets the chance. And overlay_vaapi has no
    * `enable` option, so a picture with intro/outro timing cannot be done
    * here at all and sends the whole clip to the software path.
+   *
+   * A third: overlay_vaapi takes x/y as expressions but has no `eval`
+   * option, so it resolves them ONCE at init and the picture never moves.
+   * Verified against the filter's own option list. A bouncing picture
+   * therefore has to be drawn on the canvas, where `overlay` evaluates per
+   * frame — measured moving, two frames a second apart differ. It costs
+   * that clip the CPU composite, which is the honest price of the effect.
    */
   const gpuImages = imgList.length > 0
-    && Boolean(profile.gpuSubs) && !profile.noGpuImages;
+    && Boolean(profile.gpuSubs) && !profile.noGpuImages
+    && !imgList.some(isMoving);
   /**
    * Pictures the software chain draws — which is all of them.
    *
@@ -3324,6 +3336,12 @@ export function buildSourceArgs({
       layer ? splitStaticImages(imgList).live : imgList, {
         width: rect.w, firstInput: bgInput.length ? 3 : 2,
         inLabel: 'sub', outLabel: 'cv',
+        // Motion follows the MEDIA timeline, not this spawn's. `t` restarts
+        // at zero every time the source restarts, so without this a bouncing
+        // picture would jump back to its starting corner on every Apply,
+        // track change and seek — and the pre-encoded cushion would disagree
+        // with a re-encode of the same moment.
+        phase: offset,
       },
     );
     /**
@@ -3459,6 +3477,7 @@ export function buildSourceArgs({
   const up = upload || 'null';
   const imgs = imageOverlayChain(cpuImgs, {
     width: profile.width, firstInput: 1, inLabel: 'o', outLabel: 'vi',
+    phase: offset,
   });
 
   let filterArgs;
@@ -3571,6 +3590,9 @@ export function buildChunkArgs({
   const up = upload || 'null';
   const imgs = imageOverlayChain((overlayImages ?? []).filter((i) => i?.path), {
     width: profile.width, firstInput: 1, inLabel: 'o', outLabel: 'vi',
+    // Each chunk starts at its own point in the episode, so the bounce
+    // continues across a chunk boundary instead of restarting inside it.
+    phase: start,
   });
 
   let filterArgs;

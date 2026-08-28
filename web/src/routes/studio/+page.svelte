@@ -263,6 +263,7 @@
 
   function add(kind, file = null) {
     const base = { id: uid(), x: 0.5, y: 0.5, rotation: 0, opacity: 1,
+                   motion: 'none', speed: BOUNCE_SPEED,
                    when: 'always', seconds: 15, enabled: true };
     const item = kind === 'image'
       ? { ...base, type: 'image', file, text: '', size: 0.2 }
@@ -286,6 +287,68 @@
     items = items.map((i) => (i.id === id ? { ...i, ...fields } : i));
     dirty = true;
   }
+
+  /**
+   * Bouncing pictures — the same closed form the encoder uses.
+   *
+   * This MUST stay in step with bouncePlace() in src/ffmpeg/overlay-image.js.
+   * The stage is a preview of what goes out, and a motion that only matched
+   * approximately would be worse than none: the operator would place things
+   * against a lie. The encoder works in pixels against W-w and H-h; the same
+   * expression in frame fractions is what follows.
+   *
+   * Phase is deliberately NOT matched to air. The encoder's phase is the
+   * clip's media offset, and this preview runs a bank-depth behind anyway,
+   * so the picture here is in the right PATH at the right speed but not at
+   * the same point on it. Matching that would mean tracking the broadcast
+   * clock to no benefit — what matters for placement is the path.
+   */
+  const BOUNCE_SPEED = 0.06;      // fraction of frame width per second
+  let clock = $state(0);
+  let rafId = null;
+  const moves = (i) => i?.motion === 'bounce';
+
+  // Natural aspect per file, so the picture's HEIGHT is known — the encoder
+  // scales by width and keeps aspect, and the y bounce needs the result.
+  let picAspect = $state({});
+  function onPicLoad(e, file) {
+    const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
+    if (w > 0 && h > 0 && picAspect[file] !== w / h) {
+      picAspect = { ...picAspect, [file]: w / h };
+    }
+  }
+
+  function bouncePos(item, idx) {
+    const size = Number(item.size) || 0.2;
+    const ar = picAspect[item.file];
+    // Height as a fraction of the FRAME: width is size*frameW, height is
+    // that over the picture's aspect, expressed against frameH.
+    const ih = ar ? Math.min(1, (size * aspect) / ar) : size;
+    const rx = Math.max(0.0001, 1 - size);
+    const ry = Math.max(0.0001, 1 - ih);
+    const t = clock + idx * 3.1;
+    const v = Math.min(1, Math.max(0, Number(item.speed) ?? BOUNCE_SPEED));
+    const tri = (u, r) => Math.abs(((u % (2 * r)) + 2 * r) % (2 * r) - r);
+    // One speed in PIXELS per second for both axes, exactly as the encoder
+    // does it — which in fractions means the vertical rate is scaled by the
+    // frame's aspect. Equal fractional speeds would tilt the angle.
+    return {
+      x: tri(v * t, rx) + size / 2,
+      y: tri(v * aspect * t, ry) + ih / 2,
+    };
+  }
+
+  /** Only run a frame loop while something is actually moving. */
+  $effect(() => {
+    const any = items.some(moves);
+    if (any && rafId == null) {
+      const tick = () => { clock = performance.now() / 1000; rafId = requestAnimationFrame(tick); };
+      rafId = requestAnimationFrame(tick);
+    } else if (!any && rafId != null) {
+      cancelAnimationFrame(rafId); rafId = null;
+    }
+    return () => { if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; } };
+  });
 
   // ── direct manipulation ────────────────────────────────────────────────
   // Pointer events rather than mouse: one code path covers a trackpad, a
@@ -557,14 +620,15 @@
                onloadedmetadata={onMeta} onresize={onMeta}
                muted playsinline disablepictureinpicture></video>
         <div class="grid" aria-hidden="true"></div>
-        {#each items as item (item.id)}
+        {#each items as item, idx (item.id)}
           <!-- A picture gets no font-size: it is set inline for text, and an
                inline value would beat the class that collapses the line box.
                Left in, the box grew a whole line taller than the image and
                the resize handle sat well below the corner it belongs to. -->
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
                class:isimg={item.type === 'image'} class:burnt={burntIn(item)}
-               style={`left:${item.x * 100}%; top:${item.y * 100}%;
+               style={`left:${(moves(item) ? bouncePos(item, idx).x : item.x) * 100}%;
+                       top:${(moves(item) ? bouncePos(item, idx).y : item.y) * 100}%;
                        transform: translate(-50%,-50%);
                        ${item.type === 'image' ? ''
                          : `font-size:${item.size * 100}cqh; color:${item.colour};`}
@@ -599,6 +663,7 @@
                      scales it, so what is dragged here is what goes out. -->
                 <img class="pic" src={`/api/overlay/images/${encodeURIComponent(item.file)}`}
                      alt={item.file} draggable="false"
+                     onload={(e) => onPicLoad(e, item.file)}
                      style={`width:${item.size * 100}cqw`} />
               {:else}
                 <!-- No whitespace inside the span: `white-space: pre` renders
@@ -680,6 +745,29 @@
           <label>Opacity <span class="muted small">{Math.round((sel.opacity ?? 1) * 100)}%</span></label>
           <input type="range" min="5" max="100" step="1" value={(sel.opacity ?? 1) * 100}
                  oninput={(e) => patch(sel.id, { opacity: +e.currentTarget.value / 100 })} />
+
+          <!-- Movement is described, never keyframed: the position is an
+               expression the encoder evaluates per frame, so a moving
+               picture is applied once like any other and costs no extra
+               splices however long it runs. -->
+          <label>Movement</label>
+          <select value={sel.motion ?? 'none'}
+                  onchange={(e) => patch(sel.id, { motion: e.currentTarget.value })}>
+            <option value="none">Stay where I put it</option>
+            <option value="bounce">Bounce around the frame</option>
+          </select>
+
+          {#if sel.motion === 'bounce'}
+            <label>Speed <span class="muted small">{Math.round((sel.speed ?? BOUNCE_SPEED) * 100)}% of the frame per second</span></label>
+            <input type="range" min="1" max="40" step="1"
+                   value={(sel.speed ?? BOUNCE_SPEED) * 100}
+                   oninput={(e) => patch(sel.id, { speed: +e.currentTarget.value / 100 })} />
+            <p class="muted small">
+              It travels corner to corner and turns at the edges, so where you
+              drag it no longer matters — the frame decides. Drawn on the CPU,
+              because the GPU compositor can only place a picture once.
+            </p>
+          {/if}
 
           {#if sel.type !== 'image'}
             <label style="display:flex; align-items:center; gap:8px;">

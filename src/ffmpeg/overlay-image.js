@@ -29,6 +29,48 @@ const frac = (v, fallback) => {
 /** Frame-fraction placement, centred on the point like the text's \an5. */
 const place = (x, y) => `x=(W*${x.toFixed(4)})-w/2:y=(H*${y.toFixed(4)})-h/2`;
 
+/** Fraction of the frame width a bouncing picture travels each second. */
+const DEFAULT_SPEED = 0.06;
+
+/**
+ * The old screensaver bounce, as a closed form rather than a simulation.
+ *
+ * A bounce between two edges is a triangle wave, and a triangle wave has an
+ * exact expression: `abs(mod(u, 2R) - R)` sweeps 0..R..0 for ever. So the
+ * position is a pure function of `t`, which is what makes this affordable —
+ * ffmpeg evaluates it per frame inside the already-running encoder, and
+ * nothing has to re-apply, re-spawn or keep state to move a picture.
+ *
+ * Being stateless is not just tidy, it is REQUIRED here. The engine encodes a
+ * cushion ahead of air and replays those packets later, so the same media
+ * timestamp must always produce the same frame. Anything driven by a
+ * wall-clock or an accumulator would put the picture in one place in the
+ * cushion and somewhere else on a re-encode of the same moment.
+ *
+ * `t` restarts at zero on every spawn — and a spawn happens on every Apply,
+ * every track change and every seek — so the caller passes the clip's media
+ * offset as `phase`. Position then follows the MEDIA timeline, and a splice
+ * leaves the picture exactly where it was instead of teleporting it home.
+ *
+ * The two axes share one speed, so travel is diagonal like the original. They
+ * do not share a period: the ranges W-w and H-h differ, so the path keeps
+ * finding new corners instead of retracing one diagonal.
+ */
+const bouncePlace = (img, width, phase, index) => {
+  const v = Math.max(1, frac(img.speed, DEFAULT_SPEED) * width);   // px/second
+  // A per-picture stagger, so two bouncing logos do not travel welded
+  // together. Deterministic, because the cushion has to be reproducible.
+  const p = (Number(phase) || 0) + index * 3.1;
+  const u = `(${v.toFixed(3)}*(t+${p.toFixed(3)}))`;
+  // Commas inside an option value would end the filter, exactly as in
+  // enableExpr. mod() is the only place here that needs it.
+  const wave = (range) => `abs(mod(${u}\\,2*${range})-${range})`;
+  return `x=${wave('(W-w)')}:y=${wave('(H-h)')}`;
+};
+
+/** True when the picture's POSITION is a function of time. */
+export const isMoving = (img) => img?.motion === 'bounce';
+
 /**
  * Commas inside an option value would end the filter. `enable` is the only
  * place here that needs it, and getting it wrong turns `between(t,0,15)`
@@ -48,7 +90,7 @@ const enableExpr = (s, e) => `:enable=between(t\\,${s.toFixed(3)}\\,${e.toFixed(
  *   nothing to draw, so callers can keep their existing graph untouched.
  */
 export function imageOverlayChain(images, {
-  width = 1920, firstInput = 1, inLabel = 'in', outLabel = 'out',
+  width = 1920, firstInput = 1, inLabel = 'in', outLabel = 'out', phase = 0,
 } = {}) {
   const list = (images ?? []).filter((i) => i?.path);
   if (!list.length) return { inputs: [], filters: [], looping: false };
@@ -121,8 +163,11 @@ export function imageOverlayChain(images, {
      * auto rather than rgb so the CPU burn-in path, where the main input
      * really is YUV, keeps picking yuv420 exactly as before.
      */
+    const at = isMoving(img)
+      ? bouncePlace(img, width, phase, i)
+      : place(frac(img.x, 0.5), frac(img.y, 0.5));
     filters.push(
-      `[${cur}][img${i}]overlay=${place(frac(img.x, 0.5), frac(img.y, 0.5))}`
+      `[${cur}][img${i}]overlay=${at}`
       + `:eof_action=repeat:format=auto${timed}[${next}]`,
     );
     cur = next;
@@ -308,15 +353,18 @@ export function vaapiImageOverlayChain(images, {
  * ones that cannot.
  *
  * A picture is bakeable when it looks the same on every frame of the clip:
- * no intro/outro window, and not an animated GIF. Those two are the only
- * things that make a picture's pixels a function of time.
+ * no intro/outro window, not an animated GIF, and not moving. Those three
+ * are the only things that make a picture's contribution a function of time
+ * — the first two because its pixels change, the third because its position
+ * does, which a single flattened still cannot express either.
  */
 export function splitStaticImages(images) {
   const baked = [];
   const live = [];
   for (const img of (images ?? []).filter((i) => i?.path)) {
-    if (img.start == null && img.end == null && !img.animated) baked.push(img);
-    else live.push(img);
+    if (img.start == null && img.end == null && !img.animated && !isMoving(img)) {
+      baked.push(img);
+    } else live.push(img);
   }
   return { baked, live };
 }
