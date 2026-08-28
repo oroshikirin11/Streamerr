@@ -794,8 +794,17 @@
                    oninput={(e) => patch(sel.id, { speed: +e.currentTarget.value / 100 })} />
             <p class="muted small">
               It travels corner to corner and turns at the edges, so where you
-              drag it no longer matters — the frame decides. Drawn on the CPU,
-              because the GPU compositor can only place a picture once.
+              drag it no longer matters — the frame decides.
+            </p>
+            <!-- Stated where the choice is made, not in a log after the fact.
+                 The cost is real and invisible from the editor: the operator
+                 has no way to know a moving picture changes which graph runs. -->
+            <p class="perfnote">
+              <strong>Costs encoder headroom.</strong> The GPU can only place a
+              picture once, so a moving one is drawn on the CPU, and the subtitle
+              canvas runs at full rate instead of half. On a title already close
+              to realtime this can be what tips it into stalling — watch the
+              console for a slow-clip report after applying.
             </p>
           {/if}
 
@@ -1137,5 +1146,13 @@
     border-radius: 6px; color: var(--text); cursor: pointer;
   }
   .warnbar .inline:disabled { opacity: 0.5; cursor: default; }
+  /* Loud enough to be read before the choice is made, quiet enough not to
+     look like an error — it is a cost, not a fault. */
+  .perfnote {
+    margin: 8px 0 0; padding: 7px 9px; border-radius: 8px; font-size: 12px;
+    line-height: 1.45; color: var(--text);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger) 10%, var(--surface-2));
+  }
   .head button.warn { border-color: var(--accent); color: var(--accent); }
 </style>

@@ -1796,6 +1796,7 @@ export class PipelinePlayout extends EventEmitter {
         src = readFileSync(conv, 'utf8');
       }
 
+      this._subInfo = { events: (src.match(/^Dialogue:/gm) ?? []).length };
       const band = analyseAssBand(src, { width: rect.w, height: rect.h });
       /**
        * Say why, because otherwise there is no way to tell.
@@ -1989,6 +1990,7 @@ export class PipelinePlayout extends EventEmitter {
     // Per clip, not per process: a reason left over from the previous title
     // would be reported as this one's.
     this._bandInfo = null;
+    this._subInfo = null;
     this.position = offset;
 
     const cached = this._cachedSubs(item.srcPath);
@@ -2121,7 +2123,9 @@ export class PipelinePlayout extends EventEmitter {
     const head = `Encoding at ${speed}x — slower than realtime, the stream will stall`;
     const body = this._diagnose();
     const foot = [
-      'If none of that can change, lower the output resolution for this title.',
+      'If none of that can change, the machine may simply be too small for this',
+      'title — transcoding hardware is the other half of the equation. Lowering',
+      'the output resolution is the cheapest way to buy headroom either way.',
       `Report it with this block: ${ISSUES_URL}`,
     ];
     // Left rule only. The lines vary a lot in length and a right-hand border
@@ -2153,23 +2157,38 @@ export class PipelinePlayout extends EventEmitter {
    */
   _diagnose() {
     const out = [];
+    const p0 = this.profile ?? {};
     const v = this.selection?.video ?? null;
     if (v) {
-      const hw = !this.profile?.swDecode && gpuDecodable(v);
-      out.push(`source ${v.codec ?? 'unknown'}${v.pixFmt ? ` ${v.pixFmt}` : ''}`
+      const hw = !p0.swDecode && gpuDecodable(v);
+      const dims = v.width && v.height ? ` ${v.width}x${v.height}` : '';
+      let fps = '';
+      try {
+        const eff = effectiveFps(v, this.profile);
+        if (eff?.fps) fps = ` @ ${eff.fps}fps`;
+      } catch { /* diagnosis must never throw on the warning path */ }
+      out.push(`source ${v.codec ?? 'unknown'}${v.pixFmt ? ` ${v.pixFmt}` : ''}${dims}${fps}`
         + ` — ${hw ? 'hardware' : 'SOFTWARE'} decode`
         + (/10le|10be|p010/i.test(v.pixFmt ?? '') ? ', 10-bit costs ~1.6x 8-bit' : ''));
+      // Decode scales with the SOURCE, not the output. A 4K file downscaled
+      // to 1080p costs four times a 1080p one and the old report hid that.
+      if (v.width && v.height && p0.width && p0.height
+        && (v.width !== p0.width || v.height !== p0.height)) {
+        out.push(`scaling ${v.width}x${v.height} -> ${p0.width}x${p0.height} every frame`);
+      }
+      if (v.hdr) out.push('HDR source — tonemapped on the GPU every frame');
     }
     const sub = this.selection?.subtitle;
     if (!sub) {
       out.push('no subtitles — not the cause');
     } else if (sub.bitmap) {
       out.push(`bitmap subtitles (${sub.codec ?? '?'}) — always CPU, never banded`);
-    } else if (this._bandInfo?.applied) {
-      out.push(`subtitle band ${this._bandInfo.height}px — already reduced`);
     } else {
-      out.push('full-height subtitle canvas'
-        + (this._bandInfo?.reason ? ` — band refused: ${this._bandInfo.reason}` : ''));
+      const n = this._subInfo?.events ? ` (${this._subInfo.events} events)` : '';
+      out.push(this._bandInfo?.applied
+        ? `subtitle band ${this._bandInfo.height}px${n} — already reduced`
+        : `full-height subtitle canvas${n}`
+          + (this._bandInfo?.reason ? ` — band refused: ${this._bandInfo.reason}` : ''));
     }
     const imgs = (this.profile?.overlay ?? []).filter((i) => i?.type !== 'text');
     if (imgs.length) {
@@ -2204,9 +2223,24 @@ export class PipelinePlayout extends EventEmitter {
 
     // The lever, with its current value, so it can be changed without
     // going to look it up.
-    const p = this.profile ?? {};
-    out.push(`output ${p.width ?? '?'}x${p.height ?? '?'} at ${p.videoBitrate ?? '?'}`
-      + ' — the lever with the most headroom');
+    // A software encode would dwarf everything above it, so name it.
+    out.push(`output ${p0.width ?? '?'}x${p0.height ?? '?'} at ${p0.videoBitrate ?? '?'}`
+      + `, ${p0.backend ?? 'unknown'} encoder — the lever with the most headroom`);
+
+    /**
+     * The machine, because everything above is only expensive RELATIVE to it.
+     *
+     * The same clip streams comfortably on a desktop and stalls on a small
+     * mini-PC, so a report without the hardware cannot be judged by anyone
+     * reading it later — including us.
+     */
+    try {
+      const cpu = cpus?.()[0]?.model?.replace(/\s+/g, ' ').trim() ?? 'unknown CPU';
+      const gb = Math.round((totalmem?.() ?? 0) / 1073741824);
+      out.push(`host ${cpu}, ${availableCores()} cores usable`
+        + (gb ? `, ${gb}GB RAM` : '')
+        + `, ${p0.device ?? 'no vaapi device'}`);
+    } catch { /* diagnosis must never throw on the warning path */ }
     return out;
   }
 
