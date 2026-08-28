@@ -351,6 +351,7 @@
   const nav = $derived([
     { href: '/', label: 'Library', icon: 'M4 5h16v11H4zM2 19h20' },
     { href: '/queue', label: 'Schedule', icon: 'M4 6h16M4 12h16M4 18h10' },
+    { href: '/studio', label: 'Studio', icon: 'M4 4h16v12H4zM9 20h6M12 16v4' },
     ...(devMode ? [{ href: '/console', label: 'Console', icon: 'M4 5h16v14H4zM7 9l3 3-3 3M12 15h5' }] : []),
     { href: '/settings', label: 'Settings', icon: 'M12 15a3 3 0 100-6 3 3 0 000 6zM19 12l2-1-2-4-2 1-3-2V3h-4v3L7 8 5 7 3 11l2 1v0l-2 1 2 4 2-1 3 2v3h4v-3l3-2 2 1 2-4-2-1z' },
   ]);

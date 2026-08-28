@@ -113,6 +113,12 @@ const DEFAULTS = {
   // nested .ffconcat scripts resolve relative paths against their own
   // directory and do not inherit -safe 0, so bare sibling filenames are the
   // only reliably portable form.
+  /**
+   * Studio overlays burnt into the broadcast. Fractions of the frame, not
+   * pixels: a 4:3 episode and a widescreen one go out at different sizes in
+   * the same broadcast, and pixels would move a caption between them.
+   */
+  overlay: { items: [] },
   paths: { cache: './cache', run: './run' },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
   // Run-ahead cache: when the encoders outpace the broadcast, let them
