@@ -593,7 +593,7 @@
               block. Rotating about the centre leaves the centre where it
               was, so startDrag/startRotate/startResize need no changes.
             -->
-            <div class="spin" style={`transform: rotate(${item.rotation}deg)`}>
+            <div class="turn" style={`transform: rotate(${item.rotation}deg)`}>
               {#if item.type === 'image'}
                 <!-- Width as a fraction of the FRAME, matching how ffmpeg
                      scales it, so what is dragged here is what goes out. -->
@@ -889,8 +889,8 @@
      drop the duplicate. visibility, not display, so the outline still
      traces the real extents of the text. */
   .item.burnt .txt, .item.burnt .pic { visibility: hidden; }
-  .item.burnt > .spin { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
-  .item.burnt:hover > .spin, .item.burnt.on > .spin { outline: 1px dashed var(--accent); }
+  .item.burnt > .turn { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
+  .item.burnt:hover > .turn, .item.burnt.on > .turn { outline: 1px dashed var(--accent); }
   /* No line box at all, so the outline hugs the picture and the resize
      handle sits on its actual corner.
      Named `isimg`, NOT `pic`: `pic` is the <img> inside, and that rule
@@ -904,10 +904,12 @@
   /* Selection and burnt-in outlines sit on the ROTATING wrapper, so they
      still hug the content when it is turned. On .item they would stay
      axis-aligned while the picture leaned. */
-  .item.on > .spin { outline: 1px dashed var(--accent); outline-offset: 3px; }
+  .item.on > .turn { outline: 1px dashed var(--accent); outline-offset: 3px; }
   /* The wrapper adds no box of its own — it only carries the rotation and
-     anchors the handles. */
-  .spin { position: relative; }
+     anchors the handles. NOT named .spin: that class is the pending
+     indicator's spinner, and sharing the name set every overlay turning
+     on a loop. */
+  .turn { position: relative; }
   /* On the text itself, NOT on .item. Multi-line captions need their line
      breaks kept, but on the container it also preserved the template's own
      newlines between blocks — 12px of invisible whitespace that widened the
