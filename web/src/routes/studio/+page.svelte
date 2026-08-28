@@ -896,7 +896,30 @@
     background: var(--surface-2); border-radius: 4px;
   }
 
-  .list li { display: flex; align-items: center; gap: 4px; }
+  /**
+   * min-width:0 is load-bearing, not tidiness.
+   *
+   * A flex item defaults to min-width:auto, which refuses to shrink below its
+   * content. With a long upload name nothing in the row would give, so the row
+   * grew past its own box and pushed the switch — which is flex:none, rightly
+   * — clear outside the card. Measured at 28-38px of overhang.
+   *
+   * Letting the name be the item that shrinks, and truncating it, keeps every
+   * fixed-size control inside the row whatever the file is called.
+   */
+  .list li { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  /* The first child is the row's label — a button here, a span there. Whatever
+     it is, it is the part that may shrink; every control after it is fixed. */
+  .list li > :first-child { flex: 1 1 auto; min-width: 0; }
+  .list .nm {
+    min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  /* Past about fifteen rows the card would push the rest of the panel off the
+     page. Cap it and scroll instead; the height is in rows, not pixels, so it
+     stays right if the row metrics change. */
+  .list {
+    max-height: calc(15 * 30px); overflow-y: auto; overscroll-behavior: contain;
+  }
   .list li.off .nm { text-decoration: line-through; opacity: 0.55; }
 
   /* A switch that reads as a switch: the state is visible in the list
