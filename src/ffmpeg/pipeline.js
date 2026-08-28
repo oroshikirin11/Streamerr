@@ -356,6 +356,10 @@ export class PipelinePlayout extends EventEmitter {
     /** Still-layer bakes in flight, so restarts do not pile up renders. */
     this._layerBaking = new Set();
     this._animBaking = new Set();
+    // Counted on the engine, not per source process: the whole point is to
+    // notice a PATTERN across clips, and each clip gets its own process.
+    this._slowReports = 0;
+    this._slowNoticed = false;
     /** Set when a clip is encoded in parallel chunks instead of streamed. */
     this.scheduler = null;
     this._clipBase = 0;
@@ -2930,19 +2934,24 @@ export class PipelinePlayout extends EventEmitter {
             warnedSlow = true;
             const x = Math.round(recent * 100) / 100;
             this.emit('tooslow', { speed: x });
-            /**
-             * Two audiences, two lengths.
-             *
-             * The toast is a glance: it has to say that something is wrong
-             * and where to look, and nothing else. The full breakdown went
-             * there first and arrived as a wall of wrapped box-drawing in a
-             * 200px-wide popup, which is worse than no diagnosis at all
-             * because it also buries the one sentence that mattered.
-             */
-            this.emit('warn', `Encoding at ${x}x — slower than realtime for `
-              + `${Math.round(SLOW_SUSTAIN_MS / 1000)}s, so the stream will stall. `
-              + 'The console has the breakdown.');
             this.emit('log', this._slowReport(x));
+            /**
+             * The breakdown goes to the console; the popup only says to look
+             * there, and only once a pattern is established.
+             *
+             * One slow clip is worth recording and not worth interrupting
+             * anyone over — it can be a single heavy title in an otherwise
+             * fine library. Three is a pattern. And the console is hidden
+             * behind Developer mode, so an operator who has never turned it
+             * on would otherwise be pointed at a page that is not in their
+             * sidebar.
+             */
+            this._slowReports = (this._slowReports ?? 0) + 1;
+            if (this._slowReports === 3 && !this._slowNoticed) {
+              this._slowNoticed = true;
+              this.emit('warn', 'Playback keeps falling behind. Details are in '
+                + 'the console — enable Developer mode in Settings to see it.');
+            }
           }
         } else {
           slowSince = null;
