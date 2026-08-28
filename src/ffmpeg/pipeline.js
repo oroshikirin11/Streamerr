@@ -185,6 +185,39 @@ export function gpuDecodable(video) {
   return !/(12|16)le?$/.test(pix) && !/44[04]/.test(pix) && !/422/.test(pix);
 }
 
+/**
+ * Would scale_vaapi do nothing at all for this clip?
+ *
+ * The GPU branches always emit `scale_vaapi=w=..:h=..:format=nv12`, and
+ * vaapi_vpp does not short-circuit an identity transform — it issues a
+ * VAProc pipeline regardless. For an 8-bit 4:2:0 source already at the
+ * output size that is a full-frame GPU pass per frame that changes not one
+ * pixel, on a device with no headroom to spare. Measured on the deployment
+ * from the other direction: ADDING one full-frame GPU pass took Mr. Robot
+ * from 1.03x to 0.909x, so this is worth roughly a tenth of the frame rate
+ * on every 1080p episode.
+ *
+ * Every condition here is a case where the filter is NOT a no-op:
+ *  - HDR needs the tonemap that rides the same filter.
+ *  - 10-bit decodes to P010 surfaces and h264_vaapi takes only NV12, so the
+ *    format conversion is load-bearing. Only yuv420p qualifies; anything
+ *    else keeps the scale.
+ *  - Anamorphic sources fall out for free: rect.w is the DISPLAY width, so
+ *    a stored-narrow file never matches its own coded width.
+ *  - Pillarboxed clips are excluded outright. The bars shapes are probed
+ *    per driver (pickPillarboxGraph) and one of them reuses scalePart after
+ *    the composite; replacing it there would silently change a graph whose
+ *    whole point is that it was measured, not reasoned about.
+ */
+export function scaleIsIdentity(video, profile, rect) {
+  if (!video || !profile || profile.noIdentitySkip) return false;
+  if (video.hdr || rect.bars) return false;
+  const pix = String(video.pixFmt ?? '').toLowerCase();
+  if (pix !== 'yuv420p' && pix !== 'yuvj420p') return false;
+  return Boolean(video.width) && video.width === rect.w
+    && video.height === rect.h;
+}
+
 export function contentRect(video, profile) {
   const W = profile.width;
   const H = profile.height;
@@ -2463,6 +2496,31 @@ export class PipelinePlayout extends EventEmitter {
           return;
         }
 
+        /**
+         * Demoted FIRST, before pictures and subtitles, because it is the
+         * only one of the three the viewer cannot see us give up.
+         *
+         * Skipping an identity scale_vaapi hands the decoder's own surfaces
+         * straight to the composite and the encoder, and a driver that
+         * dislikes that pool answers the way this driver answers everything
+         * it dislikes: -22, several stages downstream. Putting the pass back
+         * costs a tenth of the frame rate; dropping a picture or falling to
+         * CPU burn-in costs far more, so this is the cheapest thing to try
+         * before either of those.
+         */
+        if (!this._sawBlock && this.current && !this.profile?.noIdentitySkip
+            && !this._identityDemoted
+            && scaleIsIdentity(this.selection?.video, this.profile,
+              contentRect(this.selection?.video, this.profile))) {
+          this._identityDemoted = true;
+          this._demote({ noIdentitySkip: true });
+          this.emit('warn', 'This driver would not encode straight from the '
+            + `decoder's surfaces — restoring the scaling pass. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
         // Pictures are demoted BEFORE subtitles, and separately. A picture
         // composite failing says nothing about the subtitle composite, and
         // the subtitle one is the expensive thing to give up — dropping it
@@ -2579,7 +2637,16 @@ export class PipelinePlayout extends EventEmitter {
     // would buy a failed spawn and a stumble at every episode boundary for
     // a capability we already know is absent. It resets when the broadcast
     // does, which is when the device might genuinely be different.
-    const keep = this._demoted.noGpuImages ? { noGpuImages: true } : null;
+    //
+    // noIdentitySkip is kept for the same reason: whether the encoder will
+    // take the decoder's surfaces is a property of the driver, not of the
+    // clip, so re-arming buys one dead spawn per episode to relearn it.
+    const keep = this._demoted.noGpuImages || this._demoted.noIdentitySkip
+      ? {
+        ...(this._demoted.noGpuImages ? { noGpuImages: true } : null),
+        ...(this._demoted.noIdentitySkip ? { noIdentitySkip: true } : null),
+      }
+      : null;
     this._demoted = keep;
     this._gpuSubsDemoted = false;
   }
@@ -2785,10 +2852,13 @@ export function buildSourceArgs({
   if (profile.gpuFull && !sub.filter && !sub.needsComplex) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
-    const scalePart = selection?.video?.hdr
-      ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
-        + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
-      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
+    // null, not the scale: a full-frame VPP pass that changes nothing is
+    // still a full-frame VPP pass. See scaleIsIdentity.
+    const scalePart = scaleIsIdentity(selection?.video, profile, rect) ? 'null'
+      : selection?.video?.hdr
+        ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
+          + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
+        : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
     const vaapiChain = (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
       ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
@@ -2864,7 +2934,12 @@ export function buildSourceArgs({
     // mode=fast selects the faster VPP scaler; at a 2:1 downscale (4K to
     // 1080p) the output is visually identical and the EU cost drops.
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
-    const scalePart = selection?.video?.hdr
+    // null when the scale would be an identity transform — a VPP pass that
+    // changes nothing still costs a full frame. See scaleIsIdentity, which
+    // excludes every case where this filter is actually doing something,
+    // pillarboxed clips included.
+    const scalePart = scaleIsIdentity(selection?.video, profile, rect) ? 'null'
+      : selection?.video?.hdr
       ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
         + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
       // format=nv12 is load-bearing: 10-bit sources decode to P010 surfaces,
