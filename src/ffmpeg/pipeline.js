@@ -176,6 +176,17 @@ export function availableCores() {
   return cachedCores;
 }
 
+/**
+ * Where an operator reports a title that will not stream.
+ *
+ * PLACEHOLDER — set this to the project's real issues URL before release.
+ * It is printed inside the slow-clip report, which is designed to be pasted
+ * straight into an issue: it names the codec, the subtitle decision and the
+ * output settings, so a title can be diagnosed without anyone shipping the
+ * media.
+ */
+const ISSUES_URL = 'https://github.com/OWNER/Jellystreamerr/issues';
+
 export function gpuDecodable(video) {
   if (!video) return true;
   const codec = String(video.codec ?? '').toLowerCase();
@@ -1737,14 +1748,14 @@ export class PipelinePlayout extends EventEmitter {
     // sit anywhere on screen, so it keeps the full frame. Pictures do not
     // block a band: the builder moves them to the GPU instead of drawing
     // them into the canvas that is about to be cropped.
-    if (overlayPath) return null;
+    if (overlayPath) { this._bandInfo = { reason: 'a text overlay is in use' }; return null; }
     const sub = this.selection?.subtitle;
     if (!sub || sub.bitmap) return null;
     try {
       const rect = contentRect(this.selection?.video, this.profile);
       // Pillarboxed output pads and repositions the canvas; banding it too
       // is a second geometry change on the same graph, unverified.
-      if (rect.bars) return null;
+      if (rect.bars) { this._bandInfo = { reason: 'the output is pillarboxed' }; return null; }
 
       let src = readFileSync(extractedPath, 'utf8');
       const key = createHash('sha1')
@@ -1796,9 +1807,11 @@ export class PipelinePlayout extends EventEmitter {
        * about, and the analyser already knows.
        */
       if (!band.safe) {
+        this._bandInfo = { reason: band.reason };
         this.emit('log', `[band] full-height canvas — ${band.reason}\n`);
         return null;
       }
+      this._bandInfo = { applied: true, height: band.bandHeight };
       this.emit('log', `[band] ${rect.w}x${band.bandHeight} canvas`
         + ` — ${(100 - (band.bandHeight / rect.h) * 100).toFixed(0)}% less to rasterise\n`);
 
@@ -1973,6 +1986,9 @@ export class PipelinePlayout extends EventEmitter {
     this._killSource();
     this.holding = false;
     this.current = { item, offset, duration: duration ?? item.duration ?? null };
+    // Per clip, not per process: a reason left over from the previous title
+    // would be reported as this one's.
+    this._bandInfo = null;
     this.position = offset;
 
     const cached = this._cachedSubs(item.srcPath);
@@ -2094,6 +2110,106 @@ export class PipelinePlayout extends EventEmitter {
    * So: chunk only when this clip was going to burn on the CPU anyway, and
    * leave a core for the publisher, the audio and Node itself.
    */
+  /**
+   * The slow-clip report, framed so it survives a busy console.
+   *
+   * It is meant to be selected and pasted whole: every line is a fact the
+   * engine already had, and together they identify the title's cost without
+   * anyone having to send the file.
+   */
+  _slowReport(speed) {
+    const head = `Encoding at ${speed}x — slower than realtime, the stream will stall`;
+    const body = this._diagnose();
+    const foot = [
+      'If none of that can change, lower the output resolution for this title.',
+      `Report it with this block: ${ISSUES_URL}`,
+    ];
+    // Left rule only. The lines vary a lot in length and a right-hand border
+    // would either wrap them or pad the box out to the widest one.
+    const width = Math.min(96, Math.max(
+      head.length + 3, ...body.map((l) => l.length + 2), ...foot.map((l) => l.length + 2),
+    ));
+    const rule = (corner) => corner + '─'.repeat(Math.max(0, width));
+    return [
+      `\n┌─ ${head} ${'─'.repeat(Math.max(0, width - head.length - 3))}`,
+      ...body.map((l) => `│ ${l}`),
+      rule('├'),
+      ...foot.map((l) => `│ ${l}`),
+      rule('└'),
+      '',
+    ].join('\n');
+  }
+
+  /**
+   * Why THIS clip is expensive, assembled from what the engine already
+   * decided — printed only when it is actually in trouble.
+   *
+   * The warning used to end with a fixed sentence naming subtitles as the
+   * usual cause. On the one title that has genuinely run at the edge that
+   * was wrong twice over: the cost was AV1 10-bit decode, and its subtitle
+   * canvas could not have been made cheaper because the ink covers the
+   * whole frame. An operator sent to the wrong lever loses an evening, so
+   * this reports facts and leaves the conclusion to them.
+   */
+  _diagnose() {
+    const out = [];
+    const v = this.selection?.video ?? null;
+    if (v) {
+      const hw = !this.profile?.swDecode && gpuDecodable(v);
+      out.push(`source ${v.codec ?? 'unknown'}${v.pixFmt ? ` ${v.pixFmt}` : ''}`
+        + ` — ${hw ? 'hardware' : 'SOFTWARE'} decode`
+        + (/10le|10be|p010/i.test(v.pixFmt ?? '') ? ', 10-bit costs ~1.6x 8-bit' : ''));
+    }
+    const sub = this.selection?.subtitle;
+    if (!sub) {
+      out.push('no subtitles — not the cause');
+    } else if (sub.bitmap) {
+      out.push(`bitmap subtitles (${sub.codec ?? '?'}) — always CPU, never banded`);
+    } else if (this._bandInfo?.applied) {
+      out.push(`subtitle band ${this._bandInfo.height}px — already reduced`);
+    } else {
+      out.push('full-height subtitle canvas'
+        + (this._bandInfo?.reason ? ` — band refused: ${this._bandInfo.reason}` : ''));
+    }
+    const imgs = (this.profile?.overlay ?? []).filter((i) => i?.type !== 'text');
+    if (imgs.length) {
+      const moving = imgs.filter((i) => i?.motion === 'bounce').length;
+      out.push(`${imgs.length} picture overlay${imgs.length === 1 ? '' : 's'}`
+        + (moving ? `, ${moving} moving — forces the CPU composite and a full-rate canvas` : ''));
+    }
+
+    // The surface libass actually rasterises, which is the number the band
+    // exists to shrink — stated so it is obvious whether there is anything
+    // left to win there.
+    try {
+      const rect = contentRect(v, this.profile);
+      const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
+      const halfRate = !imgs.some((i) => i?.motion === 'bounce'
+        || i?.animated || i?.when === 'intro' || i?.when === 'outro');
+      if (sub && !sub.bitmap) {
+        out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
+          + `, uploaded and blended every frame`);
+      }
+      if (rect.bars) out.push('output is pillarboxed — bars cost encode time too');
+    } catch { /* diagnosis must never throw on the warning path */ }
+
+    // Which graph ran, and why the alternative was not taken. Chunking looks
+    // like the answer whenever a clip is slow and usually is not: it is the
+    // CPU path, so it trades a struggling GPU for software decode.
+    const workers = this._chunkWorkers();
+    out.push(workers > 1
+      ? `chunked path, ${workers} workers`
+      : 'single process — chunking declined; it is the CPU path, so it would'
+        + ' software-decode');
+
+    // The lever, with its current value, so it can be changed without
+    // going to look it up.
+    const p = this.profile ?? {};
+    out.push(`output ${p.width ?? '?'}x${p.height ?? '?'} at ${p.videoBitrate ?? '?'}`
+      + ' — the lever with the most headroom');
+    return out;
+  }
+
   _chunkWorkers() {
     // An explicit 2+ in the config still wins, for debugging on a box
     // whose behaviour we cannot predict. 0/1/absent means "decide for me".
@@ -2661,11 +2777,7 @@ export class PipelinePlayout extends EventEmitter {
           if (!warnedSlow && Date.now() - slowSince > 8000) {
             warnedSlow = true;
             this.emit('tooslow', { speed: Math.round(recent * 100) / 100 });
-            this.emit('warn',
-              `Encoding at ${Math.round(recent * 100) / 100}x — slower than realtime, so the stream `
-              + 'will stall. Burning subtitles is usually the cause; try a '
-              + 'lighter subtitle track, a lower output resolution, or turn '
-              + 'subtitles off for this title.');
+            this.emit('warn', this._slowReport(Math.round(recent * 100) / 100));
           }
         } else {
           slowSince = null;
