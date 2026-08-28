@@ -90,10 +90,9 @@
 
   /** Frame-size mode, tolerating a config written by an older build. */
   const frameSize = $derived(
-    ['fixed', 'fit', 'native'].includes(cfg?.encoder?.frameSize)
+    ['fixed', 'fit', 'native', 'source'].includes(cfg?.encoder?.frameSize)
       ? cfg.encoder.frameSize
-      : (cfg?.encoder?.frameSize === 'source' ? 'native'
-        : (cfg?.encoder?.trimBars ? 'fit' : 'fixed')));
+      : (cfg?.encoder?.trimBars ? 'fit' : 'fixed'));
   /** A concrete 4:3 size for the explanation, derived from the chosen height. */
   const fitExample = $derived(
     `${Math.round(((+cfg?.encoder?.height || 1080) * 4 / 3) / 2) * 2}×${+cfg?.encoder?.height || 1080}`);
@@ -549,6 +548,42 @@
         {/if}
       </div>
     </div>
+    <label>Frame size</label>
+    <select bind:value={cfg.encoder.frameSize}>
+      <option value="fixed">Always {cfg.encoder.width}&times;{cfg.encoder.height}</option>
+      <option value="fit">Fill the frame &mdash; up to the limit</option>
+      <option value="native">Match the file &mdash; up to the limit</option>
+      <option value="source">Match the file &mdash; ignore the limit</option>
+    </select>
+    <p class="muted small">
+      {#if frameSize === 'fixed'}
+        Every clip is sent at {cfg.encoder.width}&times;{cfg.encoder.height}, with
+        black bars added around anything of a different shape. The only mode
+        that never reconnects.
+      {:else if frameSize === 'fit'}
+        The picture keeps its shape and is scaled to fill the frame, so the
+        bars go away &mdash; a 4:3 episode goes out at {fitExample}, about a fifth
+        less to encode. Standard-definition material is <em>scaled up</em> to
+        fill, which costs effort without adding detail.
+      {:else if frameSize === 'native'}
+        Each file is sent at exactly its own size, only ever scaled
+        <em>down</em> &mdash; a 640&times;480 episode goes out at 640&times;480 rather
+        than five times the pixels for no extra detail. Sizes vary most here,
+        so expect the most reconnects.
+      {:else}
+        As above, but the resolution limit is <strong>ignored</strong> &mdash; a 4K
+        file is encoded at 4K, which most machines cannot do in real time.
+        Choose this only if you know the hardware keeps up.
+      {/if}
+    </p>
+    {#if frameSize !== 'fixed'}
+      <p class="warnline">
+        The frame size is fixed for one connection, so moving between clips of
+        different shapes reconnects the stream and viewers see it drop for a
+        moment. Within a series that never happens.
+      </p>
+    {/if}
+
     <p class="muted small">
       About {recommendedVbr.toLocaleString()} kbps suits
       {cfg.encoder.width}&times;{cfg.encoder.height} at {cfg.encoder.fps}fps, and
@@ -562,42 +597,6 @@
       what its documentation recommends; changing it can break segmenting.
     </p>
 
-    <label style="margin-top:14px;">Frame size</label>
-    <div class="segc" role="radiogroup" aria-label="Frame size">
-      <button class:on={frameSize === 'fixed'}
-              onclick={() => (cfg.encoder.frameSize = 'fixed')}>Always the same</button>
-      <button class:on={frameSize === 'fit'}
-              onclick={() => (cfg.encoder.frameSize = 'fit')}>Fill the frame</button>
-      <button class:on={frameSize === 'native'}
-              onclick={() => (cfg.encoder.frameSize = 'native')}>Match the file</button>
-    </div>
-    <p class="muted small">
-      {#if frameSize === 'fixed'}
-        Every clip is sent at {cfg.encoder.width}&times;{cfg.encoder.height}, with
-        black bars added around anything that is not that shape. The stream
-        never reconnects.
-      {:else if frameSize === 'fit'}
-        The picture keeps its shape and is scaled to fill the frame, so the
-        bars go away: a 4:3 episode goes out at {fitExample} instead of
-        {cfg.encoder.width}&times;{cfg.encoder.height} &mdash; about a fifth less to
-        encode. Standard-definition material is <em>scaled up</em> to fill,
-        which costs encoding effort without adding detail.
-      {:else}
-        Every file is sent at exactly its own size, only ever scaled
-        <em>down</em> &mdash; a 640&times;480 episode goes out at 640&times;480 rather
-        than five times the pixels for no extra detail. Anything larger than
-        {cfg.encoder.width}&times;{cfg.encoder.height} comes down to it, so raise
-        the resolution above if you want 4K out. Sizes vary most in this mode,
-        so expect the most reconnects.
-      {/if}
-    </p>
-    {#if frameSize !== 'fixed'}
-      <p class="warnline">
-        The frame size is fixed for one connection, so moving between clips of
-        different shapes reconnects the stream and viewers see it drop for a
-        moment. Within a series that never happens.
-      </p>
-    {/if}
 
     <label>Encoder</label>
     {#if encoderList.length}

@@ -1401,7 +1401,7 @@ export class PipelinePlayout extends EventEmitter {
     const mode = this._box.frameSize ?? 'fixed';
     if (mode === 'fixed' || !video?.width || !video?.height) return box;
 
-    if (mode === 'native') {
+    if (mode === 'native' || mode === 'source') {
       // The source's DISPLAY size: anamorphic material is stored narrow and
       // stretched at playback, and encoding the stored size would squash it.
       let vw = video.width;
@@ -1411,6 +1411,11 @@ export class PipelinePlayout extends EventEmitter {
       // Only ever downscale. Upscaling 640x480 to fill 1080 costs five
       // times the macroblocks and adds no detail the source did not have —
       // the viewer's player does that for free.
+      // 'source' has no ceiling at all; bounded only at 8K, past which
+      // this is a broken probe rather than a file any encoder will take.
+      if (mode === 'source') {
+        return { width: Math.min(7680, even(vw)), height: Math.min(4320, even(video.height)) };
+      }
       if (vw <= box.width && video.height <= box.height) {
         return { width: even(vw), height: even(video.height) };
       }

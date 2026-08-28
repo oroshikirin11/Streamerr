@@ -77,8 +77,11 @@ const DEFAULTS = {
      *   'native' the source's own size, downscaled only when it exceeds
      *            width x height. Never upscales, so a 640x480 file is
      *            encoded at 640x480 rather than five times the macroblocks
-     *            for no extra detail. Raise the resolution above if you
-     *            want 4K out; that is what makes the ceiling meaningful.
+     *            for no extra detail.
+     *   'source' the same, but with NO ceiling: a 4K file is encoded at 4K
+     *            whatever width x height says. Reachable by raising the
+     *            resolution instead, but that also enlarges the other two
+     *            modes — this asks for it directly.
      *
      * Anything but 'fixed' costs a reconnect when the shape changes: the
      * publisher owns one RTMP session and FLV announces the frame size
@@ -221,14 +224,7 @@ export function normalizeStoredEncoder() {
     enc.frameSize = enc.trimBars ? 'fit' : 'fixed';
     delete enc.trimBars;
   }
-  if (enc.frameSize === 'source') {
-    // Uncapped native was replaced by 'native', which honours the
-    // resolution setting — raising that is the way to ask for a bigger
-    // frame, rather than a mode that silently ignores it.
-    fixed.push('frameSize=source→native');
-    enc.frameSize = 'native';
-  }
-  if (enc.frameSize !== undefined && !['fixed', 'fit', 'native'].includes(enc.frameSize)) {
+  if (enc.frameSize !== undefined && !['fixed', 'fit', 'native', 'source'].includes(enc.frameSize)) {
     fixed.push(`frameSize=${JSON.stringify(enc.frameSize)}→fixed`);
     enc.frameSize = 'fixed';
   }
