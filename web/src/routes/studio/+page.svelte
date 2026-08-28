@@ -177,6 +177,7 @@
     try {
       cfg = await api.config();
       items = (cfg.overlay?.items ?? []).map((i) => ({ ...i, id: i.id ?? uid() }));
+      try { ackCost = Number(localStorage.getItem(ACK_KEY)) || 0; } catch { ackCost = 0; }
       hidden = cfg.overlay?.hidden === true;
       applied = snapshot(items);
       await loadPictures();
@@ -403,16 +404,50 @@
    * exactly how the hidden-overlay warning got missed.
    */
   const liveCost = $derived.by(() => {
-    const on = items.filter((i) => i.type === 'image' && i.enabled !== false);
-    const live = on.filter((i) => i.motion === 'bounce' || /\.gif$/i.test(i.file ?? ''));
-    if (!live.length) return null;
+    const on = items.filter((i) => i.enabled !== false);
+    const pics = on.filter((i) => i.type === 'image'
+      && (i.motion === 'bounce' || /\.gif$/i.test(i.file ?? '')));
+    const caps = on.filter((i) => i.type !== 'image' && i.motion === 'bounce');
+    if (!pics.length && !caps.length) return null;
     const bits = [];
-    const moving = live.filter((i) => i.motion === 'bounce').length;
-    const gifs = live.length - moving;
+    const moving = pics.filter((i) => i.motion === 'bounce').length;
+    const gifs = pics.length - moving;
     if (moving) bits.push(`${moving} moving picture${moving === 1 ? '' : 's'}`);
     if (gifs) bits.push(`${gifs} animated GIF${gifs === 1 ? '' : 's'}`);
-    return `${bits.join(' and ')} drawn every frame`;
+    if (caps.length) bits.push(`${caps.length} moving caption${caps.length === 1 ? '' : 's'}`);
+    return `${bits.join(', ')} drawn every frame`;
   });
+
+  /**
+   * Dismissal is acknowledged against a COST LEVEL, never a timer.
+   *
+   * A notice that comes back on a clock re-nags while nothing has changed,
+   * and a banner that says the same thing every hour stops being read — the
+   * hidden-overlay warning proved that the hard way. Acknowledging the
+   * current level and returning only when the cost RISES means every
+   * reappearance carries new information: something was added that is more
+   * expensive than what was agreed to.
+   *
+   * Weighted, not counted: a moving or animated picture forces the CPU
+   * composite as well as the full-rate canvas, so it is worth more than a
+   * moving caption, which only costs the canvas rate.
+   */
+  const costLevel = $derived.by(() => {
+    const on = items.filter((i) => i.enabled !== false);
+    const pics = on.filter((i) => i.type === 'image');
+    const moving = pics.filter((i) => i.motion === 'bounce').length;
+    const gifs = pics.filter((i) => /\.gif$/i.test(i.file ?? '')).length;
+    const caps = on.filter((i) => i.type !== 'image' && i.motion === 'bounce').length;
+    return moving * 2 + gifs * 2 + caps;
+  });
+
+  const ACK_KEY = 'jsr-ack-cost';
+  let ackCost = $state(0);
+  const costShown = $derived(Boolean(liveCost) && costLevel > ackCost);
+  function ackCostNow() {
+    ackCost = costLevel;
+    try { localStorage.setItem(ACK_KEY, String(ackCost)); } catch { /* private mode */ }
+  }
 
   const ghostPos = (item, idx) => (moves(item) && !burntIn(item)
     ? bouncePos(item, idx)
@@ -679,13 +714,16 @@
   <!-- Independent of selection: the cost is a property of what is ON AIR,
        and the per-item note under Movement only appears for the one picture
        the operator happens to have clicked. -->
-  {#if liveCost}
+  {#if costShown}
     <p class="perfnote">
       <strong>Encoder cost:</strong> {liveCost}. Pictures that never move are
       pre-rendered once and cost nothing per frame; moving or animated ones are
       drawn on every frame and force the subtitle canvas to full rate. If the
       console reports a clip encoding slower than realtime, this is the first
       thing to reduce.
+      <button class="dismiss" onclick={ackCostNow}
+              title="Dismiss — returns only if the overlays get more expensive"
+              aria-label="Dismiss">×</button>
     </p>
   {/if}
   {#if pending && pending !== 'apply-hidden'}
@@ -866,13 +904,16 @@
             <!-- Stated where the choice is made, not in a log after the fact.
                  The cost is real and invisible from the editor: the operator
                  has no way to know a moving picture changes which graph runs. -->
-            {#if sel.type === 'image'}
+            {#if sel.type === 'image' && costShown}
             <p class="perfnote">
               <strong>Costs encoder headroom.</strong> The GPU can only place a
               picture once, so a moving one is drawn on the CPU, and the subtitle
               canvas runs at full rate instead of half. On a title already close
               to realtime this can be what tips it into stalling — watch the
               console for a slow-clip report after applying.
+              <button class="dismiss" onclick={ackCostNow}
+                      title="Dismiss — returns only if the overlays get more expensive"
+                      aria-label="Dismiss">×</button>
             </p>
             {/if}
           {/if}
@@ -1220,6 +1261,14 @@
     border-radius: 6px; color: var(--text); cursor: pointer;
   }
   .warnbar .inline:disabled { opacity: 0.5; cursor: default; }
+  .perfnote { position: relative; padding-right: 26px; }
+  .perfnote .dismiss {
+    position: absolute; top: 4px; right: 5px; width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    background: none; border: none; border-radius: 4px; cursor: pointer;
+    color: var(--muted); font-size: 15px; line-height: 1; padding: 0;
+  }
+  .perfnote .dismiss:hover { color: var(--text); background: var(--surface-2); }
   /* Loud enough to be read before the choice is made, quiet enough not to
      look like an error — it is a cost, not a fault. */
   .perfnote {
