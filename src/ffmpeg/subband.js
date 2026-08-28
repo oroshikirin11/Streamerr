@@ -100,14 +100,16 @@ function scanText(text, style) {
   let scaleY = style.scaleY;
   let bord = style.outline;
   let shad = style.shadow;
-  let plain = '';
+  // Kept per hard line: wrapping has to be estimated against each line's own
+  // width. Measuring the whole cue as one run costs a two-line caption a
+  // third line it never has, and that slack lands directly in the band.
+  const segs = [''];
   let i = 0;
-  let hardLines = 1;
 
   while (i < text.length) {
     if (text[i] === '{') {
       const end = text.indexOf('}', i);
-      if (end < 0) { plain += text.slice(i); break; }
+      if (end < 0) { segs[segs.length - 1] += text.slice(i); break; }
       const block = text.slice(i + 1, end);
       // A block holds several backslash-introduced tags run together.
       for (const raw of block.split('\\').slice(1)) {
@@ -134,13 +136,15 @@ function scanText(text, style) {
       continue;
     }
     if (text[i] === '\\' && (text[i + 1] === 'N' || text[i + 1] === 'n')) {
-      hardLines += 1; i += 2; continue;
+      segs.push(''); i += 2; continue;
     }
-    if (text[i] === '\\' && text[i + 1] === 'h') { plain += ' '; i += 2; continue; }
-    plain += text[i];
+    if (text[i] === '\\' && text[i + 1] === 'h') {
+      segs[segs.length - 1] += ' '; i += 2; continue;
+    }
+    segs[segs.length - 1] += text[i];
     i += 1;
   }
-  return { ok: true, reason: null, fs, scaleY, bord, shad, lines: hardLines, plain };
+  return { ok: true, reason: null, fs, scaleY, bord, shad, segs };
 }
 
 /**
@@ -230,12 +234,15 @@ export function analyseAssBand(text, { width, height }) {
 
     const marginV = ev.marginV || style.marginV;
     const lineH = s.fs * (s.scaleY / 100) * 1.2; // libass default line spacing
-    // Wrapped lines are not in the script; estimate them from the text width.
+    // Wrapped lines are not in the script; estimate each hard line's own
+    // width and count how many rendered lines it turns into.
     const usable = Math.max(1, playResX - style.marginL - style.marginR);
-    let w = 0;
-    for (const ch of s.plain) w += emWidth(ch) * s.fs;
-    const wrapped = Math.max(1, Math.ceil(w / usable));
-    const total = s.lines + wrapped - 1;
+    let total = 0;
+    for (const seg of s.segs) {
+      let w = 0;
+      for (const ch of seg) w += emWidth(ch) * s.fs;
+      total += Math.max(1, Math.ceil(w / usable));
+    }
     const extent = marginV + total * lineH + s.bord * 2 + s.shad;
     if (extent > worst) worst = extent;
   }
