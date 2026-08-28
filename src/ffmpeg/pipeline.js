@@ -2195,33 +2195,24 @@ export class PipelinePlayout extends EventEmitter {
    * leave a core for the publisher, the audio and Node itself.
    */
   /**
-   * The slow-clip report, framed so it survives a busy console.
+   * The slow-clip report, tagged like every other engine line.
    *
-   * It is meant to be selected and pasted whole: every line is a fact the
-   * engine already had, and together they identify the title's cost without
-   * anyone having to send the file.
+   * It was framed in box-drawing at first, which fought the console rather
+   * than helping it: each emitted line becomes its own timestamped row, so
+   * every rule and every `|` was noise around content that was already
+   * delimited. A `[perf]` prefix matches [subs], [band], [health] and
+   * [cache], reads correctly when the rows are stacked, and still pastes
+   * into an issue as a coherent block.
    */
   _slowReport(speed) {
-    const head = `Encoding at ${speed}x — slower than realtime, the stream will stall`;
-    const body = this._diagnose();
-    const foot = [
-      'If none of that can change, the machine may simply be too small for this',
-      'title — transcoding hardware is the other half of the equation. Lowering',
-      'the output resolution is the cheapest way to buy headroom either way.',
-      `Report it with this block: ${ISSUES_URL}`,
-    ];
-    // Left rule only. The lines vary a lot in length and a right-hand border
-    // would either wrap them or pad the box out to the widest one.
-    const width = Math.min(96, Math.max(
-      head.length + 3, ...body.map((l) => l.length + 2), ...foot.map((l) => l.length + 2),
-    ));
-    const rule = (corner) => corner + '─'.repeat(Math.max(0, width));
+    const secs = Math.round(SLOW_SUSTAIN_MS / 1000);
     return [
-      `\n┌─ ${head} ${'─'.repeat(Math.max(0, width - head.length - 3))}`,
-      ...body.map((l) => `│ ${l}`),
-      rule('├'),
-      ...foot.map((l) => `│ ${l}`),
-      rule('└'),
+      `[perf] encoding at ${speed}x — under realtime for ${secs}s, the stream will stall`,
+      ...this._diagnose().map((l) => `[perf]   ${l}`),
+      '[perf] if none of that can change, the machine may simply be too small for',
+      '[perf] this title — transcoding hardware is the other half of the equation.',
+      '[perf] lowering the output resolution is the cheapest way to buy headroom.',
+      `[perf] report it with these lines: ${ISSUES_URL}`,
       '',
     ].join('\n');
   }
