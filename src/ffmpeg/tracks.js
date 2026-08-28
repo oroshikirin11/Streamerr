@@ -418,9 +418,24 @@ export function escapeFilterPath(p) {
  * @returns {{ filter: string|null, overlayInput: string|null, needsComplex: boolean }}
  */
 export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
-  if (!subtitle) return { filter: null, overlayInput: null, needsComplex: false };
   const { extractedPath = null, fontsDir = null, overlayPath = null } = opts;
   const fonts = fontsDir ? `:fontsdir=${escapeFilterPath(fontsDir)}` : '';
+
+  // A Studio overlay on a clip with no subtitles. Returned in exactly the
+  // shape a text subtitle has, so every decision downstream — which graph
+  // to build, whether to composite on the GPU, whether to chunk — is made
+  // by the code that already handles subtitles, unchanged. An overlay does
+  // require compositing, so such a clip moves off the cheap fixed-function
+  // path; that is inherent, not a policy choice made here.
+  if (!subtitle) {
+    return overlayPath
+      ? {
+        filter: `subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}`,
+        overlayInput: null,
+        needsComplex: false,
+      }
+      : { filter: null, overlayInput: null, needsComplex: false };
+  }
   // Studio overlays ride the subtitle chain: libass is already rendering
   // into this canvas, so a second pass costs one CPU pass and no GPU work
   // at all — measured at ~3000fps for a typeset script, against 24 needed.
@@ -431,10 +446,18 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   if (subtitle.bitmap) {
     // Bitmap subs cannot be handled by a simple -vf chain; the caller must
     // build a filter_complex that overlays [0:s:N] onto the video.
+    //
+    // A Studio overlay cannot ride that chain, so it comes back separately
+    // for the caller to append AFTER the scale — at output coordinates,
+    // exactly where the text path puts it. Without this, switching to a
+    // PGS track silently took the overlay off screen.
     return {
       filter: null,
       overlayInput: `0:s:${subtitle.typeIndex}`,
       needsComplex: true,
+      postFilter: overlayPath
+        ? `,subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}`
+        : '',
     };
   }
 
