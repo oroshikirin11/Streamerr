@@ -565,32 +565,55 @@
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
                class:isimg={item.type === 'image'} class:burnt={burntIn(item)}
                style={`left:${item.x * 100}%; top:${item.y * 100}%;
-                       transform: translate(-50%,-50%) rotate(${item.rotation}deg);
+                       transform: translate(-50%,-50%);
                        ${item.type === 'image' ? ''
                          : `font-size:${item.size * 100}cqh; color:${item.colour};`}
                        opacity:${item.enabled === false ? 0.35 : (item.opacity ?? 1)};`}
                onpointerdown={(e) => startDrag(e, item)}
                role="button" tabindex="0"
                aria-label={`${item.type === 'image' ? item.file : item.text} — drag to move`}>
-            {#if item.type === 'image'}
-              <!-- Width as a fraction of the FRAME, matching how ffmpeg
-                   scales it, so what is dragged here is what goes out. -->
-              <img class="pic" src={`/api/overlay/images/${encodeURIComponent(item.file)}`}
-                   alt={item.file} draggable="false"
-                   style={`width:${item.size * 100}cqw`} />
-            {:else}
-              <!-- No whitespace inside the span: `white-space: pre` renders
-                   the template's own newline and indentation as real space,
-                   which widened the box and pushed the glyphs off centre
-                   from where the encoder puts them. -->
-              <span class="txt" class:outline={item.outline !== false}>{item.text.replace('{title}', 'Episode title')}</span>
-            {/if}
-            {#if selected === item.id}
-              <span class="handle rot" onpointerdown={(e) => startRotate(e, item)}
-                    role="button" tabindex="-1" aria-label="Rotate"></span>
-              <span class="handle size" onpointerdown={(e) => startResize(e, item)}
-                    role="button" tabindex="-1" aria-label="Resize"></span>
-            {/if}
+            <!--
+              The rotation lives HERE, not on .item, and the two must never be
+              merged back together.
+
+              An opacity below 1 promotes .item to its own compositor layer.
+              Firefox 154 then clips that layer against the frame in the
+              layer's OWN rotated space rather than the frame's, so a picture
+              turned 180deg and pushed towards an edge lost the opposite side
+              — it looked cut in half, while the broadcast was perfectly
+              fine. Measured across nine arrangements in both engines: every
+              one that carried opacity and rotate on the same element failed
+              in Firefox, including will-change, translateZ(0),
+              filter: opacity() and scale(-1,-1); the only two that survived
+              were this one and putting the rotation on the leaf. Chrome
+              renders all nine identically, so this costs nothing there.
+
+              The handles live inside the wrapper so they still turn with the
+              picture, and `transform` makes the wrapper their containing
+              block. Rotating about the centre leaves the centre where it
+              was, so startDrag/startRotate/startResize need no changes.
+            -->
+            <div class="spin" style={`transform: rotate(${item.rotation}deg)`}>
+              {#if item.type === 'image'}
+                <!-- Width as a fraction of the FRAME, matching how ffmpeg
+                     scales it, so what is dragged here is what goes out. -->
+                <img class="pic" src={`/api/overlay/images/${encodeURIComponent(item.file)}`}
+                     alt={item.file} draggable="false"
+                     style={`width:${item.size * 100}cqw`} />
+              {:else}
+                <!-- No whitespace inside the span: `white-space: pre` renders
+                     the template's own newline and indentation as real space,
+                     which widened the box and pushed the glyphs off centre
+                     from where the encoder puts them. -->
+                <span class="txt" class:outline={item.outline !== false}>{item.text.replace('{title}', 'Episode title')}</span>
+              {/if}
+              {#if selected === item.id}
+                <span class="handle rot" onpointerdown={(e) => startRotate(e, item)}
+                      role="button" tabindex="-1" aria-label="Rotate"></span>
+                <span class="handle size" onpointerdown={(e) => startResize(e, item)}
+                      role="button" tabindex="-1" aria-label="Resize"></span>
+              {/if}
+            </div>
           </div>
         {/each}
         {#if !onAir}
@@ -865,9 +888,9 @@
   /* Already burnt into the picture behind: keep the box and the handles,
      drop the duplicate. visibility, not display, so the outline still
      traces the real extents of the text. */
-  .item.burnt > .txt, .item.burnt > .pic { visibility: hidden; }
-  .item.burnt { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
-  .item.burnt:hover, .item.burnt.on { outline: 1px dashed var(--accent); }
+  .item.burnt .txt, .item.burnt .pic { visibility: hidden; }
+  .item.burnt > .spin { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
+  .item.burnt:hover > .spin, .item.burnt.on > .spin { outline: 1px dashed var(--accent); }
   /* No line box at all, so the outline hugs the picture and the resize
      handle sits on its actual corner.
      Named `isimg`, NOT `pic`: `pic` is the <img> inside, and that rule
@@ -878,7 +901,13 @@
   .item.isimg { font-size: 0; line-height: 0; padding: 0; }
   .item:active { cursor: grabbing; }
   .item.off { opacity: .35; }
-  .item.on { outline: 1px dashed var(--accent); outline-offset: 3px; }
+  /* Selection and burnt-in outlines sit on the ROTATING wrapper, so they
+     still hug the content when it is turned. On .item they would stay
+     axis-aligned while the picture leaned. */
+  .item.on > .spin { outline: 1px dashed var(--accent); outline-offset: 3px; }
+  /* The wrapper adds no box of its own — it only carries the rotation and
+     anchors the handles. */
+  .spin { position: relative; }
   /* On the text itself, NOT on .item. Multi-line captions need their line
      breaks kept, but on the container it also preserved the template's own
      newlines between blocks — 12px of invisible whitespace that widened the
