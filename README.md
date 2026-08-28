@@ -388,11 +388,13 @@ layout:
   and `tv/`) is split into one library per collection, so titles land on the
   poster grid instead of the word "movies".
 - Posters come from `poster.jpg` / `folder.jpg` beside the media if present.
-- Episodes with no artwork of their own get a still taken from the video, so
-  a folder library does not look bare beside a Jellyfin one. Made on first
-  view and cached, never during browsing; the frame is chosen from a window
-  rather than grabbed at a fixed offset, which is what avoids fades and
-  title cards.
+- Episodes with no artwork of their own can have a still taken from the
+  video, so a folder library does not look bare beside a Jellyfin one. Made
+  on first view and cached; the frame is chosen from a window rather than
+  grabbed at a fixed offset, which is what avoids fades and title cards.
+  On by default for a local folder (a fifth of a second each), off for SMB
+  and Jellyfin, and set per source — each one in a mixed library decides for
+  itself.
 
 Durations aren't shown in folder mode — probing every file would make browsing
 crawl.

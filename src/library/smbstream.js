@@ -105,7 +105,8 @@ export class SmbStreamLibrary {
   static POOL = 8;
   static DEPTH = 3;
 
-  constructor(smb = {}, { bridgeBase = '', bridgeToken = '' } = {}) {
+  constructor(smb = {}, { bridgeBase = '', bridgeToken = '', stills = false } = {}) {
+    this._stills = stills;
     this._cfg = parseSmbTarget(smb);
     this._bridgeBase = bridgeBase;   // e.g. http://127.0.0.1:8099/smbmedia
     this.bridgeToken = bridgeToken;
@@ -365,9 +366,11 @@ export class SmbStreamLibrary {
           episode: parsed.episode,
           size: e.size,
           rel: frel,
-          // No sidecar art over SMB, so the row would be blank. Point at the
-          // media and let the image route take a frame from it.
-          image: `/api/library/image/${this._remember(frel)}-frame?v=frame`,
+          // No sidecar art over SMB. Off by default: each of these is a
+          // cold network seek, and a 37-episode season would fire 37.
+          image: this._stills
+            ? `/api/library/image/${this._remember(frel)}-frame?v=frame`
+            : null,
         });
       }
     };

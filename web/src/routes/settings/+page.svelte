@@ -262,13 +262,19 @@
     setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
   }
 
+  /** Same rule the server applies when a source has never been saved. */
+  const stillsDefault = (provider) => provider === 'filesystem' || !provider;
+
   function libraryPayload() {
     // The whole list every time: sources are identified by id, and the
     // server puts real credentials back wherever the panel echoed the
     // sentinel, so an untouched key survives a save of anything else.
     return {
       sources: cfg.library.sources.map((x, i) => {
-        const out = { id: x.id, name: x.name?.trim() || `Source ${i + 1}`, provider: x.provider };
+        const out = {
+          id: x.id, name: x.name?.trim() || `Source ${i + 1}`, provider: x.provider,
+          generateStills: x.generateStills ?? stillsDefault(x.provider),
+        };
         if (x.provider === 'jellyfin') {
           out.jellyfin = { url: x.jellyfin.url, apiKey: i === sel && jellyfinKey ? jellyfinKey : (x.jellyfin.apiKey || '') };
           out.pathMap = x.pathMap ?? [];
@@ -786,6 +792,27 @@
         <button onclick={() => (browsing = true)}>Browse…</button>
       </div>
     {/if}
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" style="width:auto"
+             checked={src.generateStills ?? stillsDefault(src.provider)}
+             onchange={(e) => (src.generateStills = e.currentTarget.checked)} />
+      Make episode pictures from the video when there are none
+    </label>
+    <p class="muted small">
+      {#if src.provider === 'jellyfin'}
+        Jellyfin supplies its own, so this only affects episodes it has none
+        for. Off by default: those files are usually as far away from us as
+        they are from Jellyfin.
+      {:else if src.provider === 'smb' || src.provider === 'smbmount'}
+        Off by default over a share &mdash; each picture is a seek across the
+        network, so opening a 37-episode season asks for 37 of them. Made
+        once and cached, so the cost is only the first visit.
+      {:else}
+        Roughly a fifth of a second per episode from a local disk, made on
+        first view and cached afterwards.
+      {/if}
+    </p>
 
     <div class="actions">
       <button class="primary" onclick={() => save('library')}>Save</button>

@@ -25,7 +25,8 @@ export class JellyfinLibrary {
    * @param {string} opts.apiKey
    * @param {Array<{from,to}>} [opts.pathMap]
    */
-  constructor({ url, apiKey, pathMap = [] }) {
+  constructor({ url, apiKey, pathMap = [], stills = false }) {
+    this._stills = stills;
     this.url = String(url || '').replace(/\/+$/, '');
     this.apiKey = apiKey;
     this.pathMap = pathMap;
@@ -284,7 +285,7 @@ export class JellyfinLibrary {
    * as no artwork, not as a broken tile.
    */
   frameUrl(id, reported) {
-    if (!reported) return null;
+    if (!this._stills || !reported) return null;
     let local;
     try { local = mapAndVerify(reported, this.pathMap); } catch { return null; }
     const key = `${id}-frame`;

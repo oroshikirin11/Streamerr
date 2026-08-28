@@ -210,7 +210,8 @@ function isCollectionDir(dir) {
 
 export class FilesystemLibrary {
   /** @param {object} opts @param {string[]} opts.roots */
-  constructor({ roots = [] } = {}) {
+  constructor({ roots = [], stills = true } = {}) {
+    this._stills = stills;
     this.roots = roots.filter(Boolean);
     this._paths = new Map(); // synthetic id -> real path
   }
@@ -357,11 +358,10 @@ export class FilesystemLibrary {
             this._paths.set(id(still), still);
             return imageUrl(still);
           }
-          // No sidecar: point at the media itself. The image route notices
-          // it is a video and takes a frame, so a folder library is not
-          // left bare beside a Jellyfin one. Nothing is decoded here —
-          // this is a url, and the work happens only if it is requested.
-          return imageUrl(full);
+          // No sidecar: point at the media itself, and the image route
+          // takes a frame from it. Nothing is decoded here — this is a
+          // url, and the work happens only if it is requested.
+          return this._stills ? imageUrl(full) : null;
         })(),
       });
     }

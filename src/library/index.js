@@ -15,12 +15,26 @@ import { SmbStreamLibrary } from './smbstream.js';
 import { CompositeLibrary } from './composite.js';
 
 /** One provider instance for one configured source. */
+/**
+ * Whether this source should make stills for media that has none.
+ *
+ * Defaults follow what it costs, not what looks nicest. A local folder
+ * grabs a frame in a fifth of a second, so it is on. An SMB share pays a
+ * cold network seek per episode — 37 of them to open one season — so it is
+ * off until asked for. Jellyfin is off because it is the one source that
+ * already supplies stills; where it has none, the file is usually remote to
+ * us as well.
+ */
+export const stillsDefault = (provider) => provider === 'filesystem' || !provider;
+
 function makeSource(src, cfg, reuseToken = null) {
+  const stills = src.generateStills ?? stillsDefault(src.provider);
   if (src.provider === 'jellyfin') {
     return new JellyfinLibrary({
       url: src.jellyfin?.url,
       apiKey: src.jellyfin?.apiKey,
       pathMap: src.pathMap ?? [],
+      stills,
     });
   }
   if (src.provider === 'smb') {
@@ -37,6 +51,7 @@ function makeSource(src, cfg, reuseToken = null) {
     const smb = new SmbStreamLibrary(src.smb ?? {}, {
       bridgeBase: `http://127.0.0.1:${port}/smbmedia`,
       bridgeToken,
+      stills,
     });
     smb.bridgeToken = bridgeToken;
     return smb;
@@ -44,7 +59,7 @@ function makeSource(src, cfg, reuseToken = null) {
   if (src.provider === 'smbmount') {
     return new SmbLibrary(src.smb ?? {}, cfg?.paths?.run ?? '/tmp');
   }
-  return new FilesystemLibrary({ roots: src.filesystem?.roots ?? [] });
+  return new FilesystemLibrary({ roots: src.filesystem?.roots ?? [], stills });
 }
 
 /**
