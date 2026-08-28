@@ -114,3 +114,69 @@ export function imageOverlayChain(images, {
 
   return { inputs, filters, looping };
 }
+
+/**
+ * The same pictures, composited on the GPU with overlay_vaapi.
+ *
+ * Worth having a second builder for: forcing a clip onto the CPU because it
+ * carries a logo turns a comfortable GPU episode into an unwatchable one,
+ * and there is no reason to. A still picture costs the CPU nothing per
+ * frame — scale and rotate run ONCE, on one frame — and the per-frame
+ * composite is what the GPU is for.
+ *
+ * Measured on this driver: overlay_vaapi honours alpha (transparent corners
+ * stayed transparent), takes x/y as EXPRESSIONS so nothing has to know the
+ * picture's pixel size, and has its own `alpha` for opacity. Scaling is
+ * done on the CPU beforehand rather than with the filter's `w`, so the
+ * scale-then-rotate order matches the software path exactly and a rotated
+ * picture is the same size on both.
+ *
+ * The one thing it cannot do is timing: overlay_vaapi has no `enable`
+ * option, so an intro/outro picture still needs the software path. Callers
+ * check for that before choosing this.
+ */
+export function vaapiImageOverlayChain(images, {
+  width = 1920, firstInput = 1, inLabel = 'in', outLabel = 'out',
+} = {}) {
+  const list = (images ?? []).filter((i) => i?.path);
+  if (!list.length) return { inputs: [], filters: [], looping: false };
+
+  const inputs = [];
+  const filters = [];
+  let looping = false;
+  let cur = inLabel;
+
+  list.forEach((img, i) => {
+    const idx = firstInput + i;
+    if (img.animated) { inputs.push('-ignore_loop', '0'); looping = true; }
+    inputs.push('-i', img.path);
+
+    // All of this runs once, on a single frame, before the picture is ever
+    // handed to the GPU — which is why a logo can be free.
+    const steps = ['format=rgba'];
+    steps.push(`scale=${Math.max(2, Math.round((Number(img.size) || 0.2) * width))}:-1`);
+    const rot = Number(img.rotation) || 0;
+    if (rot) {
+      const rad = (rot * Math.PI / 180).toFixed(6);
+      steps.push(`rotate=${rad}:c=none:ow=rotw(${rad}):oh=roth(${rad})`);
+    }
+    steps.push('hwupload');
+    filters.push(`[${idx}:v]${steps.join(',')}[img${i}]`);
+
+    const next = i === list.length - 1 ? outLabel : `ov${i}`;
+    const op = img.opacity != null && Number(img.opacity) < 1
+      ? `:alpha=${Math.max(0, Math.min(1, Number(img.opacity))).toFixed(3)}` : '';
+    filters.push(
+      `[${cur}][img${i}]overlay_vaapi=`
+      + `x=(main_w*${frac(img.x, 0.5).toFixed(4)})-(w/2)`
+      + `:y=(main_h*${frac(img.y, 0.5).toFixed(4)})-(h/2)`
+      + `${op}:eof_action=repeat[${next}]`,
+    );
+    cur = next;
+  });
+
+  return { inputs, filters, looping };
+}
+
+/** Pictures the GPU compositor can take: everything except timed ones. */
+export const gpuCanDraw = (images) => (images ?? []).every((i) => i?.start == null);

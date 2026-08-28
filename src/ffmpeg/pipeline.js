@@ -39,7 +39,7 @@ import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { overlayAss } from './overlay-ass.js';
-import { imageOverlayChain } from './overlay-image.js';
+import { imageOverlayChain, vaapiImageOverlayChain, gpuCanDraw } from './overlay-image.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -1758,10 +1758,15 @@ export class PipelinePlayout extends EventEmitter {
     // which is the unstreamable case the GPU graph exists to avoid. One
     // enabled logo was enough to trigger it on every subtitled clip.
     const video = this.selection?.video;
-    const hasPictures = (this.profile?.overlay ?? [])
-      .some((i) => i?.type === 'image' && i.enabled !== false && i.file);
+    // Only TIMED pictures force the software path now — overlay_vaapi has no
+    // `enable`, so an intro/outro logo cannot be done on the GPU. A plain
+    // always-on picture composites there and leaves this decision alone.
+    const cpuOnlyPictures = (this.profile?.overlay ?? []).some(
+      (i) => i?.type === 'image' && i.enabled !== false && i.file
+        && i.when && i.when !== 'always',
+    );
     const gpuComposite = Boolean(this.profile?.gpuSubs)
-      && !hasPictures
+      && !cpuOnlyPictures
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
@@ -2622,13 +2627,23 @@ export function buildSourceArgs({
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
 
-  // Pictures composite on the CPU. The two GPU graphs below are shaped by a
-  // per-driver probe (pickPillarboxGraph) after several arrangements were
-  // found to fail silently or die outright on real hardware; threading extra
-  // inputs through them would put that back in play for a feature that is
-  // used a few frames at a time. So a clip carrying pictures takes the CPU
-  // route, and clips without them are completely unaffected.
   const imgList = (overlayImages ?? []).filter((i) => i?.path);
+  /**
+   * Can the GPU composite these pictures itself?
+   *
+   * It matters a lot: dropping a clip to the software path because it
+   * carries a logo turns a comfortable GPU episode into an unwatchable one,
+   * and a still picture costs the CPU nothing per frame anyway.
+   *
+   * Two conditions. `gpuSubs` is the caller's verdict that this driver
+   * honours overlay alpha — the same thing subtitles need, established by
+   * probing the device, so a driver that would composite a logo as an
+   * opaque black box never gets the chance. And overlay_vaapi has no
+   * `enable` option, so a picture with intro/outro timing cannot be done
+   * here at all and sends the whole clip to the software path.
+   */
+  const gpuImages = imgList.length > 0
+    && Boolean(profile.gpuSubs) && gpuCanDraw(imgList);
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
@@ -2643,7 +2658,8 @@ export function buildSourceArgs({
   // Fixed-function chain for clips WITHOUT burned subtitles. This used to
   // exist only when subtitles forced it, which left subtitle-free 4K films
   // software-decoding on the CPU at 0.6x while the GPU sat idle.
-  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imgList.length) {
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex
+      && (!imgList.length || gpuImages)) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     const scalePart = selection?.video?.hdr
@@ -2651,6 +2667,14 @@ export function buildSourceArgs({
         + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
       : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
+    const vaapiChain = (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
+      ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
+      : scalePart);
+    // Composited after the pad, so a logo placed in a corner sits in the
+    // corner of the frame viewers actually see, not of the inner picture.
+    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
+      width: profile.width, firstInput: 1, inLabel: 'b', outLabel: 'v',
+    });
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -2660,11 +2684,13 @@ export function buildSourceArgs({
       '-extra_hw_frames', '8',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
+      ...gpuImgs.inputs,
       // Software-decoded frames have to be handed to the GPU explicitly.
-      '-vf', (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
-        ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
-        : scalePart),
-      '-map', '0:v:0', '-map', `0:a:${audioIdx}?`,
+      ...(gpuImgs.filters.length
+        ? ['-filter_complex', [`[0:v]${vaapiChain}[b]`, ...gpuImgs.filters].join(';'), '-map', '[v]']
+        : ['-vf', vaapiChain, '-map', '0:v:0']),
+      '-map', `0:a:${audioIdx}?`,
+      ...(gpuImgs.looping ? ['-shortest'] : []),
       ...be.encoderArgs(profEff),
       '-async_depth', '4',
       ...audioArgs(profile),
@@ -2681,7 +2707,8 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (profile.gpuSubs && sub.filter && !sub.needsComplex && !imgList.length
+  if (profile.gpuSubs && sub.filter && !sub.needsComplex
+      && (!imgList.length || gpuImages)
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -2773,9 +2800,22 @@ export function buildSourceArgs({
     }
 
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
+    // Input 0 is the clip, 1 the subtitle canvas, and 2 the black background
+    // when the driver's pillarbox shape needs one — so pictures start after
+    // whichever of those exist, or they would read the wrong stream.
+    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
+      width: profile.width, firstInput: bgInput.length ? 3 : 2,
+      inLabel: 'vpre', outLabel: 'v',
+    });
+    // Every composite shape above ends by producing [v]. When pictures
+    // follow, that output becomes the input to the picture chain instead,
+    // and the chain produces the real [v].
+    const composited = gpuImgs.filters.length
+      ? `${composite.replace(/\[v\]$/, '[vpre]')};${gpuImgs.filters.join(';')}`
+      : composite;
     const graph = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS,format=rgba${canvasPad},hwupload[ov];`
-      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composite}`;
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];${composited}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -2790,6 +2830,7 @@ export function buildSourceArgs({
       '-f', 'lavfi', ...canvasCap,
       '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`,
       ...bgInput,
+      ...gpuImgs.inputs,
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),

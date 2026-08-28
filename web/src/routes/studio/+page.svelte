@@ -597,7 +597,10 @@
 </div>
 
 <style>
-  .wrap { max-width: 1240px; margin: 0 auto; }
+  /* Wider than the other pages on purpose: this one is a viewer, and the
+     picture is the point. The side columns are fixed, so every extra pixel
+     of window goes to the stage rather than to the panels. */
+  .wrap { max-width: 1900px; margin: 0 auto; }
   .head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
   /* Each group is one segmented control: a single tray holding buttons that
      belong together. That reads as grouping on its own, without the divider
