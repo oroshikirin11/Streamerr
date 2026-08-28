@@ -99,6 +99,22 @@
   // Per-broadcast track choice, picked before starting.
   let trackOverride = $state(null);
 
+  /**
+   * Background still generation, polled only while it is running — and once
+   * a minute otherwise, since a refresh or a settings change can start one.
+   */
+  let stills = $state({ running: false, done: 0, total: 0, failed: 0 });
+  onMount(() => {
+    let stop = false;
+    const tick = async () => {
+      if (stop) return;
+      try { stills = await api.get('/api/library/stills'); } catch { /* not fatal */ }
+      setTimeout(tick, stills.running ? 2000 : 60_000);
+    };
+    tick();
+    return () => { stop = true; };
+  });
+
   onMount(load);
 
   async function load() {
@@ -411,6 +427,14 @@
       {/each}
     </div>
     <div class="spacer"></div>
+    {#if stills.running && stills.total}
+      <!-- Quiet on purpose: this is background work nobody is waiting on,
+           so it reports itself without asking for attention. -->
+      <span class="stills" title={`Making the missing episode pictures — ${stills.done} of ${stills.total} done${stills.failed ? `, ${stills.failed} could not be made` : ''}. They are made a couple at a time and paused while you are on air, so browsing stays fast.`}>
+        <span class="spin" aria-hidden="true"></span>
+        {stills.done}/{stills.total}
+      </span>
+    {/if}
     <button class="ghost small" onclick={refreshLibrary} disabled={refreshing}
             title="Look for media added since this page was opened">
       {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -618,6 +642,18 @@
 {/if}
 
 <style>
+  .stills {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--muted); white-space: nowrap;
+  }
+  .stills .spin {
+    width: 11px; height: 11px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: stillspin 0.9s linear infinite;
+  }
+  @keyframes stillspin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .stills .spin { animation: none; } }
+
   .row { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
   .spacer { flex: 1; }
 

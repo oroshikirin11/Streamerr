@@ -28,13 +28,14 @@ import {
 } from './ffmpeg/probe.js';
 import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
 import { LANGUAGES } from './ffmpeg/tracks.js';
+import { StillSweeper } from './library/stillsweep.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
 import { SmbStreamLibrary } from './library/smbstream.js';
-import { thumbnail, isRemote, frameGrab, isVideoFile } from './library/thumbs.js';
+import { thumbnail, isRemote, isVideoFile, cachedFrame } from './library/thumbs.js';
 import { suggestRules } from './library/pathmap.js';
 import { dpush, dlist, teeConsole } from './debuglog.js';
 
@@ -234,10 +235,15 @@ function rememberIntent(selection, subtitleMode) {
 }
 
 /** Rebuild the library client whenever its settings change. */
+/** Set once the engine wiring below exists; see the note there. */
+let stillSweeper = null;
+
 function refreshLibrary() {
   // Hand over the old instance so unchanged SMB sources keep their bridge
   // token; see makeLibrary.
   library = makeLibrary(config, library);
+  // New media, or the setting just changed: look again.
+  stillSweeper?.start();
 }
 
 const clients = new Set();
@@ -945,6 +951,10 @@ app.get('/api/options', (req, res) => {
   });
 });
 
+/** Progress of background still generation, for the library indicator. */
+app.get('/api/library/stills', (req, res) => res.json(stillSweeper?.status()
+  ?? { running: false, done: 0, total: 0, failed: 0, pending: 0 }));
+
 app.get('/api/check/encoders', async (req, res) => {
   const results = await probeAll(config.encoder.device);
   const caps = await probeConcatCapabilities();
@@ -1096,9 +1106,13 @@ app.get('/api/library/image/:id', async (req, res) => {
   // frame from it rather than leaving the row blank. Unlike a scaled image
   // there is no falling back to the source here — a video served where an
   // image belongs renders as a broken tile.
+  // Serve a still only if one has already been made: generating here would
+  // put ffmpeg on the browsing path, which is what made opening a season
+  // over SMB crawl. The sweeper fills these in behind the scenes, and until
+  // it has, the row keeps its placeholder.
   const fromVideo = isVideoFile(p);
   const scaled = fromVideo
-    ? await frameGrab(p, config.paths?.cache).catch(() => null)
+    ? cachedFrame(p, config.paths?.cache)
     : await thumbnail(p, config.paths?.cache).catch(() => null);
   if (fromVideo && !scaled) return res.status(404).end();
   // Remote art has no local fallback: if scaling failed, redirect rather than
@@ -1533,6 +1547,19 @@ if (encFixed) {
   console.warn(`! repaired encoder config: ${encFixed.join(', ')}`);
   saveConfig({ encoder: config.encoder });
 }
+/**
+ * Fills in generated stills off the browsing path. Yields to a broadcast:
+ * speculative ffmpeg work beside the encoder is how a marginal clip ends up
+ * stalling, which this project has learned the hard way.
+ */
+stillSweeper = new StillSweeper({
+  library: () => library,
+  cacheDir: () => config.paths?.cache,
+  busy: () => Boolean(engine),
+  log: (m) => dpush('ffmpeg', m),
+});
+stillSweeper.start();
+
 scheduleAutoScan();
 
 const { port, host } = config.server;

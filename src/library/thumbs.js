@@ -179,6 +179,31 @@ function probeSeconds(src) {
  *   made. Callers must NOT fall back to the source on null — serving a video
  *   file where an image belongs is worse than serving nothing.
  */
+/** Where a still for this source would live, or null if unanswerable. */
+function framePath(src, cacheDir) {
+  if (!cacheDir) return null;
+  try {
+    const key = isRemote(src)
+      ? createHash('sha1').update(`${noQuery(src)}:${MAX_W}`).digest('hex').slice(0, 16)
+      : keyFor(src);
+    return join(cacheDir, 'thumbs', `${key}-frame.jpg`);
+  } catch {
+    return null;                       // vanished between listing and request
+  }
+}
+
+/**
+ * An already-made still, or null. Never generates.
+ *
+ * This is what the image route uses: making a still inside a request put
+ * ffmpeg on the browsing path, and a season's worth of cold network seeks
+ * with it. The sweeper fills the cache behind the scenes instead.
+ */
+export function cachedFrame(src, cacheDir) {
+  const p = framePath(src, cacheDir);
+  return p && existsSync(p) ? p : null;
+}
+
 export async function frameGrab(src, cacheDir) {
   if (!cacheDir) return null;
   let out;
