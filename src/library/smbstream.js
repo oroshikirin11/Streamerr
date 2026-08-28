@@ -312,23 +312,16 @@ export class SmbStreamLibrary {
       const q = search.toLowerCase();
       dirs = dirs.filter((n) => n.toLowerCase().includes(q));
     }
-    // A folder holding one video and no season folders is a film, and
-    // clicking it should start it rather than open a list of one. The
-    // filesystem provider has always done this; SMB called everything a
-    // series, so every film here opened a one-entry page.
-    const page = await Promise.all(dirs.slice(startIndex, startIndex + limit).map(async (name) => {
+    // Deliberately does NOT look inside each folder to tell a film from a
+    // series. Doing that cost one SMB round trip per row — 60 of them for
+    // one page, against a client whose whole concurrency budget is 8
+    // sessions three deep — and browsing visibly stalled. A folder holding
+    // a single film is recognised when it is opened instead, which costs
+    // nothing until someone clicks.
+    const page = dirs.slice(startIndex, startIndex + limit).map((name) => {
       const rel = root ? `${root}/${name}` : name;
-      let only = null;
-      try {
-        const inner = await this._readdir(rel);
-        const vids = inner.filter((e) => !e.isDirectory() && isVideo(e.name));
-        const hasSeasons = inner.some((e) => e.isDirectory() && SEASON_DIR.test(e.name));
-        if (vids.length === 1 && !hasSeasons) only = `${rel}/${vids[0].name}`;
-      } catch { /* unreadable folder: treat as a series, as before */ }
-      return only
-        ? { id: this._remember(only), title: name, type: 'Movie', childCount: null }
-        : { id: this._remember(rel), title: name, type: 'Series' };
-    }));
+      return { id: this._remember(rel), title: name, type: 'Series' };
+    });
     return { items: page, total: dirs.length };
   }
 

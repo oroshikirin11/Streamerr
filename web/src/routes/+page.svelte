@@ -243,6 +243,14 @@
     try {
       seasons = await api.seasons(item.id);
       episodes = await api.episodes(item.id);
+      // A folder holding one film reads as a series until something looks
+      // inside it, and a list of one entry is a worse answer than just
+      // playing the thing. Decided here rather than while listing, because
+      // over SMB looking inside every folder to label the grid cost a
+      // network round trip per row and stalled browsing.
+      if (!seasons.length && episodes.length === 1 && episodes[0].type === 'Movie') {
+        await playMovie(episodes[0]);
+      }
     } catch (err) {
       error = err.message;
     }
