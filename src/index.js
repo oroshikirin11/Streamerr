@@ -1177,7 +1177,12 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     backend: config.encoder.backend,
     device: config.encoder.device,
   });
-  const profile = { ...config.encoder, backend: sel.backend };
+  // Studio overlays travel with the encoder profile: buildSourceArgs already
+  // receives it, and the overlay is a property of the output, not the clip.
+  const profile = {
+    ...config.encoder, backend: sel.backend,
+    overlay: config.overlay?.items ?? [],
+  };
 
   // Resolve every item up front so a bad path fails before we go on air.
   const items = [];

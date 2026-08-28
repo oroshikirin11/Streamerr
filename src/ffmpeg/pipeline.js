@@ -29,7 +29,7 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync, readFileSync, statfsSync } from 'fs';
+import { existsSync, readFileSync, statfsSync, writeFileSync } from 'fs';
 import { Writable } from 'stream';
 import { availableParallelism, cpus , totalmem } from 'os';
 import { EventEmitter } from 'events';
@@ -38,6 +38,7 @@ import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
+import { overlayAss } from './overlay-ass.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -1396,6 +1397,35 @@ export class PipelinePlayout extends EventEmitter {
    * box, so this can only ever shrink the frame, never grow it. A 4K source
    * still lands at the configured height.
    */
+  /**
+   * Write this clip's Studio overlay to disk, or null if there is none.
+   *
+   * Per clip, because the times are clip-relative, {title} names what is
+   * playing, and an input-side -ss rebases timestamps to zero — verified:
+   * without that shift an event timed late in a clip never fires after a
+   * seek. Failing here returns null rather than throwing: an overlay must
+   * never be the reason a broadcast does not start.
+   */
+  _overlayFile(item, offset) {
+    const items = this.profile?.overlay ?? [];
+    if (!items.length || !this.cacheDir) return null;
+    try {
+      const ass = overlayAss(items, {
+        width: this.profile.width,
+        height: this.profile.height,
+        duration: this.current?.duration ?? item?.duration ?? null,
+        startOffset: offset,
+        title: item?.title ?? '',
+      });
+      if (!ass) return null;
+      const out = join(this.cacheDir, `overlay-${process.pid}.ass`);
+      writeFileSync(out, ass);
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
   _shapeFor(video) {
     const box = { width: this._box.width, height: this._box.height };
     const mode = this._box.frameSize ?? 'fixed';
@@ -1535,6 +1565,7 @@ export class PipelinePlayout extends EventEmitter {
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       offset,
+      overlayPath: this._overlayFile(item, offset),
       profile: this.profile,
       selection: this.selection,
       tsOffset: this.timeline,
@@ -2437,12 +2468,13 @@ const item = (self) => self.current?.item?.title ?? 'clip';
 export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
+  overlayPath = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
-    { extractedPath, fontsDir });
+    { extractedPath, fontsDir, overlayPath });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
   // Source-rate matching applies to every path, not just the GPU one —
   // duplicating 24fps to 30 is wasted work and judder wherever it happens.
