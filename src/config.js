@@ -70,6 +70,12 @@ const DEFAULTS = {
     /**
      * How the output frame is sized.
      *
+     * Defaults to 'native': encoding a 640x480 episode at 1920x1080 costs
+     * five times the macroblocks for detail the source does not have, and
+     * the viewer's player upscales for free. The cost is that clips of
+     * different shapes reconnect the stream — 'fixed' is the choice for
+     * anyone who would rather never reconnect.
+     *
      *   'fixed'  always width x height, bars padded in. The original
      *            behaviour, and the only one that never reconnects.
      *   'fit'    the content rectangle: the source's shape, scaled to
@@ -87,7 +93,7 @@ const DEFAULTS = {
      * publisher owns one RTMP session and FLV announces the frame size
      * once, at connect.
      */
-    frameSize: 'fixed',
+    frameSize: 'native',
     // Retained for config compatibility only — the engine now ALWAYS
     // extracts embedded subtitles before their first broadcast. Burning them
     // straight from the container makes ffmpeg read the whole file a second

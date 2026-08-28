@@ -422,7 +422,7 @@ Everything the wizard configures is editable later, grouped in the UI:
 | Group | Covers |
 |---|---|
 | **Owncast** | RTMP address, stream key, connection test, 30s watch test |
-| **Output** | resolution, framerate, bitrates, keyframe interval, encoder, render device &mdash; each a list of the usual answers, with Custom for anything else |
+| **Output** | resolution, frame size, framerate, bitrates, keyframe interval, encoder, render device &mdash; each a list of the usual answers, with Custom for anything else |
 | **Library** | any number of sources — Jellyfin, folder, SMB — with a directory browser |
 | **Path mapping** | only when Jellyfin's paths differ from this container's |
 | **Languages** | pick the languages you understand, original vs dubbed, subtitle policy |
@@ -435,6 +435,16 @@ Everything the wizard configures is editable later, grouped in the UI:
 **Framerate** defaults to *auto*: each file is output at its own rate up to your
 cap, so 23.976fps anime stays 23.976 rather than being padded to 30 — less GPU
 work, no judder.
+
+**Frame size** decides how the picture sits inside that resolution, which is
+a limit rather than a target. The default sends each file at its own size,
+scaled down only when it exceeds the limit — a 640&times;480 episode goes out at
+640&times;480 rather than paying five times the pixels for detail it does not
+have, which the viewer's player would add for free anyway. The cost is that
+the frame size is fixed for one connection, so moving between clips of
+different shapes reconnects the stream; within a series that never happens.
+*Always &lt;resolution&gt;* is the setting for anyone who would rather never
+reconnect, at the price of encoding black bars.
 
 **Keyframes** must divide Owncast's segment length. Two seconds is what its
 documentation recommends; changing it can break segmenting.
