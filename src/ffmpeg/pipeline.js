@@ -313,6 +313,9 @@ const SLOW_SUSTAIN_MS = 30_000;
  */
 const SLOW_REPEAT_MS = 120_000;
 
+/** Below this many seconds the cushion has no margin left, whatever the rate. */
+const BUFFER_FLOOR_S = 10;
+
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;
 const BANK_SECONDS = 15;
@@ -2206,6 +2209,42 @@ export class PipelinePlayout extends EventEmitter {
    * leave a core for the publisher, the audio and Node itself.
    */
   /**
+   * What the buffer is doing, which is the difference between a warning and
+   * an alarm.
+   *
+   * Falling behind is only fatal once the cushion runs out: at 0.9x with a
+   * minute banked nothing is at risk yet, and at 0.99x with two seconds left
+   * the broadcast is about to die. Time to empty is the honest number and it
+   * is simple arithmetic — the bank drains at (1 - speed) seconds per second
+   * of airtime.
+   *
+   * The absolute floor matters as much as the rate. A 6s cushion draining
+   * slowly still reads "five minutes left", and it is one hiccup from empty;
+   * anything under BUFFER_FLOOR_S counts as at risk whatever the arithmetic
+   * says.
+   */
+  _bufferRisk(speed) {
+    try {
+      const left = this._reserve()?.seconds;
+      if (!Number.isFinite(left)) return null;
+      const drain = Math.max(0, 1 - speed);
+      const empty = drain > 0.001 ? left / drain : Infinity;
+      return {
+        left,
+        empty,
+        atRisk: left < BUFFER_FLOOR_S || (Number.isFinite(empty) && empty < 60),
+        text: `buffer ${left.toFixed(0)}s`
+          + (Number.isFinite(empty)
+            ? `, draining — empty in ~${Math.round(empty)}s at this rate`
+            : ', holding'),
+      };
+    } catch {
+      // Diagnosis must never throw on the warning path.
+      return null;
+    }
+  }
+
+  /**
    * The slow-clip report, tagged like every other engine line.
    *
    * It was framed in box-drawing at first, which fought the console rather
@@ -2217,8 +2256,30 @@ export class PipelinePlayout extends EventEmitter {
    */
   _slowReport(speed) {
     const secs = Math.round(SLOW_SUSTAIN_MS / 1000);
+    /**
+     * What the buffer is doing, which is the difference between a warning
+     * and an alarm.
+     *
+     * Falling behind is only fatal once the cushion runs out: at 0.9x with
+     * a minute banked nothing is at risk yet, and at 0.99x with two seconds
+     * left the broadcast is about to die. The old head said "the stream
+     * will stall" in both cases, which is wrong in the first and
+     * under-states the second.
+     *
+     * Time to empty is the honest number and it is simple arithmetic: the
+     * bank drains at (1 - speed) seconds per second of airtime.
+     */
+    let head = `[perf] encoding at ${speed}x — under realtime for ${secs}s`;
+    const risk = this._bufferRisk(speed);
+    const buffer = risk?.text ?? null;
+    if (risk) {
+      head += risk.atRisk
+        ? ', the stream is about to stall'
+        : ', the buffer is absorbing it for now';
+    }
     return [
-      `[perf] encoding at ${speed}x — under realtime for ${secs}s, the stream will stall`,
+      head,
+      ...(buffer ? [`[perf]   ${buffer}`] : []),
       ...this._diagnose().map((l) => `[perf]   ${l}`),
       '[perf] if none of that can change, the machine may simply be too small for',
       '[perf] this title — transcoding hardware is the other half of the equation.',
@@ -2968,7 +3029,10 @@ export class PipelinePlayout extends EventEmitter {
              * sidebar.
              */
             this._slowReports = (this._slowReports ?? 0) + 1;
-            if (this._slowReports === 3 && !this._slowNoticed) {
+            // A cushion about to run out is not a pattern to confirm over
+            // four minutes — it is the emergency the popup exists for.
+            const urgent = this._bufferRisk(x)?.atRisk === true;
+            if ((urgent || this._slowReports === 3) && !this._slowNoticed) {
               this._slowNoticed = true;
               this.emit('warn', 'Playback keeps falling behind. Details are in '
                 + 'the console — enable Developer mode in Settings to see it.');
