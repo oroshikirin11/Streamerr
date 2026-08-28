@@ -2002,10 +2002,27 @@ export class PipelinePlayout extends EventEmitter {
       // lazily means the exact condition decides, with nothing duplicated
       // here to drift out of step with it.
       overlayLayer: () => this._overlayLayer(overlayImages),
-      subBand: this._subtitleBand(cached?.path ?? null, {
-        overlayPath: overlayFile,
-        fontsDir: cached?.fontsDir ?? null,
-      }),
+      /**
+       * A sidecar is already the file the analyser wants.
+       *
+       * External tracks are deliberately never extracted -- there is nothing
+       * to extract, the script exists on disk -- so `cached` is null for
+       * them and this used to hand the analyser null and bail at its first
+       * guard. The band was therefore unreachable for every sidecar,
+       * whatever the script contained, which is most of an anime library.
+       * Measured on the box: Evangelion spawned a full 1440x1080 canvas
+       * while its .en.ass sat there perfectly bandable.
+       *
+       * The analyser only reads the file, and the band script it writes
+       * still lands in cacheDir, so nothing downstream can tell the
+       * difference between this and an extracted one.
+       */
+      subBand: this._subtitleBand(
+        this.selection?.subtitle?.external
+          ? this.selection.subtitle.path ?? null
+          : cached?.path ?? null,
+        { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
+      ),
       profile: this.profile,
       selection: this.selection,
       tsOffset: this.timeline,
