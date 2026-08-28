@@ -306,6 +306,13 @@ const SLOW_WINDOW_MS = 6_000;
  */
 const SLOW_SUSTAIN_MS = 30_000;
 
+/**
+ * How often to repeat the report while a clip stays under realtime. Long
+ * enough that a genuinely struggling title takes minutes to raise the popup,
+ * short enough that it does eventually.
+ */
+const SLOW_REPEAT_MS = 120_000;
+
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;
 const BANK_SECONDS = 15;
@@ -2869,7 +2876,7 @@ export class PipelinePlayout extends EventEmitter {
     // broadcast after ten seconds of silence, so this is fatal if sustained —
     // and dying without saying why is the worst version of it.
     let slowSince = null;
-    let warnedSlow = false;
+    let lastSlowReport = null;
     // ffmpeg's own `speed=` is cumulative — encoded time over wall time since
     // the process started — so every startup cost (opening a 50 GiB remux,
     // filter and GPU init) is averaged in forever and the figure only creeps
@@ -2930,8 +2937,22 @@ export class PipelinePlayout extends EventEmitter {
       if (kind === 'clip' && recent != null) {
         if (recent < 0.95) {
           slowSince ??= Date.now();
-          if (!warnedSlow && Date.now() - slowSince > SLOW_SUSTAIN_MS) {
-            warnedSlow = true;
+          /**
+           * Repeats while it stays bad, rather than once per process.
+           *
+           * This used to latch: one report per source process and no more.
+           * A single title struggling for twenty minutes produced exactly
+           * one line, so "three reports" could only ever mean three
+           * different clips — the sustained case, which is the one worth
+           * interrupting over, could never reach it.
+           *
+           * Recovery clears slowSince below, so a brief dip still has to
+           * re-earn its first report with another full SLOW_SUSTAIN_MS.
+           */
+          const due = lastSlowReport == null
+            || Date.now() - lastSlowReport >= SLOW_REPEAT_MS;
+          if (due && Date.now() - slowSince > SLOW_SUSTAIN_MS) {
+            lastSlowReport = Date.now();
             const x = Math.round(recent * 100) / 100;
             this.emit('tooslow', { speed: x });
             this.emit('log', this._slowReport(x));
