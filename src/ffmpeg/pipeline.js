@@ -3197,7 +3197,10 @@ export function buildSourceArgs({
     const gpuImgs = band && imgList.length
       ? vaapiImageOverlayChain(imgList, {
         width: rect.w, height: rect.h, firstInput: 2,
-        inLabel: 'vb', outLabel: 'v',
+        // Pictures go UNDER the band: they composite onto the bare video and
+        // hand it on, then the subtitle band lands on the result. Subtitles
+        // have to stay readable, so nothing is allowed to cover them.
+        inLabel: 'b', outLabel: 'vb',
       })
       : { inputs: [], filters: [], looping: false };
 
@@ -3253,11 +3256,12 @@ export function buildSourceArgs({
     // A band is a shorter surface than the frame, so it has to be told where
     // to land. Reachable only when there are no bars, which is the one case
     // whose composite is a bare overlay_vaapi. Pictures, when there are any,
-    // go on after it — onto the finished frame, at frame coordinates, which
-    // is where they were placed.
+    // go on FIRST — onto the decoded frame, at frame coordinates, which is
+    // where they were placed — and the band composites over the result, so
+    // a picture can never cover a subtitle.
     const bandComposite = band
       ? (gpuImgs.filters.length
-        ? `[b][ov]overlay_vaapi=x=0:y=${band.y}[vb];${gpuImgs.filters.join(';')}`
+        ? `${gpuImgs.filters.join(';')};[vb][ov]overlay_vaapi=x=0:y=${band.y}[v]`
         : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
       : composite;
     const graph = `${canvasChain}`
