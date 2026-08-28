@@ -16,7 +16,7 @@
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { createWriteStream, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import { extname, join } from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 
@@ -45,6 +45,12 @@ function release() {
 }
 
 export const isRemote = (src) => /^https?:\/\//i.test(src);
+
+const VIDEO_EXTS = new Set([
+  '.mkv', '.mp4', '.avi', '.m4v', '.mov', '.ts', '.webm', '.mpg', '.mpeg', '.wmv',
+]);
+/** Whether a resolved artwork path is really a video to take a frame from. */
+export const isVideoFile = (src) => VIDEO_EXTS.has(extname(String(src ?? '')).toLowerCase());
 
 /** Keyed on size and mtime as well as path: re-scraped artwork replaces the
  *  old thumbnail instead of being masked by it. A remote url carries its own
@@ -118,6 +124,88 @@ export async function thumbnail(src, cacheDir) {
         '-f', 'mjpeg', tmp,
       ]);
       if (downloaded) safeUnlink(downloaded);
+      if (!ok || !existsSync(tmp)) { safeUnlink(tmp); return null; }
+      renameSync(tmp, out);
+      return out;
+    } catch {
+      return null;
+    } finally {
+      release();
+      inFlight.delete(out);
+    }
+  })();
+
+  inFlight.set(out, work);
+  return work;
+}
+
+/** Seconds of media, or null. One ffprobe per file ever: the frame it
+ *  positions is cached, so this never runs twice for the same episode. */
+function probeSeconds(src) {
+  return new Promise((resolve) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', src,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 15_000);
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const n = Number.parseFloat(out.trim());
+      resolve(Number.isFinite(n) && n > 0 ? n : null);
+    });
+  });
+}
+
+/**
+ * A still for media that has none, taken from the media itself.
+ *
+ * Sidecar artwork and Jellyfin covers win wherever they exist; this is the
+ * fallback that stops a folder or SMB library looking bare beside a Jellyfin
+ * one. Generated on first request and cached like any other thumbnail, so
+ * browsing never waits on it and a season costs one frame per episode, once.
+ *
+ * The frame is chosen, not merely taken: a fixed offset lands on fades,
+ * black and title cards often enough to look broken, so `thumbnail` picks
+ * the most representative of the following hundred frames. A fifth of the
+ * way in clears the titles without reaching anything worth spoiling.
+ *
+ * @returns {Promise<string|null>} path to the still, or null if none could be
+ *   made. Callers must NOT fall back to the source on null — serving a video
+ *   file where an image belongs is worse than serving nothing.
+ */
+export async function frameGrab(src, cacheDir) {
+  if (!cacheDir) return null;
+  let out;
+  try {
+    out = join(cacheDir, 'thumbs', `${keyFor(src)}-frame.jpg`);
+  } catch {
+    return null;                       // vanished between listing and request
+  }
+  if (existsSync(out)) return out;
+  if (inFlight.has(out)) return inFlight.get(out);
+
+  const work = (async () => {
+    await slot();
+    try {
+      mkdirSync(join(cacheDir, 'thumbs'), { recursive: true });
+      const dur = await probeSeconds(src);
+      // Clamped: 30s is past most cold opens, 10 minutes is deep enough for
+      // a feature without wandering into the plot.
+      const at = dur ? Math.min(Math.max(dur * 0.2, 30), 600) : 60;
+      const tmp = `${out}.${process.pid}.partial`;
+      const ok = await run([
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        // Input-side seek: a seek rather than decoding everything before it,
+        // which is what keeps this affordable over SMB.
+        '-ss', at.toFixed(2),
+        '-i', src,
+        '-vf', `thumbnail=100,scale='min(${MAX_W},iw)':-2:flags=lanczos`,
+        '-frames:v', '1', '-q:v', '4',
+        '-f', 'mjpeg', tmp,
+      ]);
       if (!ok || !existsSync(tmp)) { safeUnlink(tmp); return null; }
       renameSync(tmp, out);
       return out;

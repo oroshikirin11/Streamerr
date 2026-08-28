@@ -353,9 +353,15 @@ export class FilesystemLibrary {
         sourcePath: full,
         image: (() => {
           const still = stillsIn(fileDir, stillCache).get(file.slice(0, -extname(file).length));
-          if (!still) return null;
-          this._paths.set(id(still), still);
-          return imageUrl(still);
+          if (still) {
+            this._paths.set(id(still), still);
+            return imageUrl(still);
+          }
+          // No sidecar: point at the media itself. The image route notices
+          // it is a video and takes a frame, so a folder library is not
+          // left bare beside a Jellyfin one. Nothing is decoded here —
+          // this is a url, and the work happens only if it is requested.
+          return imageUrl(full);
         })(),
       });
     }

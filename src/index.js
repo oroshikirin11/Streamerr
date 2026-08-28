@@ -34,7 +34,7 @@ import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary } from './library/index.js';
 import { SmbStreamLibrary } from './library/smbstream.js';
-import { thumbnail, isRemote } from './library/thumbs.js';
+import { thumbnail, isRemote, frameGrab, isVideoFile } from './library/thumbs.js';
 import { suggestRules } from './library/pathmap.js';
 import { dpush, dlist, teeConsole } from './debuglog.js';
 
@@ -1092,9 +1092,15 @@ app.get('/api/library/image/:id', async (req, res) => {
   // A provider may hand back a remote url (Jellyfin serves its own artwork);
   // only a local path can be checked for existence here.
   if (!p || (!isRemote(p) && !existsSync(p))) return res.status(404).end();
-  // Serve a scaled copy when we can make one; the original is the fallback,
-  // so artwork never disappears just because ffmpeg had a bad day.
-  const scaled = await thumbnail(p, config.paths?.cache).catch(() => null);
+  // Media with no artwork of its own resolves to the video file: take a
+  // frame from it rather than leaving the row blank. Unlike a scaled image
+  // there is no falling back to the source here — a video served where an
+  // image belongs renders as a broken tile.
+  const fromVideo = isVideoFile(p);
+  const scaled = fromVideo
+    ? await frameGrab(p, config.paths?.cache).catch(() => null)
+    : await thumbnail(p, config.paths?.cache).catch(() => null);
+  if (fromVideo && !scaled) return res.status(404).end();
   // Remote art has no local fallback: if scaling failed, redirect rather than
   // trying to stream a url through createReadStream.
   if (!scaled && isRemote(p)) return res.redirect(302, p);
