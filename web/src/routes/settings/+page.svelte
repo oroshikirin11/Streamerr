@@ -493,7 +493,7 @@
         <div><label>Width</label><input type="number" bind:value={cfg.encoder.width} /></div>
         <div><label>Height</label><input type="number" bind:value={cfg.encoder.height} /></div>
       {:else}
-        <div><label>Size</label>
+        <div><label>{frameSize === 'fixed' ? 'Size' : 'Limit'}</label>
           <input value={`${cfg.encoder.width} × ${cfg.encoder.height}`} disabled /></div>
       {/if}
       <div>
@@ -548,7 +548,7 @@
         {/if}
       </div>
     </div>
-    <label>Frame size</label>
+    <label>Scaling</label>
     <select bind:value={cfg.encoder.frameSize}>
       <option value="fixed">Always {cfg.encoder.width}&times;{cfg.encoder.height}</option>
       <option value="fit">Fill the frame &mdash; up to the limit</option>
