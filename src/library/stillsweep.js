@@ -21,6 +21,22 @@ const CONCURRENCY = 2;
 const GAP_MS = 400;
 /** While a broadcast holds the machine, or after a run finishes. */
 const IDLE_MS = 20_000;
+/**
+ * Stills per pass, and series inspected to find them.
+ *
+ * Both are caps on WORK PER PASS, not on the library. Without them a
+ * 600-episode library re-walked every source on every cycle — hundreds of
+ * SMB directory listings — and then wrote 600 files in one go. A cache
+ * living on a slow or failing disk experiences that as a sustained write
+ * storm, which is exactly the load that has twice taken this deployment's
+ * storage down. Little and often instead: the library still completes, a
+ * few dozen at a time, with a long pause between.
+ */
+const BATCH = 24;
+const SCAN_SERIES = 40;
+/** Between batches. Long: nothing waits on this, and the point is to be
+ *  invisible to the disk rather than to finish quickly. */
+const BATCH_IDLE_MS = 120_000;
 /** A file that will not yield a frame is usually broken, not busy. */
 const MAX_ATTEMPTS = 3;
 /** Backoff per attempt; a share that is down deserves a longer pause. */
@@ -83,6 +99,11 @@ export class StillSweeper {
     const cacheDir = this.getCacheDir();
     if (!lib?.sources || !cacheDir) return [];
     const out = [];
+    let scanned = 0;
+    // Where the previous pass stopped, so successive passes advance through
+    // the library instead of re-walking its first pages forever.
+    let skip = this._cursor ?? 0;
+    let seen = 0;
     for (const src of lib.sources) {
       if (!src.lib?._stills) continue;               // source opted out
       let libraries = [];
@@ -91,6 +112,11 @@ export class StillSweeper {
         let page;
         try { page = await src.lib.items(l.id, { startIndex: 0, limit: 500 }); } catch { continue; }
         for (const item of page?.items ?? []) {
+          if (out.length >= BATCH || scanned >= SCAN_SERIES) break;
+          // Resume point: cheap to skip, and it costs no directory listing.
+          seen += 1;
+          if (seen <= skip) continue;
+          scanned += 1;
           let eps = [];
           try {
             eps = item.type === 'Movie' ? [item] : await src.lib.episodes(item.id);
@@ -106,10 +132,16 @@ export class StillSweeper {
             const f = this._failed.get(path);
             if (f && (f.attempts >= MAX_ATTEMPTS || Date.now() < f.nextAt)) continue;
             out.push(path);
+            if (out.length >= BATCH) break;
           }
         }
+        if (out.length >= BATCH || scanned >= SCAN_SERIES) break;
       }
+      if (out.length >= BATCH || scanned >= SCAN_SERIES) break;
     }
+    // Wrap when the walk reaches the end, so newly added media is found on
+    // the next lap rather than never.
+    this._cursor = out.length || scanned ? seen : 0;
     return out;
   }
 
@@ -123,6 +155,7 @@ export class StillSweeper {
     if (!queue.length) { this._later(); return; }
 
     this._state = { running: true, done: 0, total: queue.length, failed: 0 };
+    this._didWork = true;
     this.log(`[stills] ${queue.length} to make\n`);
     const cacheDir = this.getCacheDir();
 
@@ -167,7 +200,9 @@ export class StillSweeper {
   _later() {
     this._state.running = false;
     if (this._stopped || this._timer) return;
-    this._timer = setTimeout(() => { this._timer = null; this._run(); }, IDLE_MS);
+    const wait = this._didWork ? BATCH_IDLE_MS : IDLE_MS;
+    this._didWork = false;
+    this._timer = setTimeout(() => { this._timer = null; this._run(); }, wait);
     this._timer.unref?.();
   }
 }
