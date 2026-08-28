@@ -887,9 +887,14 @@
 
           <label>When</label>
           <select value={sel.when} onchange={(e) => patch(sel.id, { when: e.currentTarget.value })}>
-            <option value="always">The whole episode</option>
-            <option value="intro">Only at the start</option>
-            <option value="outro">Only before it ends</option>
+            <!-- Two different scopes, and naming them both "episode" hid
+                 that. `always` is not bounded by a clip at all — the overlay
+                 is applied to every clip that plays, so it lasts as long as
+                 the broadcast does. intro and outro ARE per episode, and now
+                 say so. -->
+            <option value="always">The whole broadcast</option>
+            <option value="intro">Only at the start of each episode</option>
+            <option value="outro">Only before each episode ends</option>
           </select>
           {#if sel.when !== 'always'}
             <label class="row"><span>For</span>
