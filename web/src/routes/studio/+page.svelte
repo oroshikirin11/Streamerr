@@ -407,7 +407,16 @@
     busy = 'apply'; error = '';
     try {
       await save({ items, hidden });
-      pending = 'apply';
+      /**
+       * Applying while hidden is the one case where Apply looks broken.
+       *
+       * The edit saves, but `visibleOverlay()` is empty, so the engine is
+       * handed the empty set it already holds, dedupes it, and never
+       * respawns — no picture, and not even a line in the console. An
+       * operator who missed the hidden banner has no way to tell that from a
+       * broken Apply, so say it here, where they are looking.
+       */
+      pending = hidden ? 'apply-hidden' : 'apply';
       clearTimeout(pendingTimer);
       // Cleared on a timer rather than on a signal: the panel is not told the
       // reserve depth, so there is nothing to count down from honestly. The
@@ -509,12 +518,22 @@
     </div>
   </div>
   {#if hidden}
-    <p class="warnbar">
-      Overlays are hidden — nothing here is on air. Editing and Apply still
-      work, and everything reappears when you show them again.
+    <p class="warnbar" role={pending === 'apply-hidden' ? 'alert' : null}>
+      {#if pending === 'apply-hidden'}
+        Saved — but <strong>nothing went on air</strong>, because overlays are
+        hidden. The edit is kept and goes out the moment you show them again.
+      {:else}
+        Overlays are hidden — nothing here is on air. Editing and Apply still
+        work, and everything reappears when you show them again.
+      {/if}
+      <!-- The fix offered where the confusion happens, so noticing the
+           problem and correcting it are the same click. -->
+      <button class="inline" onclick={toggleHidden} disabled={busy === 'hide'}>
+        Show on broadcast
+      </button>
     </p>
   {/if}
-  {#if pending}
+  {#if pending && pending !== 'apply-hidden'}
     <p class="pending" role="status">
       <span class="spin" aria-hidden="true"></span>
       {pending === 'hide'
@@ -956,5 +975,18 @@
     background: var(--surface-2); border: 1px solid var(--border);
     color: var(--muted); font-size: 13px;
   }
+  /* Applying into a hidden broadcast is a dead end, not a status: it gets the
+     warning colour so it reads differently from the standing notice it
+     replaces, which sat there long enough to stop being read. */
+  .warnbar[role='alert'] {
+    color: var(--text); border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+  }
+  .warnbar .inline {
+    margin-left: 8px; padding: 2px 8px; font-size: 12px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); cursor: pointer;
+  }
+  .warnbar .inline:disabled { opacity: 0.5; cursor: default; }
   .head button.warn { border-color: var(--accent); color: var(--accent); }
 </style>
