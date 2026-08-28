@@ -296,6 +296,15 @@ const PUBLISH_FAIL_MS = 5_000;
 /** Window for the speed figure shown in the UI, and for the slow warning. */
 const SPEED_WINDOW_MS = 30_000;
 const SLOW_WINDOW_MS = 6_000;
+/**
+ * How long a clip must stay under realtime before it is worth telling anyone.
+ *
+ * Was 8s, which fired during the ordinary dip after a splice — the source
+ * restarts, the bank refills, and the rate is briefly below 1.0 by design.
+ * Reporting that trained the operator to dismiss the one warning that means
+ * the broadcast is about to stall.
+ */
+const SLOW_SUSTAIN_MS = 30_000;
 
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;
@@ -2232,7 +2241,9 @@ export class PipelinePlayout extends EventEmitter {
       let fps = '';
       try {
         const eff = effectiveFps(v, this.profile);
-        if (eff?.fps) fps = ` @ ${eff.fps}fps`;
+        // 24000/1001 is 23.976023976023978 in full, which is noise in a
+        // report meant to be read.
+        if (eff?.fps) fps = ` @ ${Number(eff.fps).toFixed(3).replace(/\.?0+$/, '')}fps`;
       } catch { /* diagnosis must never throw on the warning path */ }
       out.push(`source ${v.codec ?? 'unknown'}${v.pixFmt ? ` ${v.pixFmt}` : ''}${dims}${fps}`
         + ` — ${hw ? 'hardware' : 'SOFTWARE'} decode`
@@ -2257,11 +2268,36 @@ export class PipelinePlayout extends EventEmitter {
         : `full-height subtitle canvas${n}`
           + (this._bandInfo?.reason ? ` — band refused: ${this._bandInfo.reason}` : ''));
     }
-    const imgs = (this.profile?.overlay ?? []).filter((i) => i?.type !== 'text');
-    if (imgs.length) {
-      const moving = imgs.filter((i) => i?.motion === 'bounce').length;
-      out.push(`${imgs.length} picture overlay${imgs.length === 1 ? '' : 's'}`
-        + (moving ? `, ${moving} moving — forces the CPU composite and a full-rate canvas` : ''));
+    /**
+     * What the operator has running in Studio — types and counts only.
+     *
+     * Never filenames or caption text: this block is meant to be pasted into
+     * an issue, and what is on someone's broadcast is their business. The
+     * shape is what matters for cost anyway.
+     */
+    const all = (this.profile?.overlay ?? []).filter((i) => i?.enabled !== false);
+    const pics = all.filter((i) => i?.type !== 'text');
+    const texts = all.filter((i) => i?.type === 'text');
+    if (all.length) {
+      const bits = [];
+      if (pics.length) {
+        const gifs = pics.filter((i) => /\.gif$/i.test(i?.file ?? '')).length;
+        const moving = pics.filter((i) => i?.motion === 'bounce').length;
+        const detail = [gifs && `${gifs} animated`, moving && `${moving} moving`]
+          .filter(Boolean).join(', ');
+        bits.push(`${pics.length} picture${pics.length === 1 ? '' : 's'}`
+          + (detail ? ` (${detail})` : ''));
+      }
+      if (texts.length) {
+        const moving = texts.filter((i) => i?.motion === 'bounce').length;
+        bits.push(`${texts.length} caption${texts.length === 1 ? '' : 's'}`
+          + (moving ? ` (${moving} moving — free, they ride libass)` : ''));
+      }
+      out.push(`studio: ${bits.join(', ')}`);
+      if (pics.some((i) => i?.motion === 'bounce' || /\.gif$/i.test(i?.file ?? ''))) {
+        out.push('  a moving or animated picture forces the CPU composite'
+          + ' and a full-rate canvas');
+      }
     }
 
     // The surface libass actually rasterises, which is the number the band
@@ -2270,7 +2306,8 @@ export class PipelinePlayout extends EventEmitter {
     try {
       const rect = contentRect(v, this.profile);
       const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
-      const halfRate = !imgs.some((i) => i?.motion === 'bounce' || i?.animated);
+      const halfRate = !pics.some((i) => i?.motion === 'bounce'
+        || /\.gif$/i.test(i?.file ?? ''));
       if (sub && !sub.bitmap) {
         out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
           + `, uploaded and blended every frame`);
@@ -2874,10 +2911,23 @@ export class PipelinePlayout extends EventEmitter {
       if (kind === 'clip' && recent != null) {
         if (recent < 0.95) {
           slowSince ??= Date.now();
-          if (!warnedSlow && Date.now() - slowSince > 8000) {
+          if (!warnedSlow && Date.now() - slowSince > SLOW_SUSTAIN_MS) {
             warnedSlow = true;
-            this.emit('tooslow', { speed: Math.round(recent * 100) / 100 });
-            this.emit('warn', this._slowReport(Math.round(recent * 100) / 100));
+            const x = Math.round(recent * 100) / 100;
+            this.emit('tooslow', { speed: x });
+            /**
+             * Two audiences, two lengths.
+             *
+             * The toast is a glance: it has to say that something is wrong
+             * and where to look, and nothing else. The full breakdown went
+             * there first and arrived as a wall of wrapped box-drawing in a
+             * 200px-wide popup, which is worse than no diagnosis at all
+             * because it also buries the one sentence that mattered.
+             */
+            this.emit('warn', `Encoding at ${x}x — slower than realtime for `
+              + `${Math.round(SLOW_SUSTAIN_MS / 1000)}s, so the stream will stall. `
+              + 'The console has the breakdown.');
+            this.emit('log', this._slowReport(x));
           }
         } else {
           slowSince = null;
