@@ -75,15 +75,29 @@ export class StillSweeper {
     this._state = { running: false, done: 0, total: 0, failed: 0 };
     this._timer = null;
     this._stopped = false;
+    /** Bumped whenever the library changes; a run whose generation is stale
+     *  abandons its queue instead of working through paths that may no
+     *  longer exist. */
+    this._gen = 0;
   }
 
   status() {
     return { ...this._state, pending: Math.max(0, this._state.total - this._state.done) };
   }
 
-  /** Begin, or re-plan if a sweep is already running. Safe to call often. */
+  /**
+   * Begin, or re-plan against a library that has just changed.
+   *
+   * Bumping the generation is what makes a switch of source take effect at
+   * once: an in-flight run notices and drops its queue rather than grinding
+   * through paths from a library that no longer exists — which is what left
+   * the panel showing "81/606" forever after switching to Jellyfin.
+   */
   start() {
-    if (this._timer || this._state.running) return;
+    this._gen += 1;
+    this._state = { running: false, done: 0, total: 0, failed: 0 };
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    this._cursor = 0;
     this._timer = setTimeout(() => { this._timer = null; this._run(); }, 1500);
     this._timer.unref?.();
   }
@@ -150,11 +164,14 @@ export class StillSweeper {
 
   async _run() {
     if (this._stopped || this._state.running) return;
+    const gen = this._gen;
     // A broadcast owns the machine. Come back later rather than competing.
     if (this.isBusy()) { this._later(); return; }
 
     let queue;
     try { queue = await this._collect(); } catch { this._later(); return; }
+    // The library can change while a scan is in flight.
+    if (gen !== this._gen) return;
     if (!queue.length) { this._later(); return; }
 
     this._state = { running: true, done: 0, total: queue.length, failed: 0 };
@@ -166,13 +183,17 @@ export class StillSweeper {
     const worker = async () => {
       while (!this._stopped) {
         // Re-checked every item, not just at the start: going live mid-sweep
-        // must stop it there and then.
-        if (this.isBusy()) return;
+        // must stop it there and then, and so must a change of source.
+        if (this.isBusy() || gen !== this._gen) return;
         const i = next++;
         if (i >= queue.length) return;
         const src = queue[i];
         let made = null;
         try { made = await this._grab(src, cacheDir); } catch { made = null; }
+        // A switch of source while this item was in flight already reset
+        // the counters; adding to them now would leave a stale figure on
+        // the panel for a library that is no longer loaded.
+        if (gen !== this._gen) return;
         if (made) {
           this._state.done += 1;
           this._failed.delete(src);
@@ -193,6 +214,9 @@ export class StillSweeper {
     };
 
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    // A newer generation has already reset the state and scheduled itself;
+    // finishing this one must not resurrect its counters.
+    if (gen !== this._gen) return;
     const { done, failed } = this._state;
     this._state.running = false;
     if (done || failed) this.log(`[stills] made ${done}${failed ? `, ${failed} failed` : ''}\n`);

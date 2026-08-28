@@ -275,19 +275,32 @@
           id: x.id, name: x.name?.trim() || `Source ${i + 1}`, provider: x.provider,
           generateStills: x.generateStills ?? stillsDefault(x.provider),
         };
-        if (x.provider === 'jellyfin') {
-          out.jellyfin = { url: x.jellyfin.url, apiKey: i === sel && jellyfinKey ? jellyfinKey : (x.jellyfin.apiKey || '') };
-          out.pathMap = x.pathMap ?? [];
-        } else if (x.provider === 'smb' || x.provider === 'smbmount') {
-          out.smb = {
-            host: x.smb.host, share: x.smb.share, path: x.smb.path,
-            guest: x.smb.guest,
-            username: x.smb.guest ? '' : x.smb.username,
-            password: x.smb.guest ? '' : (i === sel && smbPassword ? smbPassword : (x.smb.password || '')),
-          };
-        } else {
-          out.filesystem = { roots: i === sel ? parseList(fsRoots) : (x.filesystem.roots ?? []) };
-        }
+        // Every provider's settings go back, not just the active one's.
+        // Sending only the selected provider meant switching from Jellyfin
+        // to a folder silently threw the server url and api key away — and
+        // the array is replaced wholesale on save, so nothing restored it.
+        // Whichever is chosen, the others wait untouched for a switch back.
+        out.jellyfin = {
+          url: x.jellyfin?.url ?? '',
+          apiKey: x.provider === 'jellyfin' && i === sel && jellyfinKey
+            ? jellyfinKey
+            : (x.jellyfin?.apiKey || ''),
+        };
+        out.pathMap = x.pathMap ?? [];
+        out.smb = {
+          host: x.smb?.host ?? '', share: x.smb?.share ?? '', path: x.smb?.path ?? '',
+          guest: x.smb?.guest ?? true,
+          username: x.smb?.guest ? '' : (x.smb?.username ?? ''),
+          password: x.smb?.guest ? ''
+            : ((x.provider === 'smb' || x.provider === 'smbmount') && i === sel && smbPassword
+              ? smbPassword
+              : (x.smb?.password || '')),
+        };
+        out.filesystem = {
+          roots: x.provider === 'filesystem' && i === sel
+            ? parseList(fsRoots)
+            : (x.filesystem?.roots ?? []),
+        };
         return out;
       }),
     };
