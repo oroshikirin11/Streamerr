@@ -75,12 +75,8 @@ export function imageOverlayChain(images, {
     // finite input — one less way for the process to hang.
     const steps = ['format=rgba'];
     const w = Math.max(2, Math.round((Number(img.size) || 0.2) * width));
-    // -2, not -1: -1 preserves aspect exactly and will happily produce an
-    // ODD height. Odd-sized surfaces are a well-known way to make a VAAPI
-    // upload fail, and this same scale feeds the hardware path — a 933x877
-    // logo asked for 1543 wide gives an odd height, which is the most
-    // likely reason h264_vaapi returned -22 on the deployment's driver
-    // while the same graph ran here. Rounding to even costs at most a pixel.
+    // -2 keeps the height even. This is the software path, which does not
+    // care, but it keeps both builders producing the same size.
     steps.push(`scale=${w}:-2`);
     const rot = Number(img.rotation) || 0;
     if (rot) {
@@ -137,12 +133,11 @@ export function imageOverlayChain(images, {
  * scale-then-rotate order matches the software path exactly and a rotated
  * picture is the same size on both.
  *
- * The one thing it cannot do is timing: overlay_vaapi has no `enable`
- * option, so an intro/outro picture still needs the software path. Callers
- * check for that before choosing this.
+ * Timing is handled at the input (see below), so this covers intro/outro
+ * pictures too — nothing here needs the software path.
  */
 export function vaapiImageOverlayChain(images, {
-  width = 1920, firstInput = 1, inLabel = 'in', outLabel = 'out',
+  width = 1920, height = 1080, firstInput = 1, inLabel = 'in', outLabel = 'out',
 } = {}) {
   const list = (images ?? []).filter((i) => i?.path);
   if (!list.length) return { inputs: [], filters: [], looping: false };
@@ -181,9 +176,22 @@ export function vaapiImageOverlayChain(images, {
     // All of this runs once, on a single frame, before the picture is ever
     // handed to the GPU — which is why a logo can be free.
     const steps = ['format=rgba'];
-    // -2 for the same reason as the software path: this frame is uploaded
-    // to the GPU, and an odd height is a good way to be told -22.
-    steps.push(`scale=${Math.max(2, Math.round((Number(img.size) || 0.2) * width))}:-2`);
+    /**
+     * Bounded by the FRAME, not just by the requested width.
+     *
+     * An overlay surface larger than the main frame is what iHD rejects:
+     * measured on the deployment, a 1536x1536 picture on a 1920x1080 frame
+     * returned -22 from h264_vaapi, and 1056x1056 on the same frame was
+     * accepted. The width alone is not the constraint — a tall picture asked
+     * for 80% of the width is 1536 high on a 1080 frame and overflows.
+     *
+     * force_original_aspect_ratio=decrease keeps the shape while fitting
+     * inside the box; force_divisible_by=2 keeps both sides even, which
+     * hardware surfaces want anyway.
+     */
+    const w = Math.max(2, Math.round((Number(img.size) || 0.2) * width));
+    steps.push(`scale=w=${Math.min(w, width)}:h=${height}`
+      + ':force_original_aspect_ratio=decrease:force_divisible_by=2');
     const rot = Number(img.rotation) || 0;
     if (rot) {
       const rad = (rot * Math.PI / 180).toFixed(6);

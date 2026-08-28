@@ -2727,7 +2727,7 @@ export function buildSourceArgs({
     // device already runs — and nothing per-frame on the CPU. This is the
     // cheapest the feature can be.
     const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
-      width: profile.width, firstInput: 1, inLabel: 'b', outLabel: 'v',
+      width: profile.width, height: profile.height, firstInput: 1, inLabel: 'b', outLabel: 'v',
     });
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -2872,7 +2872,7 @@ export function buildSourceArgs({
     // fallback — see gpuImages above. If the driver will not do it, the
     // picture is simply absent and the episode plays at full speed.
     const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
-      width: profile.width, firstInput: bgInput.length ? 3 : 2,
+      width: profile.width, height: profile.height, firstInput: bgInput.length ? 3 : 2,
       inLabel: 'vpre', outLabel: 'v',
     });
     const composited = gpuImgs.filters.length
