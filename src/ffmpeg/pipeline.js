@@ -28,7 +28,8 @@
  *    see EOF and shut down the connection we are trying to protect.
  */
 
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { existsSync, readFileSync, statfsSync, writeFileSync } from 'fs';
 import { Writable } from 'stream';
 import { availableParallelism, cpus , totalmem } from 'os';
@@ -39,7 +40,10 @@ import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter } from './tracks.js';
 import { overlayAss } from './overlay-ass.js';
-import { imageOverlayChain, vaapiImageOverlayChain, canvasImageChain } from './overlay-image.js';
+import {
+  imageOverlayChain, vaapiImageOverlayChain, canvasImageChain,
+  splitStaticImages, staticLayerArgs,
+} from './overlay-image.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -1532,6 +1536,49 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   /**
+   * Render every still picture into ONE transparent canvas-sized PNG, once,
+   * and return its path — or null if there is nothing to bake.
+   *
+   * The subtitle canvas has to be built and uploaded every frame regardless,
+   * so a still picture that is already IN that canvas costs nothing per
+   * frame: no extra input, no overlay filter, no colourspace work. Compared
+   * against compositing it live, over 720 frames of the real chain, the
+   * difference is 1.169 ms/frame against 1.434 — the same as no picture at
+   * all (1.164). The picture becomes free rather than cheaper.
+   *
+   * Cached by content: the key covers the canvas size and every descriptor
+   * field that changes a pixel, so re-applying the same overlay reuses the
+   * file and only a genuine edit pays the render.
+   */
+  _overlayLayer(images) {
+    if (!this.cacheDir) return null;
+    const { baked } = splitStaticImages(images);
+    if (!baked.length) return null;
+    try {
+      const rect = contentRect(this.selection?.video, this.profile);
+      const key = createHash('sha1')
+        .update(JSON.stringify([rect.w, rect.h, baked]))
+        .digest('hex').slice(0, 16);
+      const out = join(this.cacheDir, `layer-${key}.png`);
+      if (existsSync(out)) return out;
+      const args = staticLayerArgs(baked, { width: rect.w, height: rect.h, out });
+      if (!args) return null;
+      const r = spawnSync('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      // No throw on failure: a layer that will not render is a picture the
+      // viewer does not see, never a broadcast that stops. The caller falls
+      // back to the transparent colour source and composites it live.
+      if (r.status !== 0 || !existsSync(out)) {
+        this.emit('warn', `overlay layer render failed: ${
+          String(r.stderr ?? '').trim().slice(0, 200) || `exit ${r.status}`}`);
+        return null;
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * @param {string} [tag] distinguishes the chunked variant, which writes
    *   the same overlay against a different time base. One filename for both
    *   would let a clip transition rewrite the file under workers that are
@@ -1710,6 +1757,7 @@ export class PipelinePlayout extends EventEmitter {
       return;
     }
 
+    const overlayImages = this._overlayImages(item, offset);
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       offset,
@@ -1721,7 +1769,11 @@ export class PipelinePlayout extends EventEmitter {
       // rare one. Pictures below DO take the offset: they are timed by
       // `enable` on the overlay filter, which is read after the restore.
       overlayPath: this._overlayFile(item, 0),
-      overlayImages: this._overlayImages(item, offset),
+      overlayImages,
+      // Rendered here rather than inside the builder: it spawns ffmpeg and
+      // touches the disk, which a pure argv builder has no business doing,
+      // and this runs once per clip instead of once per graph.
+      overlayLayer: this._overlayLayer(overlayImages),
       profile: this.profile,
       selection: this.selection,
       tsOffset: this.timeline,
@@ -2678,7 +2730,7 @@ const item = (self) => self.current?.item?.title ?? 'clip';
 export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
-  overlayPath = null, overlayImages = [],
+  overlayPath = null, overlayImages = [], overlayLayer = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -2915,11 +2967,44 @@ export function buildSourceArgs({
      * It also covers timed pictures, which the GPU path had to express by
      * withholding an input because overlay_vaapi has no `enable`.
      */
-    const canvasImgs = canvasImageChain(imgList, {
-      width: rect.w, firstInput: bgInput.length ? 3 : 2,
-      inLabel: 'sub', outLabel: 'cv',
-    });
-    const canvasHead = `[1:v]setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
+    /**
+     * Still pictures are pre-rendered into the canvas instead of being
+     * blended into it 24 times a second.
+     *
+     * A still contributes the same pixels to every frame of the clip, so
+     * per-frame compositing recomputes an identical result all episode. The
+     * canvas is generated and uploaded regardless for the subtitles, so a
+     * picture that is already part of it is genuinely free: measured over
+     * 720 frames of this exact chain, seeding the canvas costs 1.169
+     * ms/frame against 1.164 with no picture at all, where compositing live
+     * costs 1.434. Verified pixel-identical to the live composite (PSNR inf)
+     * wherever a picture does not overlap a subtitle; where it does, the
+     * subtitle now draws ON TOP of the picture rather than under it.
+     *
+     * Bounded by `-t` on the layer input having no effect on a `loop`
+     * filter, this needs the trim below instead. Requiring a known duration
+     * keeps that guarantee simple — an unbounded canvas is what makes the
+     * process outlive the episode and stall the whole playlist.
+     *
+     * The loop FILTER, never `-loop 1` on the input: the input-side form
+     * re-decodes the PNG on every frame and measured 6.570 ms/frame, five
+     * times worse than doing nothing at all.
+     */
+    const layer = overlayLayer && duration != null && duration > 0
+      && existsSync(overlayLayer) ? overlayLayer : null;
+    // Timed and animated pictures cannot be baked into a still, so they keep
+    // the per-frame path on top of the layer.
+    const canvasImgs = canvasImageChain(
+      layer ? splitStaticImages(imgList).live : imgList, {
+        width: rect.w, firstInput: bgInput.length ? 3 : 2,
+        inLabel: 'sub', outLabel: 'cv',
+      },
+    );
+    const layerSrc = layer
+      ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${eff.rate})/TB,`
+        + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
+      : '[1:v]';
+    const canvasHead = `${layerSrc}setpts=PTS+${shift}/TB,${sub.filter}:alpha=1,`
       + 'setpts=PTS-STARTPTS,format=rgba';
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to
@@ -2940,8 +3025,13 @@ export function buildSourceArgs({
       '-extra_hw_frames', '8',
       ...(offset > 0 ? ['-ss', shift] : []),
       '-i', srcPath,
-      '-f', 'lavfi', ...canvasCap,
-      '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`,
+      // Input 1 is the canvas base: the pre-rendered picture layer when
+      // there is one, otherwise a transparent frame. Same size, same rate,
+      // same RGBA — everything downstream is identical either way.
+      ...(layer
+        ? ['-r', eff.rate, '-i', layer]
+        : ['-f', 'lavfi', ...canvasCap,
+          '-i', `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`]),
       ...bgInput,
       ...canvasImgs.inputs,
       '-filter_complex', graph,

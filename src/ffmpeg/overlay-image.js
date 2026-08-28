@@ -264,6 +264,59 @@ export function vaapiImageOverlayChain(images, {
 }
 
 /**
+ * Split pictures into the ones that can be baked into a still layer and the
+ * ones that cannot.
+ *
+ * A picture is bakeable when it looks the same on every frame of the clip:
+ * no intro/outro window, and not an animated GIF. Those two are the only
+ * things that make a picture's pixels a function of time.
+ */
+export function splitStaticImages(images) {
+  const baked = [];
+  const live = [];
+  for (const img of (images ?? []).filter((i) => i?.path)) {
+    if (img.start == null && img.end == null && !img.animated) baked.push(img);
+    else live.push(img);
+  }
+  return { baked, live };
+}
+
+/**
+ * ffmpeg arguments that render still pictures ONCE into a transparent
+ * full-canvas PNG, so the streaming graph can start from that instead of
+ * compositing them 24 times a second.
+ *
+ * This is the whole point: a still picture's contribution to the canvas is
+ * identical on every frame, so computing it per frame is pure waste.
+ * Measured over 720 frames of the real canvas chain — canvas alone 1.164
+ * ms/frame, canvas plus a per-frame overlay 1.434, canvas seeded with a
+ * pre-rendered layer 1.169. The picture stops costing anything at all
+ * rather than merely costing less, and the graph loses an input and a
+ * filter with it.
+ *
+ * format=rgba on the colour source is load-bearing and NOT decoration:
+ * lavfi's `color` defaults to an opaque format, so `black@0.0` without it
+ * yields alpha 255 — a fully OPAQUE black layer that hides the entire
+ * video behind the subtitles. Caught by measuring the layer's alpha plane
+ * (255 against the 9.3 a correct layer gives) before this ever ran live.
+ */
+export function staticLayerArgs(images, { width, height, out }) {
+  const chain = imageOverlayChain(images, {
+    width, firstInput: 1, inLabel: 'base', outLabel: 'lay',
+  });
+  if (!chain.filters.length) return null;
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    '-f', 'lavfi', '-i', `color=c=black@0.0:s=${width}x${height},format=rgba`,
+    ...chain.inputs,
+    '-filter_complex',
+    `[0:v]format=rgba[base];${chain.filters.join(';')};[lay]format=rgba[o]`,
+    // -frames:v 1 also bounds the infinite colour source.
+    '-map', '[o]', '-frames:v', '1', '-pix_fmt', 'rgba', '-update', '1', out,
+  ];
+}
+
+/**
  * Pictures drawn onto the RGBA overlay canvas, on the CPU, before it is
  * uploaded and composited by the single overlay_vaapi the driver has
  * already proven it can do.
