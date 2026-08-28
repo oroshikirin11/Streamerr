@@ -960,9 +960,15 @@
                saved = 'runahead';
                setTimeout(() => { if (saved === 'runahead') saved = ''; }, 2500);
              }} />
-      Encode ahead of the broadcast when there is spare horsepower
+      Build a deep cushion in RAM when there is spare horsepower
       {#if saved === 'runahead'}<span class="ok small">Saved</span>{/if}
     </label>
+    <p class="muted small" style="margin-top:6px;">
+      Sets how much encoded video may wait in RAM ahead of the broadcast. Turning
+      it off does not stop encoding ahead — clips that need several CPU workers
+      still build the short head start they need to go on air at all, which is why
+      they still pause briefly before starting.
+    </p>
     {#if cfg.runAhead.enabled}
       <div style="margin-top:10px; max-width: 320px;">
         <label>RAM limit (MB)</label>

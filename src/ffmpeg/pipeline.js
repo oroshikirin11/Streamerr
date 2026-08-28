@@ -955,7 +955,28 @@ export class PipelinePlayout extends EventEmitter {
     this._detached(this._extract(item).finally(() => {
       if (this._stopping || this._selToken !== tok) return;
       if (this.current?.item !== item || this.status !== 'running') return;
-      this._bankFlush();
+      /**
+       * The bank SURVIVES an overlay change. This is the whole difference
+       * between a seamless apply and a visible stall.
+       *
+       * _bankFlush throws the cushion away and rewinds `position` back to
+       * `aired`, so the new source re-encodes the seconds the old one had
+       * already produced. That makes the overlay appear instantly — and
+       * leaves the publisher with nothing to send for the entire respawn,
+       * which is a buffering spinner for every Owncast viewer.
+       *
+       * Keeping the bank, `position` still points at where the old source
+       * stopped, so the new one continues from exactly there: the same
+       * continuation an ordinary episode advance uses, and a FORWARD seam,
+       * which is the only kind the publisher's -re pacer tolerates. Cost:
+       * the change goes on air when the cushion drains rather than at once.
+       * That is the trade the operator is making, and it is the right one
+       * for viewers.
+       */
+      const dropped = this._bankTrimToPacket();
+      const ahead = Math.max(0, this.position - (this.aired ?? this.position));
+      this.emit('log', `[overlay] applied seamlessly — on air in ~${ahead.toFixed(1)}s `
+        + `(cushion kept${dropped ? `, ${dropped}B partial packet trimmed` : ''})\n`);
       this._play(item, this.position, { duration: dur });
     }), 'applying overlays');
     return true;
@@ -1358,6 +1379,38 @@ export class PipelinePlayout extends EventEmitter {
   /** A throwing preview listener must never take the drain loop down. */
   _emitData(chunk) {
     try { this.emit('data', chunk); } catch { /* listener's problem */ }
+  }
+
+  /**
+   * Make the bank end on a packet boundary WITHOUT discarding it.
+   *
+   * The seamless-apply counterpart to _bankFlush. A source that is killed
+   * mid-write leaves a partial 188-byte packet at the bank's tail; splicing
+   * the next source's output straight onto that produces a torn packet,
+   * which is what kills the publisher's demuxer ("Error muxing a packet").
+   * _bankFlush avoids it by completing the packet and throwing the rest
+   * away — but here the rest is exactly what we are keeping, so the fix is
+   * the other direction: drop the unfinished tail. Those bytes belong to a
+   * packet the dead source was never going to finish anyway.
+   *
+   * Returns the number of bytes dropped, which is always under 188.
+   */
+  _bankTrimToPacket() {
+    let excess = (this._bankBytes ?? 0) % 188;
+    if (!excess) return 0;
+    const dropped = excess;
+    while (excess > 0 && this._bank?.length) {
+      const last = this._bank[this._bank.length - 1];
+      if (last.data.length <= excess) {
+        excess -= last.data.length;
+        this._bank.pop();
+      } else {
+        last.data = last.data.subarray(0, last.data.length - excess);
+        excess = 0;
+      }
+    }
+    this._bankBytes -= dropped;
+    return dropped;
   }
 
   _bankFlush() {
