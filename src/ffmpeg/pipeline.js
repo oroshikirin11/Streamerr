@@ -2347,9 +2347,25 @@ export class PipelinePlayout extends EventEmitter {
      */
     try {
       const cpu = cpus?.()[0]?.model?.replace(/\s+/g, ' ').trim() ?? 'unknown CPU';
-      const gb = Math.round((totalmem?.() ?? 0) / 1073741824);
+      // availableMemory(), NOT totalmem(): under a container the host's total
+      // is not what this service may use, and reporting it would have stated
+      // a confident wrong number the moment anyone set a memory limit.
+      const gb = Math.round(availableMemory() / 1073741824);
+      // /dev/shm is separate from that and is what the run-ahead cache lives
+      // in, so a small one is its own kind of constraint — and it is the
+      // number the operator actually configured, via shm_size.
+      let shm = '';
+      try {
+        const st = statfsSync('/dev/shm');
+        const mb = Math.round((st.bsize * st.blocks) / 1024 ** 2);
+        if (mb >= 1024) {
+          const g = Math.round((mb / 1024) * 10) / 10;
+          shm = `, ${String(g).replace(/\.0$/, '')}GB /dev/shm`;
+        } else if (mb) shm = `, ${mb}MB /dev/shm`;
+      } catch { /* not every host has one */ }
       out.push(`host ${cpu}, ${availableCores()} cores usable`
-        + (gb ? `, ${gb}GB RAM` : '')
+        + (gb ? `, ${gb}GB RAM for this service` : '')
+        + shm
         + `, ${p0.device ?? 'no vaapi device'}`);
     } catch { /* diagnosis must never throw on the warning path */ }
     return out;
