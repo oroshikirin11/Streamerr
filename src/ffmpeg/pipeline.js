@@ -1640,13 +1640,13 @@ export class PipelinePlayout extends EventEmitter {
    * to the full-frame canvas it uses today. See subband.js for why the
    * analysis is a whitelist.
    */
-  _subtitleBand(extractedPath, { overlayPath, images, fontsDir }) {
+  _subtitleBand(extractedPath, { overlayPath, fontsDir }) {
     if (!this.cacheDir || !extractedPath) return null;
     // A Studio caption is a second libass pass over the same canvas and can
-    // sit anywhere on screen; pictures are placed by the viewer and drawn
-    // into this canvas too. Either one can live outside the band, so neither
-    // gets one until their extents are folded into it.
-    if (overlayPath || (images ?? []).length) return null;
+    // sit anywhere on screen, so it keeps the full frame. Pictures do not
+    // block a band: the builder moves them to the GPU instead of drawing
+    // them into the canvas that is about to be cropped.
+    if (overlayPath) return null;
     const sub = this.selection?.subtitle;
     if (!sub || sub.bitmap) return null;
     try {
@@ -1905,7 +1905,6 @@ export class PipelinePlayout extends EventEmitter {
       overlayLayer: this._overlayLayer(overlayImages),
       subBand: this._subtitleBand(cached?.path ?? null, {
         overlayPath: overlayFile,
-        images: overlayImages,
         fontsDir: cached?.fontsDir ?? null,
       }),
       profile: this.profile,
@@ -3166,11 +3165,40 @@ export function buildSourceArgs({
      * re-decodes the PNG on every frame and measured 6.570 ms/frame, five
      * times worse than doing nothing at all.
      */
-    const layer = overlayLayer && duration != null && duration > 0
+    /**
+     * The subtitle canvas, shrunk to the rows the script actually draws in.
+     *
+     * Taken only when the caller proved the script is bottom-anchored AND
+     * the geometry it was analysed against is the geometry being built now —
+     * the band is a position on this frame, so a rect that changed under it
+     * would put the subtitles somewhere else entirely.
+     *
+     * Pictures are the other thing living on this canvas, and cropping the
+     * canvas would crop them with it. They do not have to live there: the
+     * GPU can composite them itself, after the band lands, exactly as the
+     * subtitle-free path already does. That is strictly cheaper than drawing
+     * them on the CPU every frame, so when the driver will take them the
+     * canvas goes back to carrying nothing but subtitles and the band
+     * applies to a clip with a picture on it too.
+     */
+    const band = subBand && !canvasPad && !rect.bars
+      && subBand.rect.w === rect.w && subBand.rect.h === rect.h
+      && (!imgList.length || gpuImages) ? subBand : null;
+
+    const gpuImgs = band && imgList.length
+      ? vaapiImageOverlayChain(imgList, {
+        width: rect.w, height: rect.h, firstInput: 2,
+        inLabel: 'vb', outLabel: 'v',
+      })
+      : { inputs: [], filters: [], looping: false };
+
+    // A banded canvas carries subtitles alone, so it needs neither the
+    // pre-rendered picture layer nor a per-frame picture composite.
+    const layer = !band && overlayLayer && duration != null && duration > 0
       && existsSync(overlayLayer) ? overlayLayer : null;
     // Timed and animated pictures cannot be baked into a still, so they keep
     // the per-frame path on top of the layer.
-    const canvasImgs = canvasImageChain(
+    const canvasImgs = band ? { inputs: [], filters: [] } : canvasImageChain(
       layer ? splitStaticImages(imgList).live : imgList, {
         width: rect.w, firstInput: bgInput.length ? 3 : 2,
         inLabel: 'sub', outLabel: 'cv',
@@ -3203,19 +3231,6 @@ export function buildSourceArgs({
       ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${canvasRate})/TB,`
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
       : '[1:v]';
-    /**
-     * The subtitle canvas, shrunk to the rows the script actually draws in.
-     *
-     * Only taken when the caller proved it is safe AND the geometry it was
-     * analysed against is the geometry being built now — the band is a
-     * position on this frame, so a rect that changed under it would put the
-     * subtitles somewhere else entirely. A picture layer keeps the full
-     * canvas: the layer PNG is a full frame and cropping it here would clip
-     * the picture.
-     */
-    const band = subBand && !layer && !canvasImgs.filters.length
-      && subBand.rect.w === rect.w && subBand.rect.h === rect.h
-      && !canvasPad ? subBand : null;
     const canvasH = band ? band.height : rect.h;
     const canvasHead = `${layerSrc}setpts=PTS+${shift}/TB,`
       + `${band ? band.filter : sub.filter}:alpha=1,`
@@ -3228,10 +3243,17 @@ export function buildSourceArgs({
       : `${canvasHead}${canvasPad},hwupload[ov];`;
     // A band is a shorter surface than the frame, so it has to be told where
     // to land. Reachable only when there are no bars, which is the one case
-    // whose composite is a bare overlay_vaapi.
+    // whose composite is a bare overlay_vaapi. Pictures, when there are any,
+    // go on after it — onto the finished frame, at frame coordinates, which
+    // is where they were placed.
+    const bandComposite = band
+      ? (gpuImgs.filters.length
+        ? `[b][ov]overlay_vaapi=x=0:y=${band.y}[vb];${gpuImgs.filters.join(';')}`
+        : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
+      : composite;
     const graph = `${canvasChain}`
       + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];`
-      + `${band ? `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]` : composite}`;
+      + `${bandComposite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -3251,7 +3273,12 @@ export function buildSourceArgs({
         : ['-f', 'lavfi', ...canvasCap,
           '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=rgba`]),
       ...bgInput,
+      // Mutually exclusive: a banded canvas has no pictures drawn into it,
+      // and an unbanded one composites none on the GPU. Either way the first
+      // picture input lands at index 2, which is what both chains were
+      // numbered against.
       ...canvasImgs.inputs,
+      ...gpuImgs.inputs,
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),
