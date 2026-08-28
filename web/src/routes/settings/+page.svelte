@@ -90,9 +90,10 @@
 
   /** Frame-size mode, tolerating a config written by an older build. */
   const frameSize = $derived(
-    ['fixed', 'fit', 'source'].includes(cfg?.encoder?.frameSize)
+    ['fixed', 'fit', 'native'].includes(cfg?.encoder?.frameSize)
       ? cfg.encoder.frameSize
-      : (cfg?.encoder?.trimBars ? 'fit' : 'fixed'));
+      : (cfg?.encoder?.frameSize === 'source' ? 'native'
+        : (cfg?.encoder?.trimBars ? 'fit' : 'fixed')));
   /** A concrete 4:3 size for the explanation, derived from the chosen height. */
   const fitExample = $derived(
     `${Math.round(((+cfg?.encoder?.height || 1080) * 4 / 3) / 2) * 2}×${+cfg?.encoder?.height || 1080}`);
@@ -566,9 +567,9 @@
       <button class:on={frameSize === 'fixed'}
               onclick={() => (cfg.encoder.frameSize = 'fixed')}>Always the same</button>
       <button class:on={frameSize === 'fit'}
-              onclick={() => (cfg.encoder.frameSize = 'fit')}>Fit the picture</button>
-      <button class:on={frameSize === 'source'}
-              onclick={() => (cfg.encoder.frameSize = 'source')}>Match the file</button>
+              onclick={() => (cfg.encoder.frameSize = 'fit')}>Fill the frame</button>
+      <button class:on={frameSize === 'native'}
+              onclick={() => (cfg.encoder.frameSize = 'native')}>Match the file</button>
     </div>
     <p class="muted small">
       {#if frameSize === 'fixed'}
@@ -576,16 +577,18 @@
         black bars added around anything that is not that shape. The stream
         never reconnects.
       {:else if frameSize === 'fit'}
-        Bars are dropped: a 4:3 episode goes out at {fitExample} instead of
+        The picture keeps its shape and is scaled to fill the frame, so the
+        bars go away: a 4:3 episode goes out at {fitExample} instead of
         {cfg.encoder.width}&times;{cfg.encoder.height} &mdash; about a fifth less to
-        encode &mdash; and a scope film loses its top and bottom bars.
-        <strong>{cfg.encoder.width}&times;{cfg.encoder.height} stays the maximum</strong>,
-        so a 4K file still comes down to it.
+        encode. Standard-definition material is <em>scaled up</em> to fill,
+        which costs encoding effort without adding detail.
       {:else}
-        Each file is sent at its own size, <strong>with no maximum</strong> &mdash; a
-        4K file is encoded at 4K, which most machines cannot do in real time.
-        The resolution above is ignored. Choose this only if you know the
-        hardware can keep up.
+        Every file is sent at exactly its own size, only ever scaled
+        <em>down</em> &mdash; a 640&times;480 episode goes out at 640&times;480 rather
+        than five times the pixels for no extra detail. Anything larger than
+        {cfg.encoder.width}&times;{cfg.encoder.height} comes down to it, so raise
+        the resolution above if you want 4K out. Sizes vary most in this mode,
+        so expect the most reconnects.
       {/if}
     </p>
     {#if frameSize !== 'fixed'}

@@ -924,6 +924,13 @@ export class PipelinePlayout extends EventEmitter {
     // flush cut the stream on a packet boundary instead of mid-packet.
     this._published = 0;
     this._drainGen = 0;
+    // A new RTMP session restarts the TS byte stream at zero. Preview
+    // clients must be cut AND the fan-out's packet-phase counter reset with
+    // it: a rejoining client works out its packet boundary from that count,
+    // so a stale one lands it mid-packet, and mpegts.js probes byte 0 for
+    // the 0x47 sync marker instead of scanning for it — the picture never
+    // comes back.
+    this.emit('publisher-restart');
     // Backpressure state belongs to the process that caused it. A drain
     // that parked on the PREVIOUS publisher's stdin left this latched with
     // a 'drain' listener on a pipe that will never fire again, so every
@@ -1394,18 +1401,21 @@ export class PipelinePlayout extends EventEmitter {
     const mode = this._box.frameSize ?? 'fixed';
     if (mode === 'fixed' || !video?.width || !video?.height) return box;
 
-    if (mode === 'source') {
+    if (mode === 'native') {
       // The source's DISPLAY size: anamorphic material is stored narrow and
       // stretched at playback, and encoding the stored size would squash it.
       let vw = video.width;
       const m = /^(\d+):(\d+)$/.exec(video.sar ?? '');
       if (m && +m[1] > 0 && +m[2] > 0) vw = vw * (+m[1] / +m[2]);
       const even = (n) => Math.max(2, Math.round(n / 2) * 2);
-      // No ceiling by design, but not unbounded either: past 8K this is a
-      // broken probe rather than a real file, and encoders reject it anyway.
-      const w = Math.min(7680, even(vw));
-      const h = Math.min(4320, even(video.height));
-      return { width: w, height: h };
+      // Only ever downscale. Upscaling 640x480 to fill 1080 costs five
+      // times the macroblocks and adds no detail the source did not have —
+      // the viewer's player does that for free.
+      if (vw <= box.width && video.height <= box.height) {
+        return { width: even(vw), height: even(video.height) };
+      }
+      const over = contentRect(video, this._box);
+      return { width: over.w, height: over.h };
     }
 
     const r = contentRect(video, this._box);   // 'fit' — capped by the box

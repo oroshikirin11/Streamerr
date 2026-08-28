@@ -72,12 +72,13 @@ const DEFAULTS = {
      *
      *   'fixed'  always width x height, bars padded in. The original
      *            behaviour, and the only one that never reconnects.
-     *   'fit'    the content rectangle: 4:3 and scope keep their shape
-     *            instead of carrying bars. width x height stays a CEILING,
-     *            so a 4K source still comes down to it.
-     *   'source' the source's own display size, with NO ceiling — a 4K
-     *            file is encoded at 4K. Best quality where the hardware
-     *            can take it, unplayable where it cannot.
+     *   'fit'    the content rectangle: the source's shape, scaled to
+     *            fill width x height. No bars, but SD is upscaled to fill.
+     *   'native' the source's own size, downscaled only when it exceeds
+     *            width x height. Never upscales, so a 640x480 file is
+     *            encoded at 640x480 rather than five times the macroblocks
+     *            for no extra detail. Raise the resolution above if you
+     *            want 4K out; that is what makes the ceiling meaningful.
      *
      * Anything but 'fixed' costs a reconnect when the shape changes: the
      * publisher owns one RTMP session and FLV announces the frame size
@@ -220,7 +221,14 @@ export function normalizeStoredEncoder() {
     enc.frameSize = enc.trimBars ? 'fit' : 'fixed';
     delete enc.trimBars;
   }
-  if (enc.frameSize !== undefined && !['fixed', 'fit', 'source'].includes(enc.frameSize)) {
+  if (enc.frameSize === 'source') {
+    // Uncapped native was replaced by 'native', which honours the
+    // resolution setting — raising that is the way to ask for a bigger
+    // frame, rather than a mode that silently ignores it.
+    fixed.push('frameSize=source→native');
+    enc.frameSize = 'native';
+  }
+  if (enc.frameSize !== undefined && !['fixed', 'fit', 'native'].includes(enc.frameSize)) {
     fixed.push(`frameSize=${JSON.stringify(enc.frameSize)}→fixed`);
     enc.frameSize = 'fixed';
   }

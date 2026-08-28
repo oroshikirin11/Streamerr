@@ -350,6 +350,18 @@ function wirePreview(e) {
     }
   });
 
+  // The publisher itself was replaced — a frame-shape change starts a new
+  // RTMP session, so the byte stream restarts at zero. Without resetting
+  // the counter here, every later rejoin computes its packet boundary from
+  // the previous session's total and starts mid-packet.
+  e.on('publisher-restart', () => {
+    if (tsBytes === 0) return;
+    tsBytes = 0;
+    for (const ws of previewSockets) {
+      try { ws.close(1000, 'stream restarted'); } catch { /* closing */ }
+    }
+  });
+
   e.on('data', (chunk) => {
     const at = tsBytes;
     tsBytes += chunk.length;
