@@ -389,9 +389,31 @@
     dirty = false;
   }
 
+  /**
+   * Applying no longer takes effect the moment the request returns.
+   *
+   * The engine keeps its encoded cushion across an overlay change now — the
+   * alternative was throwing it away, which left the publisher with nothing
+   * to send and put a buffering spinner in front of every viewer. The cost
+   * is that the change goes on air when that cushion drains, several seconds
+   * later. The request itself still completes immediately, so without this
+   * the button flashed 'Applying…' for a few milliseconds and then nothing
+   * visible happened until the overlay appeared out of nowhere.
+   */
+  let pending = $state(false);
+  let pendingTimer = null;
+
   async function apply() {
     busy = 'apply'; error = '';
-    try { await save({ items, hidden }); } catch (err) { error = err.message; }
+    try {
+      await save({ items, hidden });
+      pending = true;
+      clearTimeout(pendingTimer);
+      // Cleared on a timer rather than on a signal: the panel is not told the
+      // reserve depth, so there is nothing to count down from honestly. The
+      // note says "about", and the timer outlasts a full bank.
+      pendingTimer = setTimeout(() => { pending = false; }, 20000);
+    } catch (err) { error = err.message; }
     busy = '';
   }
 
@@ -479,6 +501,13 @@
       </button>
     </div>
   </div>
+  {#if pending}
+    <p class="pending" role="status">
+      <span class="spin" aria-hidden="true"></span>
+      Applied — going on air in about 15 seconds. The broadcast plays out what
+      it has already encoded first, so viewers see no interruption.
+    </p>
+  {/if}
   {#if hidden}
     <p class="warnbar">
       Overlays are hidden — nothing here is on air. Editing and Apply still
@@ -741,6 +770,18 @@
     .stagewrap { grid-column: 1; grid-row: 1; }
     .side.right { grid-column: 1; grid-row: 3; }
   }
+
+  .pending {
+    display: flex; align-items: center; gap: 8px;
+    margin: 8px 0 0; font-size: 13px; color: var(--muted);
+  }
+  .spin {
+    width: 12px; height: 12px; flex: none; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent, #6aa6ff);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 
   .stage {
     position: relative; container-type: size;
