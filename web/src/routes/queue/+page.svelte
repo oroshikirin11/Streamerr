@@ -339,7 +339,11 @@
         && seriesOf(item) !== seriesOf(out[out.length - 1].rows[0].item);
       if (!out.length || gap > 30 || changed) {
         const startedBy = !out.length ? 'first' : gap > 30 ? 'gap' : 'series';
-        out.push({ key: item.id, gap, startedBy, rows: [] });
+        // Keyed by queue POSITION, not by library id: the same film can be
+        // queued twice, and two blocks (or two rows) sharing a key makes
+        // Svelte throw each_key_duplicate — which is what stopped a block
+        // of two identical entries from ever expanding.
+        out.push({ key: `${item.id}#${i}`, gap, startedBy, rows: [] });
       }
       out[out.length - 1].rows.push({ item, i });
     });
@@ -471,7 +475,7 @@
     <h2>Up next</h2>
   </div>
   <ul class="q">
-    {#each status.queue as item (item.id)}
+    {#each status.queue as item, qi (`${item.id}#${qi}`)}
       <li class="ep">
         <span class="tcell" style="color:var(--muted)">{clock(item.at) ?? '—:—'}</span>
         <span class="qt">{item.title}</span>
@@ -751,7 +755,7 @@
             </span>
           </li>
           {#if expanded.has(b.key)}
-            {#each b.rows as r (r.item.id)}
+            {#each b.rows as r (r.i)}
               {@render epRow(r.item, r.i)}
             {/each}
           {/if}
