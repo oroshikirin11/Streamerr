@@ -75,9 +75,14 @@
   let bufPts = $state([]);
   let bufMax = $state(15);
   const lastBuf = $derived(bufPts.length ? bufPts[bufPts.length - 1] : 0);
-  /** Proportional, so it still means "nearly dry" on a minutes-deep cache,
-   *  with a 3s floor so a 15s bank keeps the threshold it always had. */
-  const bufLow = $derived(lastBuf < Math.max(3, bufMax * 0.2));
+  /**
+   * "Nearly dry" means close to stalling, not a low percentage of a large
+   * budget: a cache allowed to reach 50 minutes would otherwise flag ten
+   * minutes of reserve as low, which is absurd. Proportional for small
+   * axes, capped at 30s so a deep cushion is only ever red when it really
+   * is nearly gone, with a 3s floor for tiny ones.
+   */
+  const bufLow = $derived(lastBuf < Math.max(3, Math.min(bufMax * 0.2, 30)));
   const bufLine = $derived(bufPts
     .map((v, i) => `${((i / Math.max(1, bufPts.length - 1)) * 100).toFixed(1)},`
       + `${(24 - Math.min(1, v / bufMax) * 21).toFixed(1)}`)
@@ -403,13 +408,16 @@
           <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
         {/if}
       </div>
-      {#if live && !counting && !paused && bufPts.length > 1}
+      <!-- One sample is enough to show the figure; the line fills in behind
+           it. Gating on two hid the row entirely whenever the axis had just
+           changed, because that clears the history back to a single point. -->
+      {#if live && !counting && !paused && bufPts.length > 0}
         <!-- Encoded-but-unaired reserve: the slack the broadcast can spend
              before a slow scene shows on air. -->
         <div class="bufrow"
              title="Encoded ahead of air — the stall the broadcast can absorb before it reaches viewers">
           <svg class="buf" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-            <polyline points={bufLine} class:low={bufLow} />
+            {#if bufPts.length > 1}<polyline points={bufLine} class:low={bufLow} />{/if}
           </svg>
           <span class="buflab" class:low={bufLow}>{fmtBuf(lastBuf)}</span>
         </div>

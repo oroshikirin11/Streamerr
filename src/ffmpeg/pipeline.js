@@ -1144,8 +1144,10 @@ export class PipelinePlayout extends EventEmitter {
         const now = Date.now();
         if (now - (this._airProgAt ?? 0) > 500) {
           this._airProgAt = now;
+          const r = this._reserve();
           this.emit('progress', {
             position: this.position, speed: this.scheduler.speed?.() ?? null, drops: 0,
+            buffer: r.seconds, bufferMax: r.max,
           });
         }
       }
@@ -1597,8 +1599,10 @@ export class PipelinePlayout extends EventEmitter {
       this.position = Math.max(this.position, start);
       this.timeline = this._clipBase + (start - offset) + chunkSeconds
         + (sched.shift || 0);
+      const r = this._reserve();
       this.emit('progress', {
         position: this.position, speed: sched.speed(), drops: 0,
+        buffer: r.seconds, bufferMax: r.max,
       });
     });
     sched.on('complete', () => {
@@ -1702,7 +1706,11 @@ export class PipelinePlayout extends EventEmitter {
         clearInterval(preTick);
         return;
       }
-      this.emit('progress', { position: 0, speed: sched.speed(), drops: 0 });
+      const r = this._reserve();
+      this.emit('progress', {
+        position: 0, speed: sched.speed(), drops: 0,
+        buffer: r.seconds, bufferMax: r.max,
+      });
     }, 1000);
     preTick.unref?.();
   }
@@ -2009,6 +2017,7 @@ export class PipelinePlayout extends EventEmitter {
         }
       }
 
+      const reserve = this._reserve();
       this.emit('progress', {
         position: this._onAir().position,
         // While a scheduler is working, ITS throughput is the only honest
@@ -2020,8 +2029,8 @@ export class PipelinePlayout extends EventEmitter {
         drops: b.dropFrames,
         // Reserve in seconds — how much stall the broadcast can absorb.
         // Bank on the streaming path, bank+cache on the chunked one.
-        buffer: this._reserve().seconds,
-        bufferMax: this._reserve().max,
+        buffer: reserve.seconds,
+        bufferMax: reserve.max,
       });
     });
     s.stdio[3]?.on('data', (d) => parser.push(d));
