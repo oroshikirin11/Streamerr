@@ -1676,10 +1676,19 @@ export class PipelinePlayout extends EventEmitter {
       if (!/^\s*\[Script Info\]/im.test(src)) {
         const conv = join(this.cacheDir, `band-${key}.src.ass`);
         if (!existsSync(conv)) {
+          // `-f ass` is not optional: the output is written to a .partial
+          // first so a crash cannot leave a half-written script in the
+          // cache, and that suffix hides the .ass extension ffmpeg would
+          // otherwise pick the muxer from. Without it every SubRip track
+          // fails this conversion and silently keeps the full canvas.
           const r = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error',
-            '-nostdin', '-y', '-i', extractedPath, `${conv}.partial`],
+            '-nostdin', '-y', '-i', extractedPath, '-f', 'ass', `${conv}.partial`],
           { stdio: ['ignore', 'ignore', 'pipe'] });
-          if (r.status !== 0 || !existsSync(`${conv}.partial`)) return null;
+          if (r.status !== 0 || !existsSync(`${conv}.partial`)) {
+            this.emit('warn', `subtitle band: could not convert ${extractedPath}: ${
+              String(r.stderr ?? '').trim().slice(0, 200) || `exit ${r.status}`}`);
+            return null;
+          }
           renameSync(`${conv}.partial`, conv);
         }
         src = readFileSync(conv, 'utf8');
