@@ -210,6 +210,21 @@ export function gpuDecodable(video) {
  *    the composite; replacing it there would silently change a graph whose
  *    whole point is that it was measured, not reasoned about.
  */
+/**
+ * Halve a frame rate, keeping it exact.
+ *
+ * Rates arrive as either an integer or an `a/b` string — 24000/1001 for
+ * NTSC-rate film. Dividing that as a float would drift against the video's
+ * own timeline, so the fraction is halved by doubling its denominator.
+ */
+export function halfRate(rate) {
+  const s = String(rate ?? '').trim();
+  const m = /^(\d+)\s*\/\s*(\d+)$/.exec(s);
+  if (m) return `${m[1]}/${Number(m[2]) * 2}`;
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 ? `${s}/2` : null;
+}
+
 export function scaleIsIdentity(video, profile, rect) {
   if (!video || !profile || profile.noIdentitySkip) return false;
   if (video.hdr || rect.bars) return false;
@@ -3161,8 +3176,31 @@ export function buildSourceArgs({
         inLabel: 'sub', outLabel: 'cv',
       },
     );
+    /**
+     * The canvas does not have to keep up with the video.
+     *
+     * Subtitles change a few times a second, so most canvas frames are
+     * redundant: libass rasterises, the CPU copies and the driver uploads an
+     * image identical to the last one. Running the canvas at half rate and
+     * letting the composite hold each frame for two video frames halves all
+     * of that — measured 1.203 -> 0.911 ms/frame on top of the band, from a
+     * 0.350 floor.
+     *
+     * What it costs is that a cue can switch on or off one frame from where
+     * it did. Measured over 480 frames of a real encode, 13 differ (2.7%),
+     * all of them boundaries, in pairs one frame apart — nothing about the
+     * text, its position or its appearance changes. Dropping unchanged
+     * frames instead with `mpdecimate` was measured at 4.748 ms/frame, four
+     * times worse than doing nothing: the comparison costs more than the
+     * upload it saves.
+     *
+     * Not applied to a canvas carrying timed or animated pictures, whose
+     * motion is the one thing on this surface that does need every frame.
+     */
+    const canvasRate = (!canvasImgs.filters.length && halfRate(eff.rate))
+      || eff.rate;
     const layerSrc = layer
-      ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${eff.rate})/TB,`
+      ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${canvasRate})/TB,`
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
       : '[1:v]';
     /**
@@ -3209,9 +3247,9 @@ export function buildSourceArgs({
       // there is one, otherwise a transparent frame. Same size, same rate,
       // same RGBA — everything downstream is identical either way.
       ...(layer
-        ? ['-r', eff.rate, '-i', layer]
+        ? ['-r', canvasRate, '-i', layer]
         : ['-f', 'lavfi', ...canvasCap,
-          '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${eff.rate},format=rgba`]),
+          '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=rgba`]),
       ...bgInput,
       ...canvasImgs.inputs,
       '-filter_complex', graph,
