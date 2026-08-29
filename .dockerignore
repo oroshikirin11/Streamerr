@@ -1,0 +1,33 @@
+# What the image is built from is small: src, web and the package files. The
+# Dockerfile installs dependencies itself, so anything here that is already
+# installed, generated, or written at runtime is both waste and a hazard.
+#
+# Runtime data, in particular, is written by the container as root — and an
+# unreadable file does not merely bloat the upload, it aborts the build with
+# "no permission to read from ...", which reads like a code problem and is not.
+
+# Runtime data, owned by the container
+config/
+cache/
+overlays/
+*.log
+
+# Installed, not copied — the image runs npm install itself
+node_modules/
+web/node_modules/
+web/.svelte-kit/
+
+# History and tooling
+.git/
+.gitignore
+.github/
+.claude/
+
+# A clone the update script leaves behind; building it into itself is a loop
+Jellystreamerr/
+
+# Local scratch
+test/
+docs/
+*.md
+!README.md
