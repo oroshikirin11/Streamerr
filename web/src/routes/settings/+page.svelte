@@ -13,6 +13,21 @@
   // Secrets are write-only: the server returns a sentinel, never the value.
   let keyStored = $state(false);
   let streamKey = $state('');
+
+  const PROTOCOL_INFO = [
+    { id: 'rtmp', label: 'RTMP', blurb: 'Owncast, and every platform' },
+    { id: 'rtmps', label: 'RTMPS', blurb: 'RTMP over TLS — Facebook needs it' },
+    { id: 'srt', label: 'SRT', blurb: 'survives a lossy link; relays and pro ingest' },
+  ];
+  const uid = () => Math.random().toString(36).slice(2, 10);
+  function addExtra() {
+    cfg.publish.extras = [...(cfg.publish.extras ?? []),
+      { id: uid(), enabled: true, protocol: 'rtmp', url: '', key: '',
+        streamId: '', passphrase: '', latencyMs: 200 }];
+  }
+  function removeExtra(id) {
+    cfg.publish.extras = (cfg.publish.extras ?? []).filter((e) => e.id !== id);
+  }
   let tokenStored = $state(false);
   let accessToken = $state('');
   let titleTest = $state(null);
@@ -257,7 +272,8 @@
     // Mirror the server's clamp so the field cannot show a value that is not
     // the one actually in effect.
     a.hours = Math.min(168, Math.max(1, Math.round(Number(a.hours) || 12)));
-    await api.saveConfig({ library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
+    await api.saveConfig({
+        publish: cfg.publish, library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
     saved = 'autoscan';
     setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
   }
@@ -410,18 +426,93 @@
   {#if error}<p class="err">{error}</p>{/if}
 
   <div class="cols">
+  <!-- Broadcast destination -->
+  <section class="card">
+    <h3>Broadcast</h3>
+
+    <!-- Credentials live in a slot per protocol, so switching here never
+         discards the other set. Switch back and the fields are as they
+         were; overwrite by typing over them. -->
+    <label>Protocol</label>
+    <div class="protos">
+      {#each PROTOCOL_INFO as pr}
+        <button type="button" class="proto" class:on={cfg.publish.protocol === pr.id}
+                onclick={() => { cfg.publish.protocol = pr.id; }}>
+          <strong>{pr.label}</strong>
+          <span class="muted small">{pr.blurb}</span>
+        </button>
+      {/each}
+    </div>
+
+    {#if cfg.publish.protocol === 'srt'}
+      <label>Server address</label>
+      <input bind:value={cfg.publish.srt.url} spellcheck="false"
+             placeholder="srt://relay.example.com:9000" />
+
+      <label>Stream ID <span class="muted small">optional</span></label>
+      <input type="password" bind:value={cfg.publish.srt.streamId}
+             placeholder={cfg.publish.srt.streamId === '__SET__' ? 'saved — type to replace' : 'e.g. #!::r=live/stream,m=publish'} />
+
+      <label>Passphrase <span class="muted small">optional, 10–79 characters</span></label>
+      <input type="password" bind:value={cfg.publish.srt.passphrase}
+             placeholder={cfg.publish.srt.passphrase === '__SET__' ? 'saved — type to replace' : 'encrypts the link'} />
+
+      <label>Latency <span class="muted small">{cfg.publish.srt.latencyMs ?? 200} ms</span></label>
+      <input type="range" min="20" max="2000" step="10"
+             value={cfg.publish.srt.latencyMs ?? 200}
+             oninput={(e) => { cfg.publish.srt.latencyMs = +e.currentTarget.value; }} />
+      <p class="muted small">
+        How long SRT may spend re-requesting lost packets before giving up on
+        them. Higher survives a worse connection at the cost of delay; the
+        usual advice is about four times the round-trip time to the server.
+      </p>
+    {:else}
+      <label>Server address</label>
+      <input bind:value={cfg.publish[cfg.publish.protocol].url} spellcheck="false"
+             placeholder={`${cfg.publish.protocol}://stream.example.com${cfg.publish.protocol === 'rtmps' ? ':443' : ':1935'}/live`} />
+
+      <label>Stream key</label>
+      <input type="password" bind:value={cfg.publish[cfg.publish.protocol].key}
+             placeholder={cfg.publish[cfg.publish.protocol].key === '__SET__'
+               ? 'saved — type to replace' : 'from your server'} />
+    {/if}
+    <p class="muted small">Secrets are never sent back to the browser.</p>
+
+    <!-- Fan-out. One encode, several destinations: the box cannot afford a
+         second encoder, and it does not need one. -->
+    <h4 class="sub">Also send to</h4>
+    {#each cfg.publish.extras as ex (ex.id)}
+      <div class="extra">
+        <div class="extrahead">
+          <label style="display:flex; align-items:center; gap:8px; margin:0;">
+            <input type="checkbox" bind:checked={ex.enabled} style="width:auto" />
+            <select bind:value={ex.protocol} style="width:auto">
+              {#each PROTOCOL_INFO as pr}<option value={pr.id}>{pr.label}</option>{/each}
+            </select>
+          </label>
+          <button type="button" class="danger" onclick={() => removeExtra(ex.id)}>Remove</button>
+        </div>
+        <input bind:value={ex.url} spellcheck="false" placeholder={`${ex.protocol}://…`} />
+        {#if ex.protocol === 'srt'}
+          <input type="password" bind:value={ex.streamId}
+                 placeholder={ex.streamId === '__SET__' ? 'stream ID saved' : 'stream ID (optional)'} />
+        {:else}
+          <input type="password" bind:value={ex.key}
+                 placeholder={ex.key === '__SET__' ? 'key saved' : 'stream key'} />
+        {/if}
+      </div>
+    {/each}
+    <button type="button" onclick={addExtra}>Add a destination</button>
+    <p class="muted small">
+      Every destination receives the same encode, so extras cost almost
+      nothing. A destination that cannot be reached is skipped and the rest
+      keep streaming.
+    </p>
+  </section>
+
   <!-- Owncast -->
   <section class="card">
-    <h3>Owncast</h3>
-    <label>Server address</label>
-    <input bind:value={cfg.owncast.rtmpUrl} spellcheck="false" />
-
-    <label>Stream key</label>
-    <input type="password" bind:value={streamKey}
-           placeholder={keyStored ? 'leave blank to keep the saved key' : 'from Owncast admin'} />
-    {#if keyStored && !streamKey}
-      <p class="muted small">A key is saved. It is never sent back to the browser.</p>
-    {/if}
+    <h3>Owncast title sync</h3>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
       <input type="checkbox" bind:checked={cfg.owncast.syncTitle} style="width:auto" />
@@ -1233,4 +1324,20 @@
     font-size: 12.5px; margin: 6px 0 0;
     color: #c98a2e;
   }
+  .protos { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+  .proto {
+    flex: 1 1 150px; display: flex; flex-direction: column; gap: 2px;
+    align-items: flex-start; text-align: left; padding: 8px 10px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius); cursor: pointer; width: auto;
+  }
+  .proto.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+  h4.sub { margin: 18px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .extra {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 9px 10px; margin-bottom: 8px; background: var(--surface-2);
+  }
+  .extrahead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .extra input { margin-top: 5px; }
 </style>
+

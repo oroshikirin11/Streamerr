@@ -200,3 +200,51 @@ export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
   // tee needs the streams named explicitly; it maps nothing by default.
   return [...common, '-map', '0:v:0', '-map', '0:a:0?', '-f', 'tee', slaves.join('|')];
 }
+
+/** Secret fields on a destination, by protocol. */
+const PUBLISH_SECRETS = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'] };
+
+export function redactPublish(publish) {
+  const pub = { ...publishDefaults(), ...(publish ?? {}) };
+  const mask = (proto, creds) => {
+    const out = { ...(creds ?? {}) };
+    for (const f of PUBLISH_SECRETS[proto] ?? []) out[f] = out[f] ? '__SET__' : '';
+    return out;
+  };
+  return {
+    protocol: pub.protocol,
+    rtmp: mask('rtmp', pub.rtmp),
+    rtmps: mask('rtmps', pub.rtmps),
+    srt: mask('srt', pub.srt),
+    extras: (pub.extras ?? []).map((e) => ({ ...mask(e.protocol, e), protocol: e.protocol })),
+  };
+}
+
+/**
+ * Put back every secret the browser was never given. A sentinel means "leave
+ * what is stored"; anything else is a deliberate overwrite. Extras are
+ * matched by id, so reordering or removing one cannot leak another's key
+ * into it.
+ */
+export function restorePublishSecrets(patch, publish) {
+  const stored = { ...publishDefaults(), ...(publish ?? {}) };
+  for (const proto of ['rtmp', 'rtmps', 'srt']) {
+    if (!patch[proto]) continue;
+    for (const f of PUBLISH_SECRETS[proto]) {
+      if (patch[proto][f] === '__SET__') patch[proto][f] = stored[proto]?.[f] ?? '';
+    }
+  }
+  if (Array.isArray(patch.extras)) {
+    const byId = new Map((stored.extras ?? []).map((e) => [e.id, e]));
+    patch.extras = patch.extras.map((e) => {
+      const prev = byId.get(e.id) ?? {};
+      const out = { ...e };
+      for (const f of PUBLISH_SECRETS[e.protocol] ?? []) {
+        if (out[f] === '__SET__') out[f] = prev[f] ?? '';
+      }
+      return out;
+    });
+  }
+  return patch;
+}
+

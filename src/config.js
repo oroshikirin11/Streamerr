@@ -7,6 +7,9 @@
  */
 
 import { publishDefaults, targetUrl, redactUrl, destinations } from './publish.js';
+
+// Re-exported so callers have one place to ask about configuration.
+export { publishDefaults, PROTOCOLS } from './publish.js';
 import {
   readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, unlinkSync,
 } from 'fs';

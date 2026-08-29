@@ -20,6 +20,7 @@ import {
   publishDestinations, publishTargetsRedacted,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT,
 } from './config.js';
+import { redactPublish, restorePublishSecrets } from './publish.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
@@ -621,6 +622,10 @@ function redactedConfig() {
       streamKey: config.owncast.streamKey ? '__SET__' : '',
       accessToken: config.owncast.accessToken ? '__SET__' : '',
     },
+    // Same sentinel treatment per protocol and per extra destination: a
+    // stream key, SRT stream id or passphrase is never sent to a browser,
+    // and a field the operator did not touch comes back unchanged.
+    publish: redactPublish(config.publish),
     // Secrets live inside each source now. Spreading config.library would
     // hand them back verbatim, so every source is rebuilt with its own
     // credentials masked.
@@ -792,6 +797,7 @@ app.put('/api/config', (req, res) => {
   for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken']]) {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
   }
+  if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, config.publish);
   if (Array.isArray(patch.library?.sources)) {
     patch.library.sources = restoreSourceSecrets(patch.library.sources);
   }
