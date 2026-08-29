@@ -259,23 +259,6 @@ export async function vaapiTonemapPresent(device = '/dev/dri/renderD128') {
   return /mastering display/i.test(err);
 }
 
-/**
- * Can this driver tone map THIS file? One frame of the real source.
- *
- * Decodes only the head, so over the SMB bridge it costs the first small
- * stripe — the same order as the warm head read that already happens.
- */
-export async function vaapiTonemapsFile(srcPath, device = '/dev/dri/renderD128') {
-  const { ok } = await tryRun([
-    '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
-    '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi',
-    '-i', srcPath,
-    '-vf', 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709',
-    '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '1M', '-f', 'null', '-',
-  ], 60_000);
-  return ok;
-}
-
 /** Is the software tone map usable as a fallback on this build? */
 export async function cpuTonemapAvailable() {
   const { ok } = await tryRun([

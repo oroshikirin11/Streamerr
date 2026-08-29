@@ -3197,6 +3197,51 @@ export class PipelinePlayout extends EventEmitter {
         }
 
         /**
+         * Tone mapping is demoted before anything else, because on an HDR
+         * source it is the likeliest thing to have killed the clip and the
+         * cheapest to give up — the CPU route produces the same picture.
+         *
+         * This exists because a PROBE cannot answer this question for
+         * hardware nobody has tested. Two drivers refuse in two different
+         * ways and at two different stages: Mesa fails the capability query
+         * outright, Intel's iHD builds the filter happily and then rejects
+         * a frame that carries no mastering-display metadata. A third
+         * driver will invent a third way, and every one of them surfaces as
+         * -22 on the ENCODER, several stages downstream from the cause.
+         *
+         * So the graph is attempted and the result is believed. Anything
+         * that cannot tone map on the GPU — for any reason, known or not —
+         * lands here and keeps broadcasting.
+         */
+        if (!this._sawBlock && this.current && this.selection?.video?.hdr
+            && this.profile?.tonemap === 'vaapi' && !this._tonemapDemoted) {
+          this._tonemapDemoted = true;
+          this._demote({ tonemap: 'cpu' });
+          this.emit('warn', 'This driver would not tone map this HDR file on '
+            + 'the GPU — doing it on the CPU for this broadcast. That costs '
+            + `real headroom at 4K; a 1080p output frame size gives it back. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
+        /**
+         * And if the CPU route cannot run either, go out washed rather than
+         * not at all. A build without zscale has no third option.
+         */
+        if (!this._sawBlock && this.current && this.selection?.video?.hdr
+            && this.profile?.tonemap === 'cpu' && !this._tonemapGaveUp) {
+          this._tonemapGaveUp = true;
+          this._demote({ tonemap: 'none' });
+          this.emit('warn', 'Tone mapping failed on the GPU and the CPU. This '
+            + 'HDR title will go out with washed-out colours rather than not '
+            + `at all. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
+        /**
          * Demoted FIRST, before pictures and subtitles, because it is the
          * only one of the three the viewer cannot see us give up.
          *
@@ -3349,6 +3394,8 @@ export class PipelinePlayout extends EventEmitter {
       : null;
     this._demoted = keep;
     this._gpuSubsDemoted = false;
+    this._tonemapDemoted = false;
+    this._tonemapGaveUp = false;
   }
 
   /** Move to the next queued clip, or end the broadcast. */
@@ -4259,7 +4306,7 @@ function lastLines(s, n) {
  * sees 1080p rather than 4K, and re-uploads so everything downstream still
  * composites on the GPU.
  */
-function scaleAndTonemap(video, profile, rect, smode) {
+export function scaleAndTonemap(video, profile, rect, smode) {
   const scale = `scale_vaapi=w=${rect.w}:h=${rect.h}`;
   if (!video?.hdr) {
     // format=nv12 is load-bearing: 10-bit sources decode to P010 surfaces,

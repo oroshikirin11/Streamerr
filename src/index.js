@@ -28,7 +28,7 @@ import {
 } from './auth.js';
 import {
   probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
-  vaapiTonemapPresent, vaapiTonemapsFile, cpuTonemapAvailable,
+  vaapiTonemapPresent, cpuTonemapAvailable,
   pickPillarboxGraph,
 } from './ffmpeg/probe.js';
 import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
@@ -156,47 +156,39 @@ async function tuneProfile(profile, selection, srcPath = null) {
   if (profile.backend !== 'vaapi') return;
 
   /**
-   * HDR needs a tone map, and which one works is a question about the
-   * driver AND about the file. Asking only the driver demoted an N100 that
-   * had been mapping on the GPU all along — see probe.js.
+   * Which HDR route this device can take.
+   *
+   * Set unconditionally, not just for HDR clips, because `_box` is a COPY
+   * of this profile taken when the engine is built: a value written here
+   * during a later clip never reaches the graph. Deciding it once, up
+   * front, is the only placement that survives.
+   *
+   * This is only the cheap opening guess. It answers "does this driver
+   * have an HDR tone mapper at all", which is a real yes/no on Mesa. It
+   * deliberately does NOT try to answer "will it map this file" — iHD
+   * accepts the filter and then refuses frames without mastering-display
+   * metadata, and a driver nobody has tested will refuse in some third
+   * way. That question is settled by attempting it and believing the
+   * result; see the tonemap demotion in pipeline.js.
    */
-  if (selection?.video?.hdr) {
-    globalThis.__tonemapCap ??= await vaapiTonemapPresent(profile.device);
-    if (!globalThis.__tonemapCap) {
-      globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
-      profile.tonemap = globalThis.__tonemapCpu ? 'cpu' : 'none';
-    } else if (srcPath) {
-      // The driver has the filter; only this file can answer whether it
-      // carries what the filter needs. Cached per file, because the answer
-      // travels with the media, not the machine.
-      globalThis.__tonemapFile ??= new Map();
-      if (!globalThis.__tonemapFile.has(srcPath)) {
-        globalThis.__tonemapFile.set(srcPath,
-          await vaapiTonemapsFile(srcPath, profile.device));
-      }
-      profile.tonemap = globalThis.__tonemapFile.get(srcPath) ? 'vaapi' : 'cpu';
-      if (profile.tonemap === 'cpu') {
-        globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
-        if (!globalThis.__tonemapCpu) profile.tonemap = 'none';
-      }
-    } else {
-      profile.tonemap = 'vaapi';
-    }
-    if (profile.tonemap !== globalThis.__tonemapSaid) {
-      globalThis.__tonemapSaid = profile.tonemap;
-      console.log(profile.tonemap === 'vaapi'
-        ? '[hdr] tone mapping on the GPU'
-        : profile.tonemap === 'cpu'
-          ? '[hdr] tone mapping on the CPU — '
-            + (globalThis.__tonemapCap
-              ? 'this file carries no mastering-display metadata, which this '
-                + 'driver needs'
-              : 'this driver has no HDR tone mapper')
-            + '. Costs real headroom at 4K; a 1080p output frame size gives '
-            + 'it back.'
-          : '[hdr] nothing here can tone map — HDR titles will look washed '
-            + 'out. Colours wrong; the broadcast runs.');
-    }
+  globalThis.__tonemapCap ??= await vaapiTonemapPresent(profile.device);
+  if (globalThis.__tonemapCap) {
+    profile.tonemap = 'vaapi';
+  } else {
+    globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
+    profile.tonemap = globalThis.__tonemapCpu ? 'cpu' : 'none';
+  }
+  // Said once, and only when there is HDR content to say it about.
+  if (selection?.video?.hdr && !globalThis.__tonemapSaid) {
+    globalThis.__tonemapSaid = true;
+    console.log(profile.tonemap === 'vaapi'
+      ? '[hdr] tone mapping on the GPU'
+      : profile.tonemap === 'cpu'
+        ? '[hdr] this driver has no HDR tone mapper — doing it on the CPU. '
+          + 'That costs real headroom at 4K; a 1080p output frame size gives '
+          + 'it back.'
+        : '[hdr] nothing here can tone map — HDR titles will look washed out. '
+          + 'Colours wrong; the broadcast runs.');
   }
 
   if (config.encoder.gpuSubs === false) return;
