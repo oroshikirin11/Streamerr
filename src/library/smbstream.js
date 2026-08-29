@@ -503,10 +503,25 @@ export class SmbStreamLibrary {
    * Ranged read, striped across parallel SMB streams.
    *
    * The protocol client reads sequentially with one request in flight,
-   * which capped a gigabit LAN at ~6.5MB/s — three minutes to pull one
-   * episode through subtitle extraction. Splitting the range into stripes
-   * read concurrently and emitted in order multiplies throughput by the
-   * stripe count without touching the client's internals.
+   * which once capped a gigabit LAN at ~6.5MB/s. Splitting the range into
+   * stripes read concurrently and emitted in order lifted that without
+   * touching the client's internals.
+   *
+   * RE-MEASURED 2026-08-29, and that 6.5MB/s no longer holds — leaving it
+   * unqualified sent someone hunting for throughput that was already there.
+   * On a 56GB file, 512MB samples at fresh offsets:
+   *
+   *   lanes:   1 -> 63   2 -> 72   4 -> 72   6 -> 71   8 -> 76   12 -> 71 MB/s
+   *   stripe:  1MB -> 76   4MB -> 69   16MB -> 78   32MB -> 81 MB/s
+   *
+   * So the share now saturates around 70-80MB/s and is flat from TWO lanes
+   * up. The striping still matters — it is what gets us off 6.5 — but there
+   * is no headroom left to win by widening it. A larger stripe looks worth
+   * ~10%, which is inside the run-to-run spread, and would make the
+   * abandoned-prefetch problem below worse; not taken.
+   *
+   * The lesson for anyone optimising here: a 56GB file takes ~13 minutes to
+   * read and that is the floor. Reading less is the only real win.
    */
   async stream(rel, { start, end } = {}) {
     const size = await this._deadline(this.size(rel));
