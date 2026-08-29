@@ -369,12 +369,20 @@ export function assertRtmpUrl(url) {
  * as the RTMP slot when publish has not been configured, so an existing
  * install keeps streaming without being touched.
  */
-export function publishDestinations(cfg = config) {
+export function publishConfig(cfg = config) {
   const pub = { ...publishDefaults(), ...(cfg.publish ?? {}) };
+  // An install that predates the publish block keeps its credentials in
+  // owncast.*. Resolving that HERE rather than only in the engine matters:
+  // the settings page reads this too, and reading the raw block showed an
+  // empty form for an install that was streaming perfectly well.
   if (!pub.rtmp?.url && cfg.owncast?.rtmpUrl) {
     pub.rtmp = { url: cfg.owncast.rtmpUrl, key: cfg.owncast.streamKey ?? '' };
   }
-  const dests = destinations(pub);
+  return pub;
+}
+
+export function publishDestinations(cfg = config) {
+  const dests = destinations(publishConfig(cfg));
   // Validate here rather than at spawn: a bad target should be an error on
   // the settings page, not a publisher that dies thirty seconds into a show.
   for (const d of dests) targetUrl(d.protocol, d.creds);

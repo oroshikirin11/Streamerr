@@ -478,9 +478,15 @@
     <label>Protocol</label>
     <div class="protos">
       {#each PROTOCOL_INFO as pr}
+        <!-- A protocol that already holds credentials is marked, so it is
+             obvious at a glance that switching away from one will not lose
+             it — and that the one in use is genuinely configured. -->
         <button type="button" class="proto" class:on={cfg.publish.protocol === pr.id}
                 onclick={() => { cfg.publish.protocol = pr.id; }}>
           <strong>{pr.label}</strong>
+          {#if cfg.publish[pr.id]?.url}
+            <span class="tag">{cfg.publish.protocol === pr.id ? 'in use' : 'saved'}</span>
+          {/if}
         </button>
       {/each}
     </div>
@@ -1372,6 +1378,11 @@
     border-radius: var(--radius); cursor: pointer; width: auto;
   }
   .proto.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+  .proto .tag {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted);
+  }
+  .proto.on .tag { color: var(--accent); }
   h4.sub { margin: 18px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
   .extra {
     border: 1px solid var(--border); border-radius: var(--radius);

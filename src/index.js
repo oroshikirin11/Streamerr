@@ -17,7 +17,7 @@ import { fileURLToPath } from 'url';
 
 import {
   config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, assertRtmpUrl,
-  publishDestinations, publishTargetsRedacted,
+  publishDestinations, publishTargetsRedacted, publishConfig,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT,
 } from './config.js';
 import { redactPublish, restorePublishSecrets } from './publish.js';
@@ -625,7 +625,7 @@ function redactedConfig() {
     // Same sentinel treatment per protocol and per extra destination: a
     // stream key, SRT stream id or passphrase is never sent to a browser,
     // and a field the operator did not touch comes back unchanged.
-    publish: redactPublish(config.publish),
+    publish: redactPublish(publishConfig()),
     // Secrets live inside each source now. Spreading config.library would
     // hand them back verbatim, so every source is rebuilt with its own
     // credentials masked.
@@ -797,7 +797,7 @@ app.put('/api/config', (req, res) => {
   for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken']]) {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
   }
-  if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, config.publish);
+  if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, publishConfig());
   if (Array.isArray(patch.library?.sources)) {
     patch.library.sources = restoreSourceSecrets(patch.library.sources);
   }
