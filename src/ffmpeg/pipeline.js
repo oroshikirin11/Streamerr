@@ -320,8 +320,19 @@ const BUFFER_FLOOR_S = 10;
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;
 const BANK_SECONDS = 15;
+/** Widest the cushion may be configured, in seconds. */
+export const BANK_SECONDS_MAX = 60;
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
-const BANK_MAX_BYTES = 48 * 1024 * 1024;
+/**
+ * A ceiling on the bank, in bytes, derived from the depth actually asked for
+ * rather than fixed.
+ *
+ * It used to be a flat 48MB, which silently truncated any deep cushion: at
+ * 12000 kbps a 60s request works out at 90MB and would have been clamped to
+ * 48MB — about 32s — with nothing anywhere saying so. Sized from the request
+ * with headroom, the number the operator sets is the number they get.
+ */
+const bankCeiling = (seconds) => Math.max(48, Math.ceil(seconds * 8)) * 1024 * 1024;
 
 export class PipelinePlayout extends EventEmitter {
   /**
@@ -332,7 +343,7 @@ export class PipelinePlayout extends EventEmitter {
    */
   constructor({
     target = null, destinations = null, profile, selection = null,
-    statsPeriodMs = 500, cacheDir = null,
+    statsPeriodMs = 500, cacheDir = null, buffer = null,
     resolveSelection = null, runAhead = null, overlayDir = null,
   }) {
     super();
@@ -431,9 +442,20 @@ export class PipelinePlayout extends EventEmitter {
 
     const kbps = parseInt(String(profile?.videoBitrate ?? '6000'), 10) || 6000;
     this._kbps = kbps;
-    /** ~BANK_SECONDS of stream at the configured bitrate, clamped. */
-    this._bankMax = Math.min(BANK_MAX_BYTES,
-      Math.max(BANK_MIN_BYTES, kbps * 125 * BANK_SECONDS));
+    /**
+     * How deep the cushion runs. Configurable, because a title that cannot
+     * quite hold realtime survives on cushion depth, while a deeper one also
+     * means longer before any change reaches air and more encoded work
+     * discarded on every skip.
+     */
+    this.bufferSeconds = Math.min(BANK_SECONDS_MAX,
+      Math.max(1, Number(buffer?.seconds) || BANK_SECONDS));
+    this.applySeconds = Number.isFinite(Number(buffer?.applySeconds))
+      ? Math.min(this.bufferSeconds, Math.max(0, Number(buffer.applySeconds)))
+      : this.bufferSeconds;
+    /** ~bufferSeconds of stream at the configured bitrate, clamped. */
+    this._bankMax = Math.min(bankCeiling(this.bufferSeconds),
+      Math.max(BANK_MIN_BYTES, kbps * 125 * this.bufferSeconds));
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────
@@ -1030,11 +1052,23 @@ export class PipelinePlayout extends EventEmitter {
        * That is the trade the operator is making, and it is the right one
        * for viewers.
        */
+      /**
+       * How much cushion survives decides when the change is seen. Keeping
+       * all of it is seamless and lands when the cushion drains; keeping
+       * none puts it on air at once and costs viewers a re-buffer, because
+       * the publisher has nothing to send while the encoder catches up.
+       */
+      const rewound = this._bankTrimTo(this.applySeconds ?? this.bufferSeconds);
       const dropped = this._bankTrimToPacket();
-      const ahead = Math.max(0, this.position - (this.aired ?? this.position));
-      this.emit('log', `[overlay] applied seamlessly — on air in ~${ahead.toFixed(1)}s `
-        + `(cushion kept${dropped ? `, ${dropped}B partial packet trimmed` : ''})\n`);
-      this._play(item, this.position, { duration: dur });
+      // Never behind what has already gone out: those bytes are spent.
+      const resume = Math.max(this.aired ?? 0, this.position - rewound);
+      const ahead = Math.max(0, resume - (this.aired ?? resume));
+      this.emit('log', `[overlay] applied — on air in ~${ahead.toFixed(1)}s `
+        + (rewound > 0.05
+          ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${rewound.toFixed(1)}s re-encoded)`
+          : '(cushion kept)')
+        + `${dropped ? `, ${dropped}B partial packet trimmed` : ''}\n`);
+      this._play(item, resume, { duration: dur });
     }), 'applying overlays');
     return true;
   }
@@ -1446,6 +1480,39 @@ export class PipelinePlayout extends EventEmitter {
    *
    * Returns the number of bytes dropped, which is always under 188.
    */
+  /**
+   * Cut the cushion down to `keepSeconds`, from the NEWEST end.
+   *
+   * The bank runs oldest-first: the front is about to air, the back is the
+   * furthest ahead the encoder has reached. Dropping from the back is what
+   * makes a change arrive sooner — those are the frames that would have
+   * played before it. Whatever is dropped has to be encoded again, so the
+   * resume position moves back by exactly the time those bytes represented.
+   *
+   * Returns the seconds removed, so the caller can rewind by the same amount.
+   */
+  _bankTrimTo(keepSeconds) {
+    const perSecond = this._kbps * 125;
+    const keepBytes = Math.max(0, Math.round(keepSeconds * perSecond));
+    let excess = Math.max(0, (this._bankBytes ?? 0) - keepBytes);
+    if (!excess) return 0;
+    let dropped = 0;
+    while (excess > 0 && this._bank?.length) {
+      const last = this._bank[this._bank.length - 1];
+      if (last.data.length <= excess) {
+        excess -= last.data.length;
+        dropped += last.data.length;
+        this._bank.pop();
+      } else {
+        last.data = last.data.subarray(0, last.data.length - excess);
+        dropped += excess;
+        excess = 0;
+      }
+    }
+    this._bankBytes -= dropped;
+    return dropped / perSecond;
+  }
+
   _bankTrimToPacket() {
     let excess = (this._bankBytes ?? 0) % 188;
     if (!excess) return 0;

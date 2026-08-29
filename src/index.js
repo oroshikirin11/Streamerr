@@ -435,6 +435,7 @@ function runAheadBudget() {
 function buildEngine({ profile, selection }) {
   const e = new PipelinePlayout({
     destinations: publishDestinations(),
+    buffer: config.buffer,
     profile,
     selection,
     // Extracted subtitle tracks and embedded fonts live here.

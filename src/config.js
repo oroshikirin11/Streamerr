@@ -139,6 +139,15 @@ const DEFAULTS = {
   // 'auto' resolves to a recommendation computed from the memory the
   // container actually has.
   runAhead: { enabled: true, ramMB: 'auto' },
+  /**
+   * The encoded cushion held ahead of air, on the GPU path.
+   *
+   * `seconds` is how deep it runs. `applySeconds` is how much of it survives
+   * an overlay change: the full depth means the change lands when the cushion
+   * drains (nothing is thrown away, viewers see no interruption), and zero
+   * means it goes out at once at the cost of a re-buffer.
+   */
+  buffer: { seconds: 15, applySeconds: 15, studioWarnings: true },
   // The floating preview window in the panel. It replays the exact bytes the
   // publisher sends — no second encode — so its only real cost is the
   // stream's own bitrate to each open panel.
