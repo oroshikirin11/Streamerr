@@ -322,16 +322,6 @@
     await save('library');
   }
 
-  async function saveAutoRefresh() {
-    const a = cfg.library.autoRefresh;
-    // Mirror the server's clamp so the field cannot show a value that is not
-    // the one actually in effect.
-    a.hours = Math.min(168, Math.max(1, Math.round(Number(a.hours) || 12)));
-    await api.saveConfig({
-        library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
-    saved = 'autoscan';
-    setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
-  }
 
   /** Same rule the server applies when a source has never been saved. */
   const stillsDefault = (provider) => provider === 'filesystem' || !provider;
@@ -413,6 +403,16 @@
           studioWarnings: cfg.buffer.studioWarnings !== false,
         };
       }
+      if (section === 'runahead') {
+        patch.runAhead = { enabled: cfg.runAhead.enabled, ramMB: cfg.runAhead.ramMB };
+      }
+      if (section === 'preview') patch.preview = { enabled: cfg.preview.enabled };
+      if (section === 'autoscan') {
+        const ar = cfg.library?.autoRefresh ?? {};
+        patch.library = { autoRefresh: { enabled: ar.enabled, hours: ar.hours } };
+      }
+      if (section === 'ui') patch.ui = { lazyImages: cfg.ui.lazyImages };
+      if (section === 'dev') patch.devMode = cfg.devMode;
       if (section === 'library') patch.library = libraryPayload();
       if (section === 'tracks') {
         // Send intent; the server derives the ordered lists the engine uses.
@@ -423,6 +423,10 @@
         };
       }
       await api.saveConfig(patch);
+      // The Console nav entry appears without a reload.
+      if (section === 'dev') {
+        window.dispatchEvent(new CustomEvent('jsr-devmode', { detail: cfg.devMode }));
+      }
       if (streamKey) { keyStored = true; streamKey = ''; }
       if (accessToken) { tokenStored = true; accessToken = ''; }
       if (jellyfinKey) { jfKeyStored = true; jellyfinKey = ''; }
@@ -1189,14 +1193,8 @@
   <section class="card">
     <h3>Run-ahead cache</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.runAhead.enabled} style="width:auto"
-             onchange={async () => {
-               await api.saveConfig({ runAhead: { enabled: cfg.runAhead.enabled } });
-               saved = 'runahead';
-               setTimeout(() => { if (saved === 'runahead') saved = ''; }, 2500);
-             }} />
+      <input type="checkbox" bind:checked={cfg.runAhead.enabled} style="width:auto" />
       Build a deep cushion in RAM when there is spare horsepower
-      {#if saved === 'runahead'}<span class="ok small">Saved</span>{/if}
     </label>
     <p class="muted small" style="margin-top:6px;">
       Sets how much encoded video may wait in RAM ahead of the broadcast. Turning
@@ -1210,12 +1208,9 @@
         <input type="number" min="64" step="64"
                placeholder={`auto — recommended ${cfg.recommendedCacheMB ?? '?'} MB`}
                value={cfg.runAhead.ramMB === 'auto' ? '' : cfg.runAhead.ramMB}
-               onchange={async (e) => {
+               onchange={(e) => {
                  const v = e.currentTarget.value.trim();
                  cfg.runAhead.ramMB = v === '' ? 'auto' : Number(v);
-                 await api.saveConfig({ runAhead: { ramMB: cfg.runAhead.ramMB } });
-                 saved = 'runahead';
-                 setTimeout(() => { if (saved === 'runahead') saved = ''; }, 2500);
                }} />
         <p class="muted small" style="margin-top:6px;">
           Leave empty for auto: {cfg.recommendedCacheMB ?? '?'} MB recommended on
@@ -1234,20 +1229,18 @@
         </p>
       </div>
     {/if}
-  </section>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('runahead')}>Save</button>
+      {#if saved === 'runahead'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
 
   <!-- Live preview -->
   <section class="card">
     <h3>Live preview</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.preview.enabled} style="width:auto"
-             onchange={async () => {
-               await api.saveConfig({ preview: { enabled: cfg.preview.enabled } });
-               saved = 'preview';
-               setTimeout(() => { if (saved === 'preview') saved = ''; }, 2500);
-             }} />
+      <input type="checkbox" bind:checked={cfg.preview.enabled} style="width:auto" />
       Floating preview window while broadcasting
-      {#if saved === 'preview'}<span class="ok small">Saved</span>{/if}
     </label>
     <p class="muted small">
       Plays the exact stream Owncast receives, straight from the encoder —
@@ -1255,22 +1248,24 @@
       bitrate to each open panel. Each panel can also hide it with the
       button on the play bar; this switch turns it off everywhere.
     </p>
-  </section>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('preview')}>Save</button>
+      {#if saved === 'preview'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
 
   <!-- Automatic scan -->
   <section class="card">
     <h3>Automatic library scan</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
       <input type="checkbox" bind:checked={cfg.library.autoRefresh.enabled} style="width:auto"
-             onchange={saveAutoRefresh} />
+ />
       Scan for new media automatically
-      {#if saved === 'autoscan'}<span class="ok small">Saved</span>{/if}
     </label>
     {#if cfg.library.autoRefresh.enabled}
       <div style="margin-top:10px; max-width: 260px;">
         <select bind:value={scanSel} onchange={() => {
           if (scanSel !== 'custom') cfg.library.autoRefresh.hours = Number(scanSel);
-          saveAutoRefresh();
         }}>
           {#each SCAN_PRESETS as h}<option value={String(h)}>{scanLabel(h)}</option>{/each}
           <option value="custom">Custom</option>
@@ -1280,7 +1275,7 @@
             <span>Every</span>
             <input type="number" min="1" max="168" step="1"
                    bind:value={cfg.library.autoRefresh.hours}
-                   onchange={saveAutoRefresh} style="width:80px" />
+                   style="width:80px" />
             <span>hours</span>
           </label>
         {/if}
@@ -1291,49 +1286,46 @@
       episode added to your server turns up on its own. The Refresh button on
       the library page does the same thing immediately.
     </p>
-  </section>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('autoscan')}>Save</button>
+      {#if saved === 'autoscan'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
 
   <!-- Library display -->
   <section class="card">
     <h3>Library display</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.ui.lazyImages} style="width:auto"
-             onchange={async () => {
-               await api.saveConfig({ ui: { lazyImages: cfg.ui.lazyImages } });
-               saved = 'ui';
-               setTimeout(() => { if (saved === 'ui') saved = ''; }, 2500);
-             }} />
+      <input type="checkbox" bind:checked={cfg.ui.lazyImages} style="width:auto" />
       Load artwork only as it scrolls into view
-      {#if saved === 'ui'}<span class="ok small">Saved</span>{/if}
     </label>
     <p class="muted small">
       Mainly for Jellyfin sources &mdash; folder and SMB libraries only show
       artwork where a poster file sits beside the media. Leave off unless a
       shelf is big enough that fetching it all at once is the slower option.
     </p>
-  </section>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('ui')}>Save</button>
+      {#if saved === 'ui'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
 
   <!-- Developer -->
   <section class="card">
     <h3>Developer</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.devMode} style="width:auto"
-             onchange={async () => {
-               await api.saveConfig({ devMode: cfg.devMode });
-               // Tell the layout so the Console nav entry appears without a
-               // page reload.
-               window.dispatchEvent(new CustomEvent('jsr-devmode', { detail: cfg.devMode }));
-               saved = 'dev';
-               setTimeout(() => { if (saved === 'dev') saved = ''; }, 2500);
-             }} />
+      <input type="checkbox" bind:checked={cfg.devMode} style="width:auto" />
       Developer mode — show the read-only Console page
-      {#if saved === 'dev'}<span class="ok small">Saved</span>{/if}
     </label>
     <p class="muted small">
       Live server and ffmpeg logs in the panel, with stream keys redacted.
       Useful when reporting a problem.
     </p>
-  </section>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('dev')}>Save</button>
+      {#if saved === 'dev'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
 
   <!-- Account -->
   <section class="card">
