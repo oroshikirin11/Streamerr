@@ -16,6 +16,16 @@
   // step 1
   let rtmpUrl = $state('');
   let streamKey = $state('');
+  /**
+   * The wizard writes the same publish block the settings page does, rather
+   * than the legacy owncast fields — otherwise a new install could only ever
+   * be set up for RTMP and had to go and find Settings to use anything else.
+   */
+  const PROTOCOLS = [{ id: 'rtmp', label: 'RTMP' }, { id: 'rtmps', label: 'RTMPS' }, { id: 'srt', label: 'SRT' }];
+  let protocol = $state('rtmp');
+  let srtUrl = $state('');
+  let srtStreamId = $state('');
+  let srtPassphrase = $state('');
   let showKey = $state(false);
   // Whether a key is already stored. The value itself never reaches the
   // browser, so the field stays empty and blank means "keep what's there" —
@@ -168,7 +178,10 @@
     saving = true;
     try {
       const patch = {
-        owncast: { rtmpUrl, ...(streamKey ? { streamKey } : {}) },
+        publish: protocol === 'srt'
+          ? { protocol,
+              srt: { url: srtUrl, streamId: srtStreamId, passphrase: srtPassphrase, latencyMs: 200 } }
+          : { protocol, [protocol]: { url: rtmpUrl, ...(streamKey ? { key: streamKey } : {}) } },
         encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate },
         library: libraryPayload(),
         tracks: cfgTracks,
@@ -200,11 +213,34 @@
     {#if step === 0}
       <h2>Where does the stream go?</h2>
       <p class="muted">
-        Your Owncast server's RTMP address and stream key. Use a tailnet or LAN
-        address if you have one — RTMP sends the key unencrypted.
+        Owncast speaks RTMP. Pick RTMPS if your server requires TLS, or SRT for
+        a relay or a link that drops packets. You can change this later and add
+        more destinations in Settings.
       </p>
+      <label>Protocol</label>
+      <div class="protos">
+        {#each PROTOCOLS as pr}
+          <button type="button" class="proto" class:on={protocol === pr.id}
+                  onclick={() => (protocol = pr.id)}>{pr.label}</button>
+        {/each}
+      </div>
+
+      {#if protocol === 'srt'}
+        <label>Server address</label>
+        <input bind:value={srtUrl} placeholder="srt://relay.example.com:9000" spellcheck="false" />
+        <label>Stream ID <span class="muted small">optional</span></label>
+        <input bind:value={srtStreamId} spellcheck="false"
+               placeholder="e.g. #!::r=live/stream,m=publish" />
+        <label>Passphrase <span class="muted small">optional, 10–79 characters</span></label>
+        <input type="password" bind:value={srtPassphrase} placeholder="encrypts the link" />
+        <p class="muted small">
+          The connection test below only speaks RTMP, so it is not offered for
+          SRT — finish setup and start a broadcast to check it.
+        </p>
+      {:else}
       <label>Server address</label>
-      <input bind:value={rtmpUrl} placeholder="rtmp://192.168.1.10:1935/live" spellcheck="false" />
+      <input bind:value={rtmpUrl} spellcheck="false"
+             placeholder={protocol === 'rtmps' ? 'rtmps://stream.example.com:443/live' : 'rtmp://192.168.1.10:1935/live'} />
       <label>Stream key</label>
       <div class="row">
         {#if showKey}
@@ -222,6 +258,8 @@
       {#if keyStored && !streamKey}
         <p class="muted small">A key is saved. It is never sent back to the browser.</p>
       {/if}
+      {/if}
+      {#if protocol !== 'srt'}
       <div class="row">
         <button onclick={() => testOwncast(false)} disabled={!!testing || !rtmpUrl}>
           {testing === 'quick' ? 'Checking…' : 'Test connection'}
@@ -236,6 +274,7 @@
         buffers several seconds of video before it can play anything, so a
         short burst is accepted and then gone before it ever becomes visible.
       </p>
+      {/if}
       {#if owncastResult}
         <div class="result" class:bad={!owncastResult.ok}>
           {#if owncastResult.ok}
@@ -478,4 +517,10 @@
   .enc label.dim { color: var(--muted); }
   .pick { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; color: inherit; }
   .pick input { width: auto; }
+  .protos { display: flex; gap: 8px; margin-bottom: 4px; }
+  .proto {
+    flex: 1; padding: 8px 10px; background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer;
+  }
+  .proto.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
 </style>

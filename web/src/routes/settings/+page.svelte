@@ -15,9 +15,9 @@
   let streamKey = $state('');
 
   const PROTOCOL_INFO = [
-    { id: 'rtmp', label: 'RTMP', blurb: 'Owncast, and every platform' },
-    { id: 'rtmps', label: 'RTMPS', blurb: 'RTMP over TLS — Facebook needs it' },
-    { id: 'srt', label: 'SRT', blurb: 'survives a lossy link; relays and pro ingest' },
+    { id: 'rtmp', label: 'RTMP' },
+    { id: 'rtmps', label: 'RTMPS' },
+    { id: 'srt', label: 'SRT' },
   ];
   const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -481,7 +481,6 @@
         <button type="button" class="proto" class:on={cfg.publish.protocol === pr.id}
                 onclick={() => { cfg.publish.protocol = pr.id; }}>
           <strong>{pr.label}</strong>
-          <span class="muted small">{pr.blurb}</span>
         </button>
       {/each}
     </div>
