@@ -9,7 +9,7 @@
     "probe": "node src/cli.js probe",
     "normalize": "node src/cli.js normalize",
     "stream": "node src/cli.js stream",
-    "test": "node test/match.test.mjs"
+    "test": "node test/match.test.mjs && node test/paired.test.mjs"
   },
   "engines": {
     "node": ">=20"

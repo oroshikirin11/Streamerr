@@ -46,16 +46,47 @@ export class PairedLibrary {
     return { ok: true };
   }
 
-  // ── listing: the catalogue's job, verbatim ────────────────────────────
+  /**
+   * Listing is the catalogue's job, verbatim.
+   *
+   * This list is not decoration — CompositeLibrary calls every one of these
+   * on a source, and a missing one is not a graceful degradation but a
+   * TypeError surfacing as a 400 with an empty library behind it. Anything
+   * added to the library interface has to be added here too.
+   */
   libraries(...a) { return this.catalogue.libraries(...a); }
-  shows(...a) { return this.catalogue.shows(...a); }
+  items(...a) { return this.catalogue.items(...a); }
   seasons(...a) { return this.catalogue.seasons(...a); }
   episodes(...a) { return this.catalogue.episodes(...a); }
-  item(...a) { return this.catalogue.item?.(...a); }
+  item(...a) { return this.catalogue.item(...a); }
+  nextEpisode(...a) { return this.catalogue.nextEpisode(...a); }
+  imagePath(...a) { return this.catalogue.imagePath(...a); }
+  shows(...a) { return this.catalogue.shows?.(...a); }
   search(...a) { return this.catalogue.search?.(...a); }
-  imageUrl(...a) { return this.catalogue.imageUrl?.(...a); }
-  image(...a) { return this.catalogue.image?.(...a); }
   allPaths(...a) { return this.catalogue.allPaths?.(...a); }
+
+  /**
+   * The bridge token belongs to the MEDIA half — it authorises reads of the
+   * share — so it is proxied there rather than shadowed here. Rebuilds carry
+   * it across by assigning to this property, which must reach the provider
+   * that actually checks it, or an ffmpeg already reading the bridge is
+   * cut off mid-clip.
+   */
+  get bridgeToken() { return this.media?.bridgeToken; }
+  set bridgeToken(v) { if (this.media) this.media.bridgeToken = v; }
+
+  /**
+   * Streaming is a MEDIA capability, and the composite probes for it with
+   * `typeof s.lib?.stream === 'function'` rather than calling it. So this
+   * has to be a function when the media half can stream and undefined when
+   * it cannot — a share can, a folder cannot, and answering yes for a folder
+   * would advertise a bridge that does not exist.
+   */
+  get stream() {
+    return typeof this.media?.stream === 'function'
+      ? (...a) => this.media.stream(...a)
+      : undefined;
+  }
 
   /**
    * The one method that is ours.
