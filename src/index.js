@@ -312,6 +312,10 @@ function streamStatus() {
   const s = engine.snapshot();
   return {
     status: s.status,
+    // Where this broadcast is going, already redacted. Shown on hover of the
+    // on-air badge: with a fan-out the operator otherwise has no way to see
+    // which destinations are live without reading the startup log.
+    targets: publishTargetsRedacted(),
     playing: s.playing
       ? {
         title: s.playing.title,

@@ -44,6 +44,11 @@
     if (authoritative ? gap > 1.5 : gap > 20) position = server;
   };
   let speed = $state(null);
+  // Redacted server-side; nothing here ever holds a stream key.
+  let targets = $state([]);
+  const targetsHint = $derived(targets.length
+    ? `Publishing to:\n${targets.join('\n')}`
+    : 'No destination configured');
   let toast = $state(null);
   let tracks = $state(null);
   let busyCtl = $state(false);
@@ -165,7 +170,7 @@
     // Poll briskly: this only runs while the socket is down, and it is the
     // only thing keeping the panel honest in that window.
     feedPoll = setInterval(async () => {
-      try { stream = await api.streamStatus(); } catch { /* keep trying */ }
+      try { stream = await api.streamStatus(); targets = stream?.targets ?? targets; } catch { /* keep trying */ }
     }, 2000);
   }
 
@@ -206,6 +211,9 @@
           setTimeout(() => { toast = null; }, 12000);
         }
         stream = msg.payload;
+        // Kept rather than replaced when absent, so a payload that predates
+        // this field does not blank the hint.
+        if (msg.payload.targets) targets = msg.payload.targets;
         syncPosition(msg.payload.position, { authoritative: true });
         if (msg.payload.status === 'stopped') bufPts = [];
       } else if (msg.type === 'progress') {
@@ -250,7 +258,7 @@
 
   async function ctl(fn) {
     busyCtl = true;
-    try { await fn(); stream = await api.streamStatus(); }
+    try { await fn(); stream = await api.streamStatus(); targets = stream?.targets ?? targets; }
     catch (err) { toast = { kind: 'error', message: err.message }; }
     finally { busyCtl = false; }
   }
@@ -412,7 +420,11 @@
         <strong>Jellystreamerr</strong>
       </div>
       <div class="status">
-        <span class="onair" class:live class:prep={preparing}>
+        <!-- The destination list on hover. With a fan-out there is otherwise
+             nowhere in the UI that says where the broadcast is actually
+             going; the startup log is not somewhere an operator should have
+             to look mid-show. -->
+        <span class="onair" class:live class:prep={preparing} title={targetsHint}>
           <span class="dot" class:live class:prep={preparing}></span>
           {live ? 'On air' : preparing ? 'Preparing' : onBreak ? 'On break' : 'Offline'}
         </span>
