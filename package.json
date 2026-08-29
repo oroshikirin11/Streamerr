@@ -9,7 +9,7 @@
     "probe": "node src/cli.js probe",
     "normalize": "node src/cli.js normalize",
     "stream": "node src/cli.js stream",
-    "test": "node test/match.test.mjs && node test/paired.test.mjs && node test/tonemap.test.mjs"
+    "test": "node test/match.test.mjs && node test/paired.test.mjs && node test/tonemap.test.mjs && node test/gpuinfo.test.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -182,6 +182,18 @@
   let abrSel = $state('160k');
   let scanSel = $state('12');
   let devSel = $state('/dev/dri/renderD128');
+  /**
+   * A render node's path says nothing about which GPU it is — the numbering
+   * is enumeration order. Showing the name is what turns "renderD128" into
+   * a decision the operator can actually make.
+   */
+  const nodeFor = (path) => options?.renderNodes?.find((n) => n.path === path) ?? null;
+  const nodeLabel = (path) => {
+    const n = nodeFor(path);
+    const short = path.replace('/dev/dri/', '');
+    return n?.name ? `${short} — ${n.name}` : short;
+  };
+  const chosenNode = $derived(nodeFor(cfg?.encoder?.device));
   /** Codes the picker does not offer — normLang passes those through. */
   let extraLangs = $state('');
 
@@ -938,16 +950,31 @@
     <label>Render device</label>
     {#if options?.renderDevices?.length}
       <select bind:value={devSel} onchange={() => { if (devSel !== 'custom') cfg.encoder.device = devSel; }}>
-        {#each options.renderDevices as d}<option value={d}>{d}</option>{/each}
+        {#each options.renderDevices as d}<option value={d}>{nodeLabel(d)}</option>{/each}
         <option value="custom">Custom</option>
       </select>
       {#if devSel === 'custom'}
         <input bind:value={cfg.encoder.device} spellcheck="false" style="margin-top:8px" />
       {/if}
+      <!-- The path alone is not identifying: renderD128 is whichever card
+           enumerated first, so naming it is what lets someone notice they
+           are encoding on the iGPU, or that only one node reached the
+           container. -->
+      {#if chosenNode}
+        <p class="muted small">
+          Encoding on <strong>{chosenNode.name ?? 'an unidentified device'}</strong>{#if chosenNode.driver}, via {chosenNode.driver}{/if}.
+          {#if !chosenNode.usable}This node did not open — hardware encoding will fail on it.{/if}
+        </p>
+      {/if}
       {#if options.renderDevices.length > 1}
         <p class="muted small">
-          This machine exposes {options.renderDevices.length} render nodes. If
-          the encoder probe fails on one, try the other.
+          Other nodes here:
+          {#each (options.renderNodes ?? []).filter((n) => n.path !== cfg.encoder.device) as n, i}{#if i}, {/if}<code>{n.path.replace('/dev/dri/', '')}</code> ({n.name ?? 'unknown'}){/each}.
+        </p>
+      {:else}
+        <p class="muted small">
+          Only one render node reached this machine. If it has another GPU you
+          would rather use, pass that node through as well.
         </p>
       {/if}
     {:else}

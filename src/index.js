@@ -32,6 +32,7 @@ import {
   pickPillarboxGraph,
 } from './ffmpeg/probe.js';
 import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
+import { renderNodes } from './ffmpeg/gpuinfo.js';
 import { LANGUAGES } from './ffmpeg/tracks.js';
 import { StillSweeper } from './library/stillsweep.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
@@ -1193,18 +1194,20 @@ app.post('/api/check/owncast-title', async (req, res) => {
  * offers is always one the track matcher resolves, and so the render device
  * list is the machine's actual one instead of a guess.
  */
-app.get('/api/options', (req, res) => {
-  let renderDevices = [];
+app.get('/api/options', async (req, res) => {
+  // Named, not just listed: renderD128 is enumeration order, so an operator
+  // reading a bare path cannot tell a discrete card from the CPU's
+  // integrated graphics — nor that a second node exists but was never
+  // passed into the container.
+  let renderNodeInfo = [];
   try {
-    renderDevices = readdirSync('/dev/dri')
-      .filter((n) => n.startsWith('render'))
-      .sort()
-      .map((n) => `/dev/dri/${n}`);
+    renderNodeInfo = await renderNodes();
   } catch {
-    // No /dev/dri at all — a CPU-only host, or the device was not passed
-    // into the container. The form falls back to a free text field.
+    // Naming is a nicety; never let it break the settings page.
   }
+  const renderDevices = renderNodeInfo.map((n) => n.path);
   res.json({
+    renderNodes: renderNodeInfo,
     languages: LANGUAGES.map(({ code, name }) => ({ code, name })),
     renderDevices,
     // Names and labels are static; only whether each one WORKS needs the
