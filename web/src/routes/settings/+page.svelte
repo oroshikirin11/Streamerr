@@ -27,6 +27,9 @@
    * quietly clamp it — the slider would then be showing a number that never
    * happens.
    */
+  const BUFFER_PRESETS = [5, 10, 15, 30, 45, 60];
+  let bufferSel = $state('15');
+
   function setBuffer(n) {
     const secs = Math.min(60, Math.max(1, Math.round(Number(n) || 15)));
     cfg.buffer.seconds = secs;
@@ -245,6 +248,8 @@
       cfg = await api.config();
       if (cfg.publish) cfg.publish = unmaskPublish(cfg.publish);
       cfg.buffer = { seconds: 15, applySeconds: 15, studioWarnings: true, ...(cfg.buffer ?? {}) };
+      bufferSel = BUFFER_PRESETS.includes(cfg.buffer.seconds)
+        ? String(cfg.buffer.seconds) : 'custom';
       keyStored = cfg.owncast.streamKey === '__SET__';
       tokenStored = cfg.owncast.accessToken === '__SET__';
       accessToken = '';
@@ -503,12 +508,12 @@
          discards the other set. Switch back and the fields are as they
          were; overwrite by typing over them. -->
     <label>Protocol</label>
-    <div class="protos">
+    <div class="segc" role="radiogroup" aria-label="Protocol">
       {#each PROTOCOL_INFO as pr}
         <!-- A protocol that already holds credentials is marked, so it is
              obvious at a glance that switching away from one will not lose
              it — and that the one in use is genuinely configured. -->
-        <button type="button" class="proto" class:on={cfg.publish.protocol === pr.id}
+        <button type="button" class:on={cfg.publish.protocol === pr.id}
                 onclick={() => { cfg.publish.protocol = pr.id; }}>
           <strong>{pr.label}</strong>
           {#if cfg.publish[pr.id]?.url}
@@ -593,16 +598,22 @@
       up; shallower applies changes sooner and wastes less on a skip. GPU path only.
     </p>
 
-    <label>Depth <span class="muted small">{cfg.buffer.seconds} seconds</span></label>
-    <div class="protos">
-      {#each [5, 10, 15, 30, 45, 60] as n}
-        <button type="button" class="proto" class:on={cfg.buffer.seconds === n}
-                onclick={() => setBuffer(n)}>{n}s</button>
-      {/each}
+    <label>Depth</label>
+    <div style="max-width: 260px;">
+      <select bind:value={bufferSel} onchange={() => {
+        if (bufferSel !== 'custom') setBuffer(Number(bufferSel));
+      }}>
+        {#each BUFFER_PRESETS as n}<option value={String(n)}>{n} seconds</option>{/each}
+        <option value="custom">Custom</option>
+      </select>
+      {#if bufferSel === 'custom'}
+        <label class="row" style="margin-top:8px;">
+          <input type="number" min="1" max="60" step="1" value={cfg.buffer.seconds}
+                 oninput={(e) => setBuffer(+e.currentTarget.value)} style="width:80px" />
+          <span>seconds</span>
+        </label>
+      {/if}
     </div>
-    <label>Or a custom value <span class="muted small">1–60 seconds</span></label>
-    <input type="number" min="1" max="60" value={cfg.buffer.seconds}
-           oninput={(e) => setBuffer(+e.currentTarget.value)} />
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('buffer')}>Save</button>
       {#if saved === 'buffer'}<span class="ok small">Saved</span>{/if}
@@ -1412,19 +1423,10 @@
     font-size: 12.5px; margin: 6px 0 0;
     color: #c98a2e;
   }
-  .protos { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
-  .proto {
-    flex: 1 1 150px; display: flex; flex-direction: column; gap: 2px;
-    align-items: flex-start; text-align: left; padding: 8px 10px;
-    background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: var(--radius); cursor: pointer; width: auto;
+  .segc .tag {
+    font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
+    margin-left: 5px; opacity: .75;
   }
-  .proto.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
-  .proto .tag {
-    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
-    color: var(--muted);
-  }
-  .proto.on .tag { color: var(--accent); }
   h4.sub { margin: 18px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
   .extra {
     border: 1px solid var(--border); border-radius: var(--radius);
