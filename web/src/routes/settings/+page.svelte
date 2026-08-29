@@ -591,6 +591,12 @@
     <input type="number" min="1" max="60" value={cfg.buffer.seconds}
            oninput={(e) => setBuffer(+e.currentTarget.value)} />
 
+  </section>
+
+  <!-- Studio -->
+  <section class="card">
+    <h3>Studio</h3>
+
     <label>
       Overlay changes go on air
       <span class="muted small">
@@ -615,6 +621,7 @@
         that much has to be re-encoded. Viewers keep watching as long as the
         encoder stays ahead.
       {/if}
+      The longest wait is the buffer depth, currently {cfg.buffer.seconds}s.
     </p>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
