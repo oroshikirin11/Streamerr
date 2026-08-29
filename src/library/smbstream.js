@@ -338,6 +338,42 @@ export class SmbStreamLibrary {
       });
   }
 
+  /**
+   * Every media file on the share, as share-relative paths with a leading
+   * slash so they compare like any other path.
+   *
+   * This is the media half of a catalogue match. The strings returned here
+   * are exactly what resolveMapped() accepts back, so a rule derived against
+   * them resolves without any further translation.
+   */
+  async allPaths({ limit = 5000 } = {}) {
+    const out = [];
+    const walk = async (dir, depth) => {
+      if (out.length >= limit || depth > 6) return;
+      let entries = [];
+      try { entries = await this._readdir(dir); } catch { return; }
+      for (const e of entries) {
+        if (out.length >= limit) return;
+        if (e.name.startsWith('.')) continue;
+        const rel = dir ? `${dir}/${e.name}` : e.name;
+        if (e.directory) await walk(rel, depth + 1);
+        else if (isVideo(e.name)) out.push(`/${rel}`);
+      }
+    };
+    await walk('', 0);
+    return out;
+  }
+
+  /**
+   * Turn a path produced by the matcher back into something ffmpeg opens.
+   *
+   * Kept here rather than in the wrapper because only this provider knows
+   * that its media is reached through a bridge URL rather than a filename.
+   */
+  resolveMapped(mapped) {
+    return this.resolvePath({ rel: String(mapped ?? '').replace(/^\/+/, '') });
+  }
+
   async episodes(seriesId, { seasonId } = {}) {
     const rel = this._paths.get(seasonId || seriesId);
     if (rel == null) throw new Error('Unknown item');

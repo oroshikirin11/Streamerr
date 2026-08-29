@@ -235,6 +235,17 @@ export class FilesystemLibrary {
    * actually open, so they are the truth a reported path has to line up
    * with. Capped for the same reason as the catalogue side.
    */
+  /**
+   * A mapped path is already an absolute local path here; it only has to
+   * exist. Verified rather than trusted, so a stale rule surfaces as a
+   * missing file instead of an ffmpeg error later.
+   */
+  resolveMapped(mapped) {
+    const p = String(mapped ?? '');
+    if (!p || !existsSync(p)) throw new Error(`Cannot open ${p || '(empty path)'}`);
+    return p;
+  }
+
   async allPaths({ limit = 5000 } = {}) {
     const out = [];
     const walk = (dir, depth) => {

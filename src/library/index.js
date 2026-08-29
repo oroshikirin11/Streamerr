@@ -9,6 +9,7 @@
 import { randomBytes } from 'crypto';
 
 import { JellyfinLibrary } from './jellyfin.js';
+import { PairedLibrary } from './paired.js';
 import { FilesystemLibrary } from './filesystem.js';
 import { SmbLibrary } from './smb.js';
 import { SmbStreamLibrary } from './smbstream.js';
@@ -32,6 +33,22 @@ export const stillsApply = (provider) => provider !== 'jellyfin';
 
 function makeSource(src, cfg, reuseToken = null) {
   const stills = src.generateStills ?? stillsDefault(src.provider);
+  /**
+   * A metadata block pairs a catalogue with this source's media.
+   *
+   * The source stays what it is — a folder or a share, somewhere bytes
+   * actually live — and the catalogue is layered on top. Built by recursing
+   * without the metadata block, so the media half is constructed exactly as
+   * it would be on its own.
+   */
+  if (src.metadata?.provider === 'jellyfin' && src.provider !== 'jellyfin') {
+    const media = makeSource({ ...src, metadata: null }, cfg, reuseToken);
+    const catalogue = new JellyfinLibrary({
+      url: src.metadata.url,
+      apiKey: src.metadata.apiKey,
+    });
+    return new PairedLibrary(catalogue, media, src.metadata.pathMap ?? []);
+  }
   if (src.provider === 'jellyfin') {
     return new JellyfinLibrary({
       url: src.jellyfin?.url,
