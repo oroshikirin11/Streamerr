@@ -6,7 +6,7 @@
 
   // Each step validates rather than just collecting — a value that has been
   // proven to work is worth far more than one that has been typed.
-  const STEPS = ['Destination', 'Encoder', 'Library', 'Paths', 'Languages'];
+  const STEPS = ['Destination', 'Encoder', 'Media', 'Artwork', 'Languages'];
   let step = $state(0);
   let saving = $state(false);
   let error = $state('');
@@ -79,6 +79,57 @@
   // Reused when one already exists, so re-running setup edits the first
   // source instead of replacing whatever is configured with a new one.
   let srcId = $state('setup');
+
+  /**
+   * The catalogue is optional and layered on top of the media, never an
+   * alternative to it. Jellyfin knows the artwork and episode order; it does
+   * not hand over bytes, so it can never be the answer to "where is my
+   * media" — which is what made picking it produce a library that would not
+   * play.
+   */
+  /**
+   * Which catalogue, not whether. TheTVDB is next, so this is a provider
+   * rather than a Jellyfin switch — otherwise adding the second one means
+   * rewriting the step.
+   */
+  let metaProvider = $state('none');
+  let metaUrl = $state('');
+  let metaKey = $state('');
+  let metaRules = $state([]);
+  let match = $state(null);
+  let matching = $state(false);
+
+  /** The media half alone — what the matcher compares a catalogue against. */
+  function mediaSource() {
+    const b = { id: srcId, name: 'Library', provider };
+    if (provider === 'smb') {
+      return { ...b,
+        smb: {
+          host: smbHost.trim(), share: smbShare.trim(), path: smbPath.trim(),
+          guest: smbGuest, username: smbGuest ? '' : smbUser.trim(),
+          ...(smbPass ? { password: smbPass } : {}),
+        } };
+    }
+    return { ...b, filesystem: { roots: parseList(fsRoots.replace(/\n/g, ',')) } };
+  }
+
+  /**
+   * Ask the server to line the two libraries up. The rules it derives are
+   * saved with the source, so a path mapping is never typed by hand.
+   */
+  async function runMatch() {
+    matching = true; match = null;
+    try {
+      const r = await api.matchLibrary({
+        media: mediaSource(),
+        jellyfin: { url: metaUrl.trim(), apiKey: metaKey || '__SET__' },
+      });
+      metaRules = r.rules ?? [];
+      match = { ok: true, ...r };
+    } catch (err) {
+      match = { ok: false, error: err.message };
+    } finally { matching = false; }
+  }
 
   // step 3
   let provider = $state('jellyfin');
@@ -185,9 +236,17 @@
        */
       const src0 = cfg.library?.sources?.[0] ?? {};
       srcId = src0.id ?? srcId;
-      provider = src0.provider || 'jellyfin';
-      jellyfinUrl = src0.jellyfin?.url || '';
-      jellyfinKey = src0.jellyfin?.apiKey === '__SET__' ? '__SET__' : '';
+      /**
+       * A source that used to BE Jellyfin becomes media plus a catalogue.
+       * Its credentials carry over so nothing is retyped; the operator only
+       * has to say where the files are, which was always the missing half.
+       */
+      provider = src0.provider === 'jellyfin' ? 'filesystem' : (src0.provider || 'filesystem');
+      const meta = src0.metadata ?? (src0.provider === 'jellyfin' ? src0.jellyfin : null);
+      metaProvider = meta?.url ? 'jellyfin' : 'none';
+      metaUrl = meta?.url || '';
+      metaKey = meta?.apiKey === '__SET__' ? '__SET__' : '';
+      metaRules = src0.metadata?.pathMap ?? src0.pathMap ?? [];
       fsRoots = (src0.filesystem?.roots || []).join('\n');
       rules = src0.pathMap ?? rules;
       const sm = src0.smb ?? {};
@@ -230,22 +289,17 @@
   }
 
   function libraryPayload() {
-    const base = { id: srcId, name: 'Library', provider };
-    if (provider === 'jellyfin') {
-      return { sources: [{ ...base,
-        jellyfin: { url: jellyfinUrl, apiKey: jellyfinKey }, pathMap: rules }] };
+    const src = mediaSource();
+    if (metaProvider === 'jellyfin' && metaUrl.trim()) {
+      src.metadata = {
+        provider: 'jellyfin',
+        url: metaUrl.trim(),
+        // Only when typed, so a saved key survives a pass through setup.
+        ...(metaKey ? { apiKey: metaKey } : {}),
+        pathMap: metaRules,
+      };
     }
-    if (provider === 'smb') {
-      return { sources: [{ ...base,
-        smb: {
-          host: smbHost.trim(), share: smbShare.trim(), path: smbPath.trim(),
-          guest: smbGuest, username: smbGuest ? '' : smbUser.trim(),
-          // Only when typed, so a saved password survives a pass through setup.
-          ...(smbPass ? { password: smbPass } : {}),
-        } }] };
-    }
-    return { sources: [{ ...base,
-      filesystem: { roots: parseList(fsRoots.replace(/\n/g, ',')) } }] };
+    return { sources: [src] };
   }
 
   async function testLibrary() {
@@ -267,9 +321,8 @@
   async function next() {
     error = '';
     if (step === 1 && !encoders) await loadEncoders();
-    if (step === 2 && provider === 'jellyfin') await loadPathmap();
-    // The filesystem provider needs no mapping — it already has real paths.
-    if (step === 2 && provider !== 'jellyfin') { await save(); step = 4; return; }
+    // Every media source now goes on to the optional catalogue step; there
+    // is no branch to skip, because there is no mapping to fill in.
     if (step === STEPS.length - 1) { await finish(); return; }
     await save();
     step += 1;
@@ -464,20 +517,10 @@
     {:else if step === 2}
       <h2>Where is your media?</h2>
       <div class="row">
-        <label class="pick"><input type="radio" bind:group={provider} value="jellyfin" /> Jellyfin</label>
         <label class="pick"><input type="radio" bind:group={provider} value="filesystem" /> A folder</label>
         <label class="pick"><input type="radio" bind:group={provider} value="smb" /> SMB share</label>
       </div>
-      {#if provider === 'jellyfin'}
-        <p class="muted">
-          Reads the posters, seasons and episode order Jellyfin has already
-          scraped. Create a key in Jellyfin under Dashboard → API Keys.
-        </p>
-        <label>Jellyfin URL</label>
-        <input bind:value={jellyfinUrl} placeholder="http://192.168.1.10:8096" spellcheck="false" />
-        <label>API key</label>
-        <input type="password" bind:value={jellyfinKey} placeholder="from Dashboard → API Keys" />
-      {:else if provider === 'smb'}
+      {#if provider === 'smb'}
         <p class="muted">
           Read over the network — no mount, no privileges, read-only.
         </p>
@@ -524,43 +567,54 @@
       {/if}
 
     {:else if step === 3}
-      <h2>Can we open your media?</h2>
+      <h2>Where should titles and artwork come from?</h2>
+      <p class="muted">
+        Optional. Without it, we use the filenames.
+      </p>
 
-      {#if !pathmap}
-        <p class="muted">Checking…</p>
+      <div class="row">
+        <label class="pick">
+          <input type="radio" bind:group={metaProvider} value="none" /> Filenames
+        </label>
+        <label class="pick">
+          <input type="radio" bind:group={metaProvider} value="jellyfin" /> Jellyfin
+        </label>
+        <label class="pick dim">
+          <input type="radio" disabled /> TheTVDB <span class="muted small">soon</span>
+        </label>
+      </div>
 
-      {:else if pathmap.noMappingNeeded && !rules.length}
-        <div class="result">
-          Nothing to do — every path Jellyfin reports is already readable here.
+      {#if metaProvider === 'jellyfin'}
+        <p class="muted small">
+          Jellyfin is a media server. If you run one for this library, it has
+          already fetched the posters and episode order — we can borrow them.
+        </p>
+        <label>Address</label>
+        <input bind:value={metaUrl} placeholder="http://192.168.1.10:8096" spellcheck="false" />
+        <label>API key</label>
+        <input type="password" bind:value={metaKey} placeholder="Dashboard → API Keys" />
+        <div class="row">
+          <button onclick={runMatch} disabled={matching || !metaUrl.trim()}>
+            {matching ? 'Checking…' : 'Check'}
+          </button>
         </div>
-        <p class="muted small" style="margin-top:10px">
-          {pathmap.reported.join(', ')}
-        </p>
-        <p class="muted small">
-          This step only matters when the two run with different mounts, such as
-          a Jellyfin in Docker that sees <code>/media</code> where this service
-          sees <code>/extHdd</code>. Yours match, so continue.
-        </p>
-
-      {:else}
-        <p class="muted">
-          Jellyfin reports paths as its own process sees them. Some of these
-          are not readable here, so they need translating.
-        </p>
-        <p class="muted small">
-          Jellyfin reports: {pathmap.reported.join(', ') || '—'}
-        </p>
-        <p class="muted small">Readable here: {pathmap.reachable?.join(', ') || 'none'}</p>
-
-        {#each rules as r, i}
-          <div class="row">
-            <input bind:value={r.from} placeholder="/media/" spellcheck="false" />
-            <span class="muted">→</span>
-            <input bind:value={r.to} placeholder="/extHdd/" spellcheck="false" />
-            <button onclick={() => removeRule(i)}>Remove</button>
+        {#if match}
+          <div class="result" class:bad={!match.ok || match.matched === 0}>
+            {match.ok ? match.description : match.error}
           </div>
-        {/each}
-        <button onclick={addRule} style="margin-top:10px">Add rule</button>
+          {#if match.ok && match.matched === 0}
+            <p class="muted small">
+              Nothing lined up, so this is a different library. Continue and
+              we will use filenames.
+            </p>
+          {:else if match.ok && match.matched < match.total}
+            <p class="muted small">
+              The rest are elsewhere. Continue either way.
+            </p>
+          {/if}
+        {:else}
+          <p class="muted small">We work the paths out ourselves. Nothing to type.</p>
+        {/if}
       {/if}
 
     {:else}

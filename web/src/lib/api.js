@@ -77,6 +77,7 @@ export const api = {
   checkOwncast: (body) => request('POST', '/api/check/owncast', body),
   checkEncoders: () => request('GET', '/api/check/encoders'),
   checkLibrary: (body) => request('POST', '/api/check/library', body),
+  matchLibrary: (body) => request('POST', '/api/match/library', body),
   checkPathmap: (body) => request('POST', '/api/check/pathmap', body),
 
   libraries: () => request('GET', '/api/library/libraries'),
