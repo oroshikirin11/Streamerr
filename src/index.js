@@ -643,6 +643,9 @@ function redactSource(src) {
   const out = { ...src };
   if (out.jellyfin) out.jellyfin = { ...out.jellyfin, apiKey: out.jellyfin.apiKey ? '__SET__' : '' };
   if (out.smb) out.smb = { ...out.smb, password: out.smb.password ? '__SET__' : '' };
+  if (out.metadata) {
+    out.metadata = { ...out.metadata, apiKey: out.metadata.apiKey ? '__SET__' : '' };
+  }
   return out;
 }
 
@@ -664,6 +667,11 @@ function restoreSourceSecrets(incoming) {
     }
     if (out.smb?.password === '__SET__') {
       out.smb = { ...out.smb, password: prev?.smb?.password ?? '' };
+    }
+    // The catalogue's key is a secret like any other: the browser is sent
+    // the sentinel and sends it back, and the stored value has to survive.
+    if (out.metadata?.apiKey === '__SET__') {
+      out.metadata = { ...out.metadata, apiKey: prev?.metadata?.apiKey ?? '' };
     }
     return out;
   });
@@ -1202,8 +1210,13 @@ app.post('/api/match/library', async (req, res) => {
     }
     // The panel never holds a real key, so the sentinel resolves to what is
     // stored for the source being edited.
-    const stored = (config.library?.sources ?? [])
-      .find((x) => x.jellyfin?.apiKey)?.jellyfin?.apiKey ?? '';
+    // The catalogue key lives on the source's metadata block; the legacy
+    // jellyfin block is checked too so an unmigrated source still matches.
+    const src = (config.library?.sources ?? [])
+      .find((x) => x.id === media.id) ?? {};
+    const stored = src.metadata?.apiKey || src.jellyfin?.apiKey
+      || (config.library?.sources ?? []).find((x) => x.metadata?.apiKey)?.metadata?.apiKey
+      || '';
     const apiKey = jellyfin.apiKey === '__SET__' ? stored : (jellyfin.apiKey ?? '');
     const jf = new JellyfinLibrary({ url: jellyfin.url, apiKey });
 

@@ -46,6 +46,46 @@
    */
   const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'] };
   let publishSaved = $state({});
+
+  /**
+   * Which catalogue supplies titles and artwork for this source. A provider
+   * rather than a switch, because TheTVDB is next and a Jellyfin-shaped
+   * control would have to be rebuilt to add it.
+   */
+  const metaProvider = $derived(src?.metadata?.provider ?? 'none');
+  let metaKey = $state('');
+  let match = $state(null);
+  let matching = $state(false);
+
+  function setMeta(p) {
+    if (!src) return;
+    src.metadata = { ...(src.metadata ?? {}), provider: p };
+    match = null;
+  }
+
+  /** The media half alone — what a catalogue is compared against. */
+  function mediaSourceOnly() {
+    const { metadata, ...rest } = src ?? {};
+    return rest;
+  }
+
+  /**
+   * Compare the two libraries and keep the rules that fall out, so a path
+   * mapping is never typed by hand.
+   */
+  async function runMatch() {
+    matching = true; match = null;
+    try {
+      const r = await api.matchLibrary({
+        media: mediaSourceOnly(),
+        jellyfin: { url: src.metadata.url?.trim(), apiKey: metaKey || '__SET__' },
+      });
+      src.metadata = { ...src.metadata, pathMap: r.rules ?? [] };
+      match = { ok: true, ...r };
+    } catch (err) {
+      match = { ok: false, error: err.message };
+    } finally { matching = false; }
+  }
   function unmaskPublish(pub) {
     const seen = {};
     for (const proto of ['rtmp', 'rtmps', 'srt']) {
@@ -298,6 +338,8 @@
     // hides the username and password fields, which reads as SMB not
     // supporting authentication at all. The wizard already defaults this way.
     x.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: false };
+    // The catalogue is a block on the source, not a provider of its own.
+    x.metadata ??= { provider: 'none', url: '', apiKey: '', pathMap: [] };
     x.pathMap ??= [];
     return x;
   }
@@ -356,6 +398,18 @@
             : (x.jellyfin?.apiKey || ''),
         };
         out.pathMap = x.pathMap ?? [];
+        /**
+         * The catalogue block, with its derived rules. The key follows the
+         * same sentinel rule as every other secret: sent only when typed,
+         * so a stored one survives a save of anything else.
+         */
+        const m = x.metadata ?? {};
+        out.metadata = {
+          provider: m.provider ?? 'none',
+          url: m.url ?? '',
+          apiKey: x === src && metaKey ? metaKey : (m.apiKey || ''),
+          pathMap: m.pathMap ?? [],
+        };
         out.smb = {
           host: x.smb?.host ?? '', share: x.smb?.share ?? '', path: x.smb?.path ?? '',
           guest: x.smb?.guest ?? false,
@@ -961,22 +1015,16 @@
       <label>Name</label>
       <input bind:value={src.name} spellcheck="false" placeholder="Shows" />
 
-      <div class="segc" role="radiogroup" aria-label="Library provider">
-        <button class:on={src.provider === 'jellyfin'}
-                onclick={() => (src.provider = 'jellyfin')}>Jellyfin</button>
+      <!-- Two answers, because these are the only two places bytes live.
+           A catalogue is chosen separately, below. -->
+      <div class="segc" role="radiogroup" aria-label="Where the media is">
         <button class:on={src.provider === 'filesystem'}
                 onclick={() => (src.provider = 'filesystem')}>A folder</button>
         <button class:on={src.provider === 'smb'}
                 onclick={() => (src.provider = 'smb')}>SMB share</button>
       </div>
 
-    {#if src.provider === 'jellyfin'}
-      <label>Jellyfin URL</label>
-      <input bind:value={src.jellyfin.url} spellcheck="false" />
-      <label>API key</label>
-      <input type="password" bind:value={jellyfinKey}
-             placeholder={jfKeyStored ? 'leave blank to keep the saved key' : 'Dashboard → API Keys'} />
-    {:else if src.provider === 'smb'}
+    {#if src.provider === 'smb'}
       <label>Server (hostname, IP, or a full smb:// address)</label>
       <input bind:value={src.smb.host} spellcheck="false"
              placeholder="nas.local  or  smb://user@nas/share/folder"
@@ -1072,39 +1120,55 @@
     {/if}
   </section>
 
-  <!-- Path mapping -->
-  {#if src?.provider === 'jellyfin'}
+  <!-- Titles and artwork -->
+  {#if src}
     <section class="card">
-      <h3>Path mapping</h3>
-      <p class="muted small">
-      Only when Jellyfin reports paths this service cannot open &mdash; it seeing
-      <code>/media</code> where this sees <code>/extHdd</code>.
-    </p>
-      {#each src.pathMap as r, i}
-        <div class="actions">
-          <input bind:value={r.from} placeholder="/media/" spellcheck="false" />
-          <span class="muted">→</span>
-          <input bind:value={r.to} placeholder="/extHdd/" spellcheck="false" />
-          <button onclick={() => removeRule(i)}>Remove</button>
-        </div>
-      {/each}
-      <div class="actions">
-        <button class="primary" onclick={() => save('library')}>Save</button>
-        <button onclick={addRule}>Add rule</button>
-        <button onclick={checkPaths} disabled={testing === 'paths'}>
-          {testing === 'paths' ? 'Checking…' : 'Check paths'}
-        </button>
+      <h3>Titles and artwork</h3>
+      <p class="muted small" style="margin-top:0">
+        Optional. Without it we use the filenames.
+      </p>
+
+      <div class="segc" role="radiogroup" aria-label="Metadata source">
+        <button class:on={metaProvider === 'none'}
+                onclick={() => setMeta('none')}>Filenames</button>
+        <button class:on={metaProvider === 'jellyfin'}
+                onclick={() => setMeta('jellyfin')}>Jellyfin</button>
+        <button disabled>TheTVDB <span class="tag">soon</span></button>
       </div>
-      {#if pathmap}
-        <div class="result" class:bad={!pathmap.noMappingNeeded && !src.pathMap.length}>
-          {#if pathmap.noMappingNeeded}
-            Every path Jellyfin reports is readable here — no mapping needed.
-          {:else}
-            Jellyfin reports: {pathmap.reported.join(', ') || '—'}<br />
-            Readable here: {pathmap.reachable?.join(', ') || 'none'}
+
+      {#if metaProvider === 'jellyfin'}
+        <p class="muted small">
+          Jellyfin is a media server. If you run one for this library, it has
+          already fetched the posters and episode order.
+        </p>
+        <label>Address</label>
+        <input bind:value={src.metadata.url} spellcheck="false"
+               placeholder="http://192.168.1.10:8096" />
+        <label>API key</label>
+        <input type="password" bind:value={metaKey}
+               placeholder={src.metadata.apiKey === '__SET__'
+                 ? 'saved — type to replace' : 'Dashboard → API Keys'} />
+        <div class="row" style="margin-top:10px">
+          <button onclick={runMatch} disabled={matching || !src.metadata.url?.trim()}>
+            {matching ? 'Checking…' : 'Check'}
+          </button>
+          {#if src.metadata.pathMap?.length}
+            <span class="muted small">{src.metadata.pathMap.length} rule(s) saved</span>
           {/if}
         </div>
+        {#if match}
+          <div class="result" class:bad={!match.ok || match.matched === 0}>
+            {match.ok ? match.description : match.error}
+          </div>
+        {:else}
+          <p class="muted small">We work the paths out ourselves. Nothing to type.</p>
+        {/if}
       {/if}
+
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick={() => save('library')}>Save</button>
+        {#if saved === 'library'}<span class="ok small">Saved</span>{/if}
+      </div>
     </section>
   {/if}
 
