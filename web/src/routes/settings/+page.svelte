@@ -536,10 +536,9 @@
              value={cfg.publish.srt.latencyMs ?? 200}
              oninput={(e) => { cfg.publish.srt.latencyMs = +e.currentTarget.value; }} />
       <p class="muted small">
-        How long SRT may spend re-requesting lost packets before giving up on
-        them. Higher survives a worse connection at the cost of delay; the
-        usual advice is about four times the round-trip time to the server.
-      </p>
+      Time allowed to re-request lost packets. Higher survives a worse link,
+      at the cost of delay. Rule of thumb: four times the round trip.
+    </p>
     {:else}
       <label>Server address</label>
       <input bind:value={cfg.publish[cfg.publish.protocol].url} spellcheck="false"
@@ -577,9 +576,8 @@
     {/each}
     <button type="button" onclick={addExtra}>Add a destination</button>
     <p class="muted small">
-      Every destination receives the same encode, so extras cost almost
-      nothing. A destination that cannot be reached is skipped and the rest
-      keep streaming.
+      Extras share the one encode, so they cost almost nothing. An unreachable
+      destination is skipped; the rest keep streaming.
     </p>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('publish')}>Save</button>
@@ -591,10 +589,8 @@
   <section class="card">
     <h3>Buffer</h3>
     <p class="muted small" style="margin-top:0">
-      The encoded cushion held ahead of air. Deeper survives a title that
-      cannot quite keep up, at the cost of longer before any change reaches
-      viewers and more work thrown away on every skip. Applies to the GPU
-      path; titles that burn subtitles on the CPU manage their own.
+      Encoded video held ahead of air. Deeper survives a title that cannot keep
+      up; shallower applies changes sooner and wastes less on a skip. GPU path only.
     </p>
 
     <label>Depth <span class="muted small">{cfg.buffer.seconds} seconds</span></label>
@@ -630,18 +626,13 @@
            oninput={(e) => { cfg.buffer.applySeconds = +e.currentTarget.value; }} />
     <p class="muted small">
       {#if cfg.buffer.applySeconds >= cfg.buffer.seconds}
-        Nothing is discarded, so viewers see no interruption — the change
-        appears when the cushion drains. This is the safe choice.
+        Nothing discarded, no interruption. Safest.
       {:else if cfg.buffer.applySeconds < 1}
-        The cushion is dropped and the change goes out at once. Viewers
-        re-buffer while the encoder catches up, and everything already
-        encoded is re-encoded.
+        Cushion dropped &mdash; viewers re-buffer while the encoder catches up.
       {:else}
-        Part of the cushion is discarded, so the change arrives sooner and
-        that much has to be re-encoded. Viewers keep watching as long as the
-        encoder stays ahead.
+        Part of the cushion is re-encoded. Fine while the encoder stays ahead.
       {/if}
-      The longest wait is the buffer depth, currently {cfg.buffer.seconds}s.
+      Maximum is the buffer depth, {cfg.buffer.seconds}s.
     </p>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
@@ -649,8 +640,8 @@
       Show encoder cost warnings in Studio
     </label>
     <p class="muted small">
-      The red notes about moving pictures and animated GIFs. Turning them off
-      does not change what is reported in the console when a clip runs slow.
+      The red notes in Studio about moving pictures and GIFs. The console report
+      is unaffected.
     </p>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('studio')}>Save</button>
@@ -667,8 +658,7 @@
       Update the Owncast stream title as episodes change
     </label>
     <p class="muted small">
-      Viewers see the episode on air ("Show — S1E4") in the header of the
-      watch page while you are live.
+      Viewers see the episode ("Show &mdash; S1E4") on the watch page.
     </p>
 
     {#if cfg.owncast.syncTitle !== false}
@@ -815,19 +805,14 @@
     </select>
     <p class="muted small">
       {#if frameSize === 'fixed'}
-        Every clip is sent at {cfg.encoder.width}&times;{cfg.encoder.height}, with
-        black bars added around anything of a different shape. The only mode
-        that never reconnects.
+        Everything at {cfg.encoder.width}&times;{cfg.encoder.height}, bars around
+        other shapes. Never reconnects.
       {:else if frameSize === 'fit'}
-        The picture keeps its shape and is scaled to fill the frame, so the
-        bars go away &mdash; a 4:3 episode goes out at {fitExample}, about a fifth
-        less to encode. Standard-definition material is <em>scaled up</em> to
-        fill, which costs effort without adding detail.
+        Shape kept, bars gone &mdash; 4:3 goes out at {fitExample}, about a fifth
+        less to encode. Scales SD <em>up</em>, which costs effort for no detail.
       {:else if frameSize === 'native'}
-        Each file is sent at exactly its own size, only ever scaled
-        <em>down</em> &mdash; a 640&times;480 episode goes out at 640&times;480 rather
-        than five times the pixels for no extra detail. Sizes vary most here,
-        so expect the most reconnects.
+        Each file at its own size, only ever scaled <em>down</em>. Sizes vary
+        most, so expect the most reconnects.
       {:else}
         As above, but the resolution limit is <strong>ignored</strong> &mdash; a 4K
         file is encoded at 4K, which most machines cannot do in real time.
@@ -844,15 +829,13 @@
 
     <p class="muted small">
       About {recommendedVbr.toLocaleString()} kbps suits
-      {cfg.encoder.width}&times;{cfg.encoder.height} at {cfg.encoder.fps}fps, and
-      anything above your upload speed will stutter for viewers. Auto
-      framerate outputs each file at its native rate (24fps anime stays
-      24fps &mdash; less GPU work, no judder) up to the cap; 60fps sources
-      are brought down to it.
+      {cfg.encoder.width}&times;{cfg.encoder.height} at {cfg.encoder.fps}fps.
+      Above your upload speed, viewers stutter. Auto keeps each file&rsquo;s rate
+      up to the cap.
     </p>
     <p class="muted small">
-      Keyframe interval must divide Owncast's segment length. Two seconds is
-      what its documentation recommends; changing it can break segmenting.
+      Must divide Owncast&rsquo;s segment length. Two seconds is its recommendation;
+      changing it can break segmenting.
     </p>
 
 
@@ -904,9 +887,9 @@
            passed into the container. Nothing to offer, so ask. -->
       <input bind:value={cfg.encoder.device} spellcheck="false" />
       <p class="muted small">
-        No <code>/dev/dri</code> render node is visible here, so hardware
-        encoding will not work until one is passed into the container.
-      </p>
+      No <code>/dev/dri</code> render node here &mdash; hardware encoding needs one
+      passed into the container.
+    </p>
     {/if}
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
@@ -914,10 +897,8 @@
       Decode on the GPU
     </label>
     <p class="muted small">
-      Whether this helps depends on the machine and the file &mdash; a large
-      win for 10-bit HEVC on a weak CPU, a loss for 8-bit H.264 on a strong
-      one. Measure it with <code>cli.js benchmark &lt;file&gt;</code> rather
-      than guessing.
+      Depends on machine and file: a large win for 10-bit HEVC on a weak CPU, a
+      loss for 8-bit H.264 on a strong one. Measure it.
     </p>
 
     <div class="g3" style="margin-top:6px">
@@ -928,20 +909,13 @@
       </div>
     </div>
     <p class="muted small">
-      How much video each worker on the CPU path encodes at a time. Longer
-      chunks mean fewer seams, but a longer wait before playback starts &mdash;
-      the first chunk has to finish before anything goes out. 20s suits most
-      machines; shorten it if startup feels slow. How many workers run at once
-      is decided per clip by the engine, since the right answer depends on
-      whether that file can use the GPU compositor.
+      Video per worker on the CPU path. Longer means fewer seams but a longer
+      wait to start. 20s suits most machines.
     </p>
 
     <p class="muted small" style="margin-top:14px;">
-      Embedded subtitles are extracted to a local cache before their first
-      broadcast (the &ldquo;Preparing&rdquo; state) &mdash; burning them
-      straight from the media file would read the whole file a second time
-      during playback, which is slower on every file and fatal on large ones.
-      Cached files make every later broadcast start instantly.
+      Embedded subtitles are extracted to a local cache before first broadcast
+      (the &ldquo;Preparing&rdquo; state); burning straight from a share stalls.
     </p>
 
     <div class="actions">
@@ -1030,13 +1004,9 @@
                placeholder={src.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
       {/if}
       <p class="muted small" style="margin-top:6px;">
-        Read directly over the network — no mount, no privileges, works in
-        any container. The share is only ever read. Note: the first
-        playback of each file is slower than from local disk (subtitle
-        extraction reads it once in full over the network), and heavy
-        CPU-transcoded media may start noticeably slower than it would
-        from a local folder or Jellyfin mount.
-      </p>
+      Read over the network &mdash; no mount, no privileges, read-only. First playback
+      of each file is slower.
+    </p>
     {:else}
       <label>Folders, one per line</label>
       <textarea rows="3" bind:value={fsRoots} spellcheck="false"></textarea>
@@ -1054,12 +1024,10 @@
     </label>
     <p class="muted small">
       {#if src.provider === 'smb' || src.provider === 'smbmount'}
-        Off by default over a share &mdash; each picture is a seek across the
-        network, so opening a 37-episode season asks for 37 of them. Made
-        once and cached, so the cost is only the first visit.
+        Off by default over a share: one network seek per episode. Cached
+        after the first visit.
       {:else}
-        Roughly a fifth of a second per episode from a local disk, made on
-        first view and cached afterwards.
+        About a fifth of a second per episode, then cached.
       {/if}
     </p>
     {/if}
@@ -1095,10 +1063,9 @@
     <section class="card">
       <h3>Path mapping</h3>
       <p class="muted small">
-        Only needed when Jellyfin reports paths this service cannot open — a
-        Jellyfin in Docker seeing <code>/media</code> where this sees
-        <code>/extHdd</code>. Usually empty.
-      </p>
+      Only when Jellyfin reports paths this service cannot open &mdash; it seeing
+      <code>/media</code> where this sees <code>/extHdd</code>.
+    </p>
       {#each src.pathMap as r, i}
         <div class="actions">
           <input bind:value={r.from} placeholder="/media/" spellcheck="false" />
@@ -1131,8 +1098,8 @@
   <section class="card">
     <h3>Languages</h3>
     <p class="muted small">
-      Your preferred language is selected automatically, like Jellyfin.
-      You can change audio or subtitles at any time, including mid-episode.
+      Chosen automatically, like Jellyfin. Change audio or subtitles any time,
+      including mid-episode.
     </p>
     <label>Languages you understand</label>
     {#if options?.languages?.length}
@@ -1147,9 +1114,9 @@
         {/each}
       </div>
       <p class="muted small">
-        Click in order of preference &mdash; the first one a file offers wins.
-        Used both to pick a dub and to choose a subtitle language.
-      </p>
+      In order of preference &mdash; the first a file offers wins. Used for both dubs
+      and subtitles.
+    </p>
       <label>Other languages (optional)</label>
       <input bind:value={extraLangs} onchange={applyExtras} spellcheck="false"
              placeholder="swe, dan — ISO codes not listed above" />
@@ -1179,9 +1146,8 @@
       <option value="off">Never</option>
     </select>
     <p class="muted small">
-      With original audio and the first subtitle option, anime plays in
-      Japanese with your subtitles and an English film plays with none.
-      Individual episodes can still be overridden from the library.
+      Original audio plus the first subtitle option gives Japanese anime with
+      subtitles and English film with none. Overridable per episode.
     </p>
     <div class="actions">
       <button class="primary" onclick={() => save('tracks')}>Save</button>
@@ -1197,10 +1163,9 @@
       Build a deep cushion in RAM when there is spare horsepower
     </label>
     <p class="muted small" style="margin-top:6px;">
-      Sets how much encoded video may wait in RAM ahead of the broadcast. Turning
-      it off does not stop encoding ahead — clips that need several CPU workers
-      still build the short head start they need to go on air at all, which is why
-      they still pause briefly before starting.
+      How much encoded video may wait in RAM ahead of air. Off does not stop
+      encoding ahead &mdash; CPU clips still build the head start they need to
+      start at all.
     </p>
     {#if cfg.runAhead.enabled}
       <div style="margin-top:10px; max-width: 320px;">
@@ -1213,19 +1178,12 @@
                  cfg.runAhead.ramMB = v === '' ? 'auto' : Number(v);
                }} />
         <p class="muted small" style="margin-top:6px;">
-          Leave empty for auto: {cfg.recommendedCacheMB ?? '?'} MB recommended on
-          this machine, computed from the memory the container actually has.
-          The cache lives in RAM only — if /dev/shm cannot hold it, caching
-          switches off rather than touching a disk. Applies from the next
-          broadcast.
+          Empty for auto: {cfg.recommendedCacheMB ?? '?'} MB here. RAM only; if
+          /dev/shm cannot hold it, caching switches off. Applies next broadcast.
         </p>
         <p class="muted small" style="margin-top:6px;">
-          Only media that must be processed on the CPU — subtitle burn-in
-          the GPU cannot composite — uses the cache: those encodes run near
-          realtime, so working ahead is what makes seeking and pausing
-          instant. GPU-processed media already restarts anywhere in under a
-          second and streams at realtime by design, so it plays without a
-          cache and shows no cache bar on the timeline.
+          Only CPU clips use it &mdash; working ahead is what makes their seeking
+          instant. GPU clips restart in under a second anyway.
         </p>
       </div>
     {/if}
@@ -1243,10 +1201,8 @@
       Floating preview window while broadcasting
     </label>
     <p class="muted small">
-      Plays the exact stream Owncast receives, straight from the encoder —
-      it costs the server no extra encoding work, only the stream's own
-      bitrate to each open panel. Each panel can also hide it with the
-      button on the play bar; this switch turns it off everywhere.
+      The exact stream Owncast receives, straight from the encoder. No extra
+      encoding, just its bitrate to each viewer.
     </p>
       <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('preview')}>Save</button>
@@ -1282,9 +1238,8 @@
       </div>
     {/if}
     <p class="muted small">
-      Asks every Jellyfin source to rescan, then reloads the shelves — so an
-      episode added to your server turns up on its own. The Refresh button on
-      the library page does the same thing immediately.
+      Rescans Jellyfin sources and reloads the shelves, so new episodes appear
+      on their own.
     </p>
       <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('autoscan')}>Save</button>
@@ -1300,9 +1255,8 @@
       Load artwork only as it scrolls into view
     </label>
     <p class="muted small">
-      Mainly for Jellyfin sources &mdash; folder and SMB libraries only show
-      artwork where a poster file sits beside the media. Leave off unless a
-      shelf is big enough that fetching it all at once is the slower option.
+      Mainly for Jellyfin &mdash; folder and SMB libraries only show artwork sitting
+      beside the media.
     </p>
       <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('ui')}>Save</button>
@@ -1318,8 +1272,7 @@
       Developer mode — show the read-only Console page
     </label>
     <p class="muted small">
-      Live server and ffmpeg logs in the panel, with stream keys redacted.
-      Useful when reporting a problem.
+      Live server and ffmpeg logs, keys redacted. Useful for bug reports.
     </p>
       <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('dev')}>Save</button>
@@ -1351,9 +1304,8 @@
   {/if}
 
   <p class="muted small">
-    Prefer the guided flow? <a href="/setup">Re-run setup</a> — it changes the
-    same settings, in order, with a check after each one.
-  </p>
+      Prefer the guided flow? <a href="/setup">Re-run setup</a> &mdash; same settings, in order.
+    </p>
 {/if}
 </div>
 
