@@ -43,6 +43,17 @@ check('two mounts, both found', sum(deriveMapping(jf,
 { rules: [{ from: '/extHdd/media', to: '/media2' }, { from: '/extHdd', to: '/mnt' }],
   matched: 3, total: 3 });
 
+console.log('\nshare-relative media (an SMB source)');
+// SmbStreamLibrary reports paths relative to the share, so the rule's target
+// is the root. Getting this wrong reported zero matches for two identical
+// libraries.
+const smbSide = jf.map((p) => p.replace('/extHdd/media', ''));
+check('absolute catalogue vs share-relative media', sum(deriveMapping(jf, smbSide)),
+  { rules: [{ from: '/extHdd/media', to: '/' }], matched: 3, total: 3 });
+check('and the reverse direction', deriveMapping(smbSide, jf).matched, 3);
+check('a share with a subfolder', deriveMapping(
+  ['/extHdd/media/tv/Show/Season 1/ep.mkv'], ['/media/tv/Show/Season 1/ep.mkv']).matched, 1);
+
 console.log('\nambiguity — these must NOT guess');
 const ambigRep = ['/a/tv/ShowA/Season 1/S01E01.mkv', '/a/tv/ShowB/Season 1/S01E01.mkv'];
 const ambigLoc = ['/b/tv/ShowA/Season 1/S01E01.mkv', '/b/tv/ShowB/Season 1/S01E01.mkv'];
