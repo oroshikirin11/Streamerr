@@ -604,7 +604,16 @@
        * operator who missed the hidden banner has no way to tell that from a
        * broken Apply, so say it here, where they are looking.
        */
-      pending = hidden ? 'apply-hidden' : 'apply';
+      /**
+       * Only while something is actually going out.
+       *
+       * The note describes a cushion draining — "on air in about 15
+       * seconds" — and off air there is no cushion, no encoder and no
+       * viewers. Showing it anyway announced a broadcast that was not
+       * happening. Applying off air is still worth doing: it saves, and the
+       * next broadcast starts with it.
+       */
+      pending = onAir ? (hidden ? 'apply-hidden' : 'apply') : '';
       clearTimeout(pendingTimer);
       // Cleared on a timer rather than on a signal: the panel is not told the
       // reserve depth, so there is nothing to count down from honestly. The
@@ -635,7 +644,7 @@
       // when the cushion drains too. Without this the button that is reached
       // for BECAUSE something wrong is on air was the one that looked like it
       // had done nothing.
-      pending = 'hide';
+      pending = onAir ? 'hide' : '';
       clearTimeout(pendingTimer);
       pendingTimer = setTimeout(() => { pending = ''; }, applySecs * 1000 + 6000);
     } catch (err) { error = err.message; }
@@ -736,7 +745,7 @@
               aria-label="Dismiss">×</button>
     </p>
   {/if}
-  {#if pending && pending !== 'apply-hidden'}
+  {#if pending && pending !== 'apply-hidden' && onAir}
     <p class="pending" role="status">
       <span class="spin" aria-hidden="true"></span>
       {pending === 'hide'
