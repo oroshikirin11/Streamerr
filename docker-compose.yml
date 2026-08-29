@@ -23,6 +23,14 @@ services:
     devices:
       # Only the render node. card0 is for modesetting and would be an
       # unnecessary privilege bump.
+      #
+      # renderD128 means "first render node the kernel probed", NOT "the
+      # integrated one". On a machine with both, the discrete card is often
+      # renderD128 and the iGPU renderD129 — check before assuming:
+      #   readlink -f /sys/class/drm/renderD128/device   # PCI address
+      #   lspci -nn | grep -i vga                        # what that address is
+      # Pass whichever node is the card you want to encode on, and set the
+      # same path as the render device in Settings.
       - /dev/dri/renderD128:/dev/dri/renderD128
 
     group_add:

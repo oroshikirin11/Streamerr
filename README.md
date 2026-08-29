@@ -138,7 +138,26 @@ inside the container, so they vanish the next time it is rebuilt, with
 nothing to say why. The cache is disposable and can be deleted safely;
 `config` and `overlays` are the two that hold anything you would miss.
 
-**3. Get the render group id right.** On the host:
+**3. Check which GPU that is.** `renderD128` means *the first render node the
+kernel probed*, not *the integrated one*. On a machine with both a discrete
+card and an iGPU there are two nodes, and the discrete one is often
+`renderD128`:
+
+```bash
+readlink -f /sys/class/drm/renderD128/device   # → PCI address
+lspci -nn | grep -i vga                        # → what lives at that address
+```
+
+Pass whichever node is the card you want to encode on, and set the same path
+as the render device in Settings. With one GPU there is one node and nothing
+to decide.
+
+A dedicated card is usually the better encoder, but check what it can do:
+AMD RDNA2 encodes H.264 and HEVC but not AV1, and driver quirks differ enough
+between an Intel iGPU and a discrete AMD card that a filter graph working on
+one proves nothing about the other.
+
+**4. Get the render group id right.** On the host:
 
 ```bash
 stat -c '%g' /dev/dri/renderD128
@@ -154,13 +173,13 @@ problem, this value is wrong; fix the number instead.
 The engine sizes its budget to the container's memory on its own; `2gb` is a
 safe value.
 
-**4. Build and start:**
+**5. Build and start:**
 
 ```bash
 docker compose up -d --build
 ```
 
-**5. Open `http://<host>:8099`.** The first screen makes you choose a password —
+**6. Open `http://<host>:8099`.** The first screen makes you choose a password —
 the panel can start broadcasts and holds your stream key, so it refuses to do
 anything until it has one. Then an onboarding wizard walks through five
 validating steps:
