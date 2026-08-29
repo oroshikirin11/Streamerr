@@ -951,16 +951,25 @@
     <label>HDR tone mapping</label>
     <select bind:value={cfg.encoder.tonemap}>
       <option value="auto">Automatic</option>
-      <option value="vaapi">GPU</option>
-      <option value="cpu">CPU</option>
+      <option value="vaapi" disabled={options?.tonemapEngines?.vaapi === false}>
+        GPU{#if options?.tonemapEngines?.vaapi === false} — not available on this driver{/if}
+      </option>
+      <option value="cpu" disabled={options?.tonemapEngines?.cpu === false}>
+        CPU{#if options?.tonemapEngines?.cpu === false} — not available in this build{/if}
+      </option>
       <option value="none">Off</option>
     </select>
     <p class="muted small">
       {#if cfg.encoder.tonemap === 'auto'}
         Picks whatever this machine can do, and falls back on its own.
       {:else if cfg.encoder.tonemap === 'vaapi'}
-        Free, but the curve is fixed and not every driver has it. Falls back to
-        the CPU if this one does not.
+        {#if options?.tonemapEngines?.vaapi === false}
+          This driver has no VAAPI tone-map filter, so every HDR clip will fall
+          back to the CPU. Pick Automatic or CPU instead.
+        {:else}
+          Free, but the curve is fixed. Falls back to the CPU if a file turns
+          out not to work.
+        {/if}
       {:else if cfg.encoder.tonemap === 'cpu'}
         Works anywhere and looks different; costs CPU that subtitles and
         decoding may also want. Roughly four times dearer at 4K than at 1080p.

@@ -1225,8 +1225,27 @@ app.get('/api/options', async (req, res) => {
     // Naming is a nicety; never let it break the settings page.
   }
   const renderDevices = renderNodeInfo.map((n) => n.path);
+  /**
+   * Which tone-map engines this machine can actually run.
+   *
+   * Offering "GPU" on a driver without the filter is offering a guaranteed
+   * dead clip — which is exactly what happened: the option was picked, every
+   * spawn died at -22, and nothing in the UI had said it could not work.
+   * A control that lists impossible choices is worse than no control.
+   */
+  let tonemapEngines = { vaapi: null, cpu: null };
+  try {
+    tonemapEngines = {
+      vaapi: await vaapiTonemapPresent(config.encoder.device),
+      cpu: await cpuTonemapAvailable(),
+    };
+  } catch {
+    // Unknown beats wrong: the UI shows no availability hint rather than
+    // claiming something is unsupported because a probe crashed.
+  }
   res.json({
     renderNodes: renderNodeInfo,
+    tonemapEngines,
     languages: LANGUAGES.map(({ code, name }) => ({ code, name })),
     renderDevices,
     // Names and labels are static; only whether each one WORKS needs the

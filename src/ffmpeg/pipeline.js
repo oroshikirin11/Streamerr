@@ -3014,6 +3014,13 @@ export class PipelinePlayout extends EventEmitter {
     // a new source means the bank cap is never applied to it again.
     this._srcPaused = false;
     this._sawBlock = false;
+    // What we ACTUALLY spawned. The failure handlers below used to key off
+    // this.selection and this.profile, which are rebuilt from a copy of the
+    // box and can drift from the command that is really running — a forced
+    // GPU tone map died twice in a row on Mesa without ever demoting,
+    // because some condition describing the intended state was false while
+    // tonemap_vaapi sat in the argv all along. Match the argv.
+    this._lastArgs = Array.isArray(args) ? args.join(' ') : '';
     this._lastBlockAt = Date.now();
     const startedAt = Date.now();
     // fd 3 carries -progress so it doesn't fight stderr for the log stream.
@@ -3213,8 +3220,8 @@ export class PipelinePlayout extends EventEmitter {
          * that cannot tone map on the GPU — for any reason, known or not —
          * lands here and keeps broadcasting.
          */
-        if (!this._sawBlock && this.current && this.selection?.video?.hdr
-            && this.profile?.tonemap === 'vaapi' && !this._tonemapDemoted) {
+        if (!this._sawBlock && this.current && !this._tonemapDemoted
+            && /tonemap_vaapi/.test(this._lastArgs ?? '')) {
           this._tonemapDemoted = true;
           this._demote({ tonemap: 'cpu' });
           this.emit('warn', (this.profile?.tonemapForced
@@ -3235,8 +3242,8 @@ export class PipelinePlayout extends EventEmitter {
          * And if the CPU route cannot run either, go out washed rather than
          * not at all. A build without zscale has no third option.
          */
-        if (!this._sawBlock && this.current && this.selection?.video?.hdr
-            && this.profile?.tonemap === 'cpu' && !this._tonemapGaveUp) {
+        if (!this._sawBlock && this.current && !this._tonemapGaveUp
+            && /tonemap=hable/.test(this._lastArgs ?? '')) {
           this._tonemapGaveUp = true;
           this._demote({ tonemap: 'none' });
           this.emit('warn', (this.profile?.tonemapForced
