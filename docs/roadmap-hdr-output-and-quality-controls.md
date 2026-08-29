@@ -228,3 +228,84 @@ Modularity and UX pull against each other here. The resolution is that the
 preset selector is the UX and the individual flags are the modularity — but the
 preset must *show its work*, and every control must be honest about what this
 machine can actually do.
+
+---
+
+## Part 6 — what bitrate is actually available, and what it buys
+
+Measured 2026-08-29. This section exists because it reframes everything above:
+most of the quality levers have nothing left to win at the bitrate in use.
+
+### The encoder is already over-provisioned at 1080p
+
+Bitrate needed to reach CRF 20 (visually near-transparent), 10s clips:
+
+| source | today's flags | best flags | gain |
+|---|---|---|---|
+| Jujutsu Kaisen (clean Bluray anime) | 2.06 Mbps | 1.96 Mbps | 5% |
+| Berserk (grainy HDTV) | 4.27 Mbps | 3.78 Mbps | 11% |
+
+The stream sends **12 Mbps**. So 1080p runs at 3-6x the bitrate it needs and is
+already past transparency — the output is bounded by the SOURCE FILE, not by
+the encoder. **No flag, and no extra bitrate, can improve 1080p picture
+quality.** The realistic win is the other direction: 12 Mbps could drop to
+about 6 with no visible loss, halving upload.
+
+### 4K is out of reach, and not for a compute reason
+
+What the source files themselves spend, in HEVC 10-bit:
+
+| file | bitrate |
+|---|---|
+| Backrooms (WEB-DL) | 25.3 Mbps |
+| Apocalypto (UHD Bluray remux) | 54.1 Mbps |
+
+H.264 needs roughly 1.5-2x what HEVC does, so Backrooms-grade 4K over H.264
+wants **~40-50 Mbps**. Against that:
+
+- the stream sends 12 Mbps — about a quarter of it
+- **the home upload is 52.75 Mbps** (916.87 down), so 40 Mbps would consume
+  ~76% of the line, and it is shared with the whole household
+- preset and B-frame tuning buys 5-11%, against a shortfall of ~300%
+
+So better flags do NOT unlock 4K, and a stronger host does not either — a
+stronger host merely encodes 4K without collapsing, which is not the same as
+making it look right. **1080p at 12 Mbps is transparent; 4K at 12 Mbps is
+starved. Same bandwidth, and the 1080p one looks better.**
+
+### The scale of every lever, for perspective
+
+| lever | efficiency vs H.264 today |
+|---|---|
+| preset + B-frames | 5-11% |
+| HEVC | 30-50% |
+| AV1 | ~50% |
+
+The entire settings project is worth about a fifth of simply changing codec —
+which browsers will not allow. Note AV1 has BETTER browser support than HEVC
+(Chrome, Firefox, Edge all decode it), but neither host can encode it: RDNA2
+and Alder Lake-N are both AV1 decode-only, and software AV1 is too slow for
+live 4K.
+
+### What this leaves worth building
+
+1. **Bandwidth** — 1080p at ~6 Mbps instead of 12, identical picture.
+2. **The bitrate-independent image faults** — half-rate subtitle canvas,
+   `mode=fast` scaler, `fps_mode cfr` frame duplication, absent deinterlacing.
+   These change what viewers see at ANY bitrate, and the canvas one is visible
+   on the anime library today.
+3. **Tone-mapping choice** — a genuine difference in look.
+
+Not 4K, and not "better picture at 1080p", because there is none to be had.
+
+### Measurement note
+
+VMAF was attempted first and abandoned after five harness faults (frame
+misalignment inflating 240 frames to 292, an "identical files" ceiling of
+98.24 rather than 100, and the score line being logged at info level while the
+harness ran at error level). Fixed-CRF bitrate comparison replaced it: it
+cannot desync, though it measures efficiency rather than perceptual score. A
+4K CRF spot-check was discarded as untrustworthy — it landed on dark, static
+footage and reported `medium` needing MORE bitrate than `veryfast`, which is
+backwards. The source-bitrate figures above are arithmetic on real file sizes
+and durations, and are the numbers to trust.
