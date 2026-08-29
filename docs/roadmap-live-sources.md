@@ -80,6 +80,38 @@ Consequences worth knowing before starting:
   it is already at 0.83x on Apocalypto alone. Live mode is desktop-class
   hardware only, and should say so rather than fail.
 
+## The main piece of work pays for itself
+
+Applying overlay changes to a **running** filter graph, instead of respawning
+the source, is the hardest item here and the one live mode forces. It is worth
+noticing that it is not purely a cost — **playout mode wants it too.**
+
+Every overlay apply today restarts ffmpeg at a seek offset. That restart is
+what produces, in real broadcast logs:
+
+    Packet corrupt (stream = 0, dts = 5955368), dropping it.
+    DTS 5950080 < 5951614 out of order
+    Non-monotonic DTS; previous: 66133, current: 66091; changing to 66133
+    timestamp discontinuity (stream id=257): 12832001, new offset= -12832001
+
+plus the partial-packet trimming the splice path has to do, and the
+`_srcGen` / packet-realignment machinery that exists solely because a source
+can be replaced mid-stream. None of that is needed by a graph that never
+restarts.
+
+So the ledger is better than it looks:
+
+| | today | with a running graph |
+|---|---|---|
+| overlay apply | respawn, splice, cushion covers it | filter update, no splice |
+| DTS discontinuities at apply | routine | gone |
+| cushion after an apply | drained, refills at >1x | untouched |
+| live sources | impossible (cushion cannot refill) | works |
+
+It is the expensive item, but it removes a class of bug that has cost real
+debugging time, and it is the thing that makes live sources possible at all.
+Worth doing early rather than last.
+
 ## Ingest
 
 Browser to box, for both capture and camera:
