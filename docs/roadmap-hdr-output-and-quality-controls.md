@@ -309,3 +309,43 @@ cannot desync, though it measures efficiency rather than perceptual score. A
 footage and reported `medium` needing MORE bitrate than `veryfast`, which is
 backwards. The source-bitrate figures above are arithmetic on real file sizes
 and durations, and are the numbers to trust.
+
+---
+
+## Part 7 — AV1, the one path that beats every flag here
+
+Measured 2026-08-29. Neither host can encode AV1 in hardware (RDNA2 and
+Alder Lake-N are both decode-only), so this is software SVT-AV1.
+
+| | 1080p, preset 12 | 4K, preset 12 |
+|---|---|---|
+| desktop (7800X3D), system ffmpeg | 17.1x | — |
+| desktop, container image | 14.1x | 1.49x |
+| **N100 (cinema), container image** | **3.2x** | ~0.34x (extrapolated) |
+
+Measured on `testsrc2`, which is HARDER to encode than anime, so real content
+runs faster. Speed figures are wall-clock and trustworthy; bitrate figures
+from the 4K clip are NOT — that sample landed on dark, static footage.
+
+**1080p AV1 is live-capable on BOTH hosts.** 3.2x on the N100 leaves real
+margin even after scaling, subtitle rendering and tone mapping take their
+share. 4K AV1 is desktop-only and has no margin.
+
+At roughly half of H.264's bitrate, this is worth more than every flag in Part
+1 combined: a good 1080p stream at ~5-6 Mbps instead of 12. Against that,
+preset and B-frame tuning buys 5-11%.
+
+**Unlike HDR, the clients are ready** — Chrome, Firefox, Edge and Safari 17+
+all decode AV1, which is the opposite of the HEVC situation.
+
+### The gate
+
+Owncast must accept AV1 over Enhanced RTMP and package it into HLS. Same gate
+as HDR, and still unverified. Test that before any other work here.
+
+### Free performance, separately
+
+The container's SVT-AV1 is an instrumented build — it prints `SvtMalloc[info]`
+lines and runs ~18% slower than the host's release build (14.1x vs 17.1x on
+identical input). Worth fixing in the Dockerfile regardless of whether AV1 is
+ever adopted.
