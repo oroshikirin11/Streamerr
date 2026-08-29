@@ -3547,7 +3547,18 @@ export function buildSourceArgs({
   // Fixed-function chain for clips WITHOUT burned subtitles. This used to
   // exist only when subtitles forced it, which left subtitle-free 4K films
   // software-decoding on the CPU at 0.6x while the GPU sat idle.
-  if (profile.gpuFull && !sub.filter && !sub.needsComplex) {
+  /**
+   * A picture that must be drawn per frame cannot take the fixed-function
+   * path: it composites once, on the GPU, from a single uploaded frame.
+   *
+   * Dropping a picture the DRIVER will not composite is deliberate — a logo
+   * is not worth the frame rate of the whole episode. Dropping one that
+   * merely moves is not: nothing downstream would draw it, because the
+   * canvas branch below needs subtitles to exist, so a bouncing picture on
+   * a subtitle-free clip disappeared with nothing logged.
+   */
+  const imagesNeedPerFrame = imgList.some((i) => isMoving(i) || i?.animated);
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     // null, not the scale: a full-frame VPP pass that changes nothing is
