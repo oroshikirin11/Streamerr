@@ -58,6 +58,19 @@ export class CompositeLibrary {
     this.provider = sources.length === 1 ? sources[0].provider : 'multi';
   }
 
+  /**
+   * Configured when any source is.
+   *
+   * The API asks every library for this before probing, and the composite
+   * never had it — so `probe.configured` was undefined, which is falsy, and
+   * /api/check/library answered "Not configured" for every provider and
+   * every shape. The Test buttons in both the wizard and settings could
+   * never succeed.
+   */
+  get configured() {
+    return this.sources.some((s) => s.lib?.configured);
+  }
+
   _find(key) {
     return this.sources.find((s) => s.key === key) ?? null;
   }

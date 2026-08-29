@@ -76,6 +76,9 @@
    */
   let device = $state('/dev/dri/renderD128');
   let devSel = $state('/dev/dri/renderD128');
+  // Reused when one already exists, so re-running setup edits the first
+  // source instead of replacing whatever is configured with a new one.
+  let srcId = $state('setup');
 
   // step 3
   let provider = $state('jellyfin');
@@ -172,11 +175,22 @@
       fps = cfg.encoder.fps; videoBitrate = cfg.encoder.videoBitrate;
       vbrSel = VBR_PRESETS.includes(String(videoBitrate)) ? String(videoBitrate) : 'custom';
       if (cfg.encoder.device) device = cfg.encoder.device;
-      provider = cfg.library.provider;
-      jellyfinUrl = cfg.library.jellyfin?.url || '';
-      jellyfinKey = cfg.library.jellyfin?.apiKey === '__SET__' ? '__SET__' : '';
-      fsRoots = (cfg.library.filesystem?.roots || []).join('\n');
-      const sm = cfg.library.smb ?? {};
+      /**
+       * The library is a LIST of sources; this step edits the first one.
+       *
+       * Both reading and writing used a flat { provider, jellyfin } shape
+       * that nothing else speaks — makeLibrary only ever looks at
+       * library.sources — so the step showed nothing on a configured
+       * install and saved something no reader could see.
+       */
+      const src0 = cfg.library?.sources?.[0] ?? {};
+      srcId = src0.id ?? srcId;
+      provider = src0.provider || 'jellyfin';
+      jellyfinUrl = src0.jellyfin?.url || '';
+      jellyfinKey = src0.jellyfin?.apiKey === '__SET__' ? '__SET__' : '';
+      fsRoots = (src0.filesystem?.roots || []).join('\n');
+      rules = src0.pathMap ?? rules;
+      const sm = src0.smb ?? {};
       smbHost = sm.host || ''; smbShare = sm.share || ''; smbPath = sm.path || '';
       smbGuest = sm.guest === true; smbUser = sm.username || '';
       rules = cfg.library.pathMap || [];
@@ -216,19 +230,22 @@
   }
 
   function libraryPayload() {
+    const base = { id: srcId, name: 'Library', provider };
     if (provider === 'jellyfin') {
-      return { provider, jellyfin: { url: jellyfinUrl, apiKey: jellyfinKey }, pathMap: rules };
+      return { sources: [{ ...base,
+        jellyfin: { url: jellyfinUrl, apiKey: jellyfinKey }, pathMap: rules }] };
     }
     if (provider === 'smb') {
-      return { provider,
+      return { sources: [{ ...base,
         smb: {
           host: smbHost.trim(), share: smbShare.trim(), path: smbPath.trim(),
           guest: smbGuest, username: smbGuest ? '' : smbUser.trim(),
           // Only when typed, so a saved password survives a pass through setup.
           ...(smbPass ? { password: smbPass } : {}),
-        } };
+        } }] };
     }
-    return { provider, filesystem: { roots: parseList(fsRoots.replace(/\n/g, ',')) } };
+    return { sources: [{ ...base,
+      filesystem: { roots: parseList(fsRoots.replace(/\n/g, ',')) } }] };
   }
 
   async function testLibrary() {
@@ -275,7 +292,9 @@
         library: libraryPayload(),
         tracks: cfgTracks,
       };
-      if (provider === 'jellyfin' && jellyfinKey === '__SET__') delete patch.library.jellyfin.apiKey;
+      if (provider === 'jellyfin' && jellyfinKey === '__SET__') {
+        delete patch.library.sources[0].jellyfin.apiKey;
+      }
       await api.saveConfig(patch);
     } catch (err) { error = err.message; }
     finally { saving = false; }

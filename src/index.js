@@ -1183,8 +1183,14 @@ app.get('/api/check/encoders', async (req, res) => {
 
 app.post('/api/check/library', async (req, res) => {
   try {
-    // Test against submitted values so the wizard can validate before saving.
-    const probe = req.body?.provider ? makeLibrary({ library: req.body }) : library;
+    /**
+     * Test against submitted values so the panel can validate before saving.
+     * Both shapes are accepted: the settings page sends the whole
+     * `sources` list, and older callers send one flat provider block.
+     */
+    const body = req.body ?? {};
+    const submitted = Array.isArray(body.sources) ? body : (body.provider ? { sources: [body] } : null);
+    const probe = submitted ? makeLibrary({ library: submitted }) : library;
     if (!probe.configured) return res.status(400).json({ error: 'Not configured' });
     res.json(await probe.test());
   } catch (err) {
