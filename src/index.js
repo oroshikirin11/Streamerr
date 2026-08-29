@@ -805,17 +805,32 @@ app.put('/api/config', (req, res) => {
    * cushion, and applySeconds above the depth would silently do nothing.
    */
   if (patch.buffer) {
+    /**
+     * Only the keys the patch actually carries.
+     *
+     * Two cards write to this block — Buffer owns the depth, Studio owns the
+     * apply point and the warning switch — so filling in the absent ones
+     * with defaults let either card silently reset the other's. Saving a new
+     * depth reset the apply point to match it, and turned warnings back on
+     * for anyone who had turned them off.
+     */
+    const cur = config.buffer ?? {};
     const n = (v, lo, hi, d) => {
       const x = Number(v);
       return Number.isFinite(x) ? Math.min(hi, Math.max(lo, Math.round(x))) : d;
     };
-    const secs = n(patch.buffer.seconds, 1, 60, config.buffer?.seconds ?? 15);
-    patch.buffer = {
-      ...patch.buffer,
-      seconds: secs,
-      applySeconds: n(patch.buffer.applySeconds, 0, secs, secs),
-      studioWarnings: patch.buffer.studioWarnings !== false,
-    };
+    const out = { ...patch.buffer };
+    if (out.seconds !== undefined) out.seconds = n(out.seconds, 1, 60, cur.seconds ?? 15);
+    const secs = out.seconds ?? cur.seconds ?? 15;
+    if (out.applySeconds !== undefined) {
+      out.applySeconds = n(out.applySeconds, 0, secs, secs);
+    } else if (Number(cur.applySeconds) > secs) {
+      // Lowering the depth has to carry a deeper apply point down with it,
+      // or it would ask for more cushion than exists.
+      out.applySeconds = secs;
+    }
+    if (out.studioWarnings !== undefined) out.studioWarnings = Boolean(out.studioWarnings);
+    patch.buffer = out;
   }
   if (Array.isArray(patch.library?.sources)) {
     patch.library.sources = restoreSourceSecrets(patch.library.sources);

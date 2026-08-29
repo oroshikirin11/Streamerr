@@ -328,8 +328,7 @@
     // the one actually in effect.
     a.hours = Math.min(168, Math.max(1, Math.round(Number(a.hours) || 12)));
     await api.saveConfig({
-        publish: maskPublish(cfg.publish),
-        buffer: cfg.buffer, library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
+        library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
     saved = 'autoscan';
     setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
   }
@@ -402,6 +401,16 @@
           frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
+        };
+      }
+      if (section === 'publish') patch.publish = maskPublish(cfg.publish);
+      // Two cards write to the same block; the server merges, so each sends
+      // only the keys it owns and neither can clobber the other's.
+      if (section === 'buffer') patch.buffer = { seconds: cfg.buffer.seconds };
+      if (section === 'studio') {
+        patch.buffer = {
+          applySeconds: cfg.buffer.applySeconds,
+          studioWarnings: cfg.buffer.studioWarnings !== false,
         };
       }
       if (section === 'library') patch.library = libraryPayload();
@@ -568,6 +577,10 @@
       nothing. A destination that cannot be reached is skipped and the rest
       keep streaming.
     </p>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('publish')}>Save</button>
+      {#if saved === 'publish'}<span class="ok small">Saved</span>{/if}
+    </div>
   </section>
 
   <!-- Buffer -->
@@ -590,7 +603,10 @@
     <label>Or a custom value <span class="muted small">1–60 seconds</span></label>
     <input type="number" min="1" max="60" value={cfg.buffer.seconds}
            oninput={(e) => setBuffer(+e.currentTarget.value)} />
-
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('buffer')}>Save</button>
+      {#if saved === 'buffer'}<span class="ok small">Saved</span>{/if}
+    </div>
   </section>
 
   <!-- Studio -->
@@ -632,6 +648,10 @@
       The red notes about moving pictures and animated GIFs. Turning them off
       does not change what is reported in the console when a clip runs slow.
     </p>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('studio')}>Save</button>
+      {#if saved === 'studio'}<span class="ok small">Saved</span>{/if}
+    </div>
   </section>
 
   <!-- Owncast -->
