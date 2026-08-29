@@ -20,7 +20,7 @@ import {
   publishDestinations, publishTargetsRedacted, publishConfig,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT,
 } from './config.js';
-import { redactPublish, restorePublishSecrets } from './publish.js';
+import { redactPublish, restorePublishSecrets, targetUrl } from './publish.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
@@ -1527,12 +1527,34 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // (subtitled) variant additionally needs the driver to honour alpha.
   await tuneProfile(profile, selection);
 
-  const conn = await testRtmpConnection(rtmpTarget());
-  if (!conn.ok) {
-    return res.status(502).json({
-      error: 'Owncast would not accept the stream',
-      detail: redact(conn.error),
-    });
+  /**
+   * Pre-flight the destination actually configured, not the legacy field.
+   *
+   * This still called rtmpTarget(), which reads owncast.rtmpUrl — so an
+   * install set up through the publish block refused to start with
+   * "owncast.rtmpUrl is not configured" while being perfectly configured.
+   *
+   * Only RTMP is dialled: the tester speaks the RTMP handshake and nothing
+   * else, and a check that cannot understand SRT would fail a working
+   * target. Extras are not pre-flighted either — a fan-out survives one
+   * destination being down by design, so refusing to start because a
+   * secondary is unreachable would be the wrong call.
+   */
+  let dests;
+  try {
+    dests = publishDestinations();
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  const primary = dests[0];
+  if (primary.protocol === 'rtmp' || primary.protocol === 'rtmps') {
+    const conn = await testRtmpConnection(targetUrl(primary.protocol, primary.creds));
+    if (!conn.ok) {
+      return res.status(502).json({
+        error: 'The server would not accept the stream',
+        detail: redact(conn.error),
+      });
+    }
   }
 
   // A fresh broadcast starts from the configured preferences, not from
