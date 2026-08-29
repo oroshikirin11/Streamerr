@@ -408,7 +408,15 @@
     return null;
   });
 
+  /**
+   * Opens the track panel, and closes it again.
+   *
+   * It only ever opened: a second click re-fetched the same list and redrew
+   * the panel that was already there, so the button looked broken. Anything
+   * that opens a panel from a single button has to close it too.
+   */
   async function loadTracks() {
+    if (tracks) { tracks = null; return; }
     error = '';
     try { tracks = await api.liveTracks(); }
     catch (err) { error = err.message; }
@@ -529,7 +537,9 @@
         {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
       </button>
       {#if !card}
-        <button onclick={loadTracks} disabled={switching}>Change audio or subtitles</button>
+        <button onclick={loadTracks} disabled={switching} class:on={Boolean(tracks)}>
+          {tracks ? 'Close' : 'Change audio or subtitles'}
+        </button>
       {/if}
       <div style="flex:1"></div>
       <button class="danger" onclick={stop}>Stop broadcast</button>
