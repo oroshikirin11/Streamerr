@@ -1221,6 +1221,30 @@ app.post('/api/match/library', async (req, res) => {
     const jf = new JellyfinLibrary({ url: jellyfin.url, apiKey });
 
     const [reported, local] = await Promise.all([jf.allPaths(), mediaLib.allPaths()]);
+    /**
+     * Say WHICH side is empty.
+     *
+     * "No files matched" reads as "these are different libraries", and that
+     * is only one of the reasons it can happen: a share that lists nothing,
+     * or a catalogue that returns nothing, produce the same sentence while
+     * meaning something completely different. An operator who knows their
+     * media is identical is then told, confidently, that it is not.
+     */
+    if (!local.length) {
+      return res.json({
+        matched: 0, total: reported.length, rules: [], examples: [],
+        counts: { catalogue: reported.length, media: 0 },
+        description: 'No media found to compare. The source listed no files —'
+          + ' check the share or folder on the previous step.',
+      });
+    }
+    if (!reported.length) {
+      return res.json({
+        matched: 0, total: 0, rules: [], examples: [],
+        counts: { catalogue: 0, media: local.length },
+        description: 'The catalogue returned no files. Check the address and key.',
+      });
+    }
     const result = deriveMapping(reported, local);
     res.json({
       matched: result.matched,
@@ -1230,6 +1254,8 @@ app.post('/api/match/library', async (req, res) => {
       // A handful of examples, never the whole list: this is a summary, and
       // the paths are the operator's business rather than a payload.
       examples: result.unmatched.slice(0, 3),
+      // Both sizes, so a lopsided comparison is visible rather than inferred.
+      counts: { catalogue: reported.length, media: local.length },
       description: describeMatch(result),
     });
   } catch (err) {

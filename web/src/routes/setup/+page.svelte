@@ -610,6 +610,11 @@
           <div class="result" class:bad={!match.ok || match.matched === 0}>
             {match.ok ? match.description : match.error}
           </div>
+          {#if match.ok && match.counts}
+            <p class="muted small">
+              Catalogue: {match.counts.catalogue} files · Media: {match.counts.media} files
+            </p>
+          {/if}
           {#if match.ok && match.matched === 0}
             <p class="muted small">
               Nothing lined up, so this is a different library. Continue and

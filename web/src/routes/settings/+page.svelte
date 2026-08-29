@@ -1160,6 +1160,11 @@
           <div class="result" class:bad={!match.ok || match.matched === 0}>
             {match.ok ? match.description : match.error}
           </div>
+          {#if match.ok && match.counts}
+            <p class="muted small">
+              Catalogue: {match.counts.catalogue} files · Media: {match.counts.media} files
+            </p>
+          {/if}
         {:else}
           <p class="muted small">We work the paths out ourselves. Nothing to type.</p>
         {/if}

@@ -356,7 +356,11 @@ export class SmbStreamLibrary {
         if (out.length >= limit) return;
         if (e.name.startsWith('.')) continue;
         const rel = dir ? `${dir}/${e.name}` : e.name;
-        if (e.directory) await walk(rel, depth + 1);
+        // isDirectory(), like every other listing here. `e.directory` is not
+        // a property these entries have, so it was always undefined: nothing
+        // was ever recursed into, and a share whose media sits in
+        // tv/Show/Season 1 listed no files at all.
+        if (e.isDirectory()) await walk(rel, depth + 1);
         else if (isVideo(e.name)) out.push(`/${rel}`);
       }
     };
