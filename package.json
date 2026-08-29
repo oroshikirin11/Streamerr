@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "probe": "node src/cli.js probe",
     "normalize": "node src/cli.js normalize",
-    "stream": "node src/cli.js stream"
+    "stream": "node src/cli.js stream",
+    "test": "node test/match.test.mjs"
   },
   "engines": {
     "node": ">=20"
