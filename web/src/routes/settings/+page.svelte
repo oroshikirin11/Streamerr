@@ -294,7 +294,10 @@
   function shapeSource(x) {
     x.jellyfin ??= { url: '', apiKey: '' };
     x.filesystem ??= { roots: [] };
-    x.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: true };
+    // guest: false — most shares want credentials, and starting in guest mode
+    // hides the username and password fields, which reads as SMB not
+    // supporting authentication at all. The wizard already defaults this way.
+    x.smb ??= { host: '', share: '', path: '', username: '', password: '', guest: false };
     x.pathMap ??= [];
     return x;
   }
@@ -355,7 +358,7 @@
         out.pathMap = x.pathMap ?? [];
         out.smb = {
           host: x.smb?.host ?? '', share: x.smb?.share ?? '', path: x.smb?.path ?? '',
-          guest: x.smb?.guest ?? true,
+          guest: x.smb?.guest ?? false,
           username: x.smb?.guest ? '' : (x.smb?.username ?? ''),
           password: x.smb?.guest ? ''
             : ((x.provider === 'smb' || x.provider === 'smbmount') && i === sel && smbPassword
