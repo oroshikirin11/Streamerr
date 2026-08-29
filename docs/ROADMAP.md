@@ -67,23 +67,38 @@ Everything that stops this being "done".
 
 Goal: the media streaming service is **complete**.
 
+**+** "Complete" needs a definition written down now, while not in the middle
+of it. "Polish and bug fixing in general" has no end condition, and the
+realistic failure mode is that Phase 4 never finishes and Phase 6 never starts.
+Three or four concrete items, then stop.
+
 ---
 
-## Phase 5 — Fork
+## Phase 5 — Branch off a new project
 
-- [ ] Fork once Phase 4 is done
+Not a fork kept in sync. A **new project that uses this one as its basis** and
+then goes its own way.
+
+- [ ] Copy once Phase 4 is done
 
 This side stays **slim**: stream media libraries to people, nothing more. No
-bloat. It is also the fork basis, so it should be clean rather than clever.
+bloat.
 
-- [ ] **+** Decide how the fork stays maintainable. A duplicated engine means
-      every fix done twice. Options: shared core package, occasional merges
-      from upstream, or accept the drift deliberately. Cheapest to decide at
-      fork time, expensive later.
+**+** What that implies, and it changes what Phase 4 should prioritise:
+
+- Whatever state the engine is in at copy time is inherited **permanently** by
+  the new project. Engine bugs left behind get copied and then found twice.
+- The UI is **not** inherited in any meaningful sense — the creator service
+  needs scenes, source lists and audio mixers, none of which exist here, so
+  most of this UI gets rewritten there anyway.
+- Therefore: in Phase 4, **engine and pipeline correctness first**. Polish the
+  UI only as far as THIS product needs it, not as preparation for the next one.
+- No syncing obligation afterwards. If a bad engine bug turns up later it can
+  be ported by hand, but neither side owes the other anything.
 
 ---
 
-## Phase 6 — Creator service (on the fork)
+## Phase 6 — Creator service (the new project)
 
 The powerful one. Personal use and content creators.
 
