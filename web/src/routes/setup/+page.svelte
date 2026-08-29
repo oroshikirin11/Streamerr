@@ -26,6 +26,21 @@
   let srtUrl = $state('');
   let srtStreamId = $state('');
   let srtPassphrase = $state('');
+
+  function publishPatch() {
+    const slot = {};
+    if (protocol === 'srt') {
+      if (srtUrl.trim()) slot.url = srtUrl.trim();
+      if (srtStreamId.trim()) slot.streamId = srtStreamId.trim();
+      if (srtPassphrase.trim()) slot.passphrase = srtPassphrase.trim();
+    } else {
+      if (rtmpUrl.trim()) slot.url = rtmpUrl.trim();
+      if (streamKey.trim()) slot.key = streamKey.trim();
+    }
+    // Nothing typed: record the choice of protocol and touch no credentials.
+    if (!Object.keys(slot).length) return { publish: { protocol } };
+    return { publish: { protocol, [protocol]: slot } };
+  }
   let showKey = $state(false);
   // Whether a key is already stored. The value itself never reaches the
   // browser, so the field stays empty and blank means "keep what's there" —
@@ -97,7 +112,12 @@
   onMount(async () => {
     try {
       cfg = await api.config();
-      rtmpUrl = cfg.owncast.rtmpUrl || '';
+      // Prefilled from publish, falling back to the legacy field. Reading
+      // only the legacy one showed an empty box for an install configured
+      // the new way — and step one then wrote that emptiness back.
+      protocol = cfg.publish?.protocol || 'rtmp';
+      rtmpUrl = cfg.publish?.[protocol]?.url || cfg.owncast.rtmpUrl || '';
+      srtUrl = cfg.publish?.srt?.url || '';
       keyStored = cfg.owncast.streamKey === '__SET__';
       streamKey = '';
       backend = cfg.encoder.backend;
@@ -178,10 +198,15 @@
     saving = true;
     try {
       const patch = {
-        publish: protocol === 'srt'
-          ? { protocol,
-              srt: { url: srtUrl, streamId: srtStreamId, passphrase: srtPassphrase, latencyMs: 200 } }
-          : { protocol, [protocol]: { url: rtmpUrl, ...(streamKey ? { key: streamKey } : {}) } },
+        /**
+         * Only fields with something in them.
+         *
+         * Writing an empty address was silent data loss: stepping past this
+         * page without typing — or skipping setup entirely — replaced a
+         * working server address with "". The stream key was already
+         * conditional for the same reason; the address needed to be too.
+         */
+        ...publishPatch(),
         encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate },
         library: libraryPayload(),
         tracks: cfgTracks,
