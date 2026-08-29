@@ -60,9 +60,9 @@ as a delay line. The cushion can stay deep (delay is acceptable); it just
 cannot refill after a gap. Everything is per-frame, so it costs far more.
 Correct for an attended stream.
 
-The cushion depth is already a setting (`BANK_SECONDS`, default 15, exposed in
-Settings). Live mode is close to "cushion = minimum, compose every frame" —
-which suggests the modes are less far apart than they look, PROVIDED the
+Cushion depth is already a setting (`BANK_SECONDS`, default 15, exposed in
+Settings) and does not need to change for live mode — only what fills it does.
+That suggests the two modes are much less far apart than they look, PROVIDED
 compositing moves before the encoder for both.
 
 Consequences worth knowing before starting:
@@ -71,10 +71,11 @@ Consequences worth knowing before starting:
   timestamps precisely so a replayed packet always produces the same frame. In
   live mode there is no replay, so the constraint relaxes — but the same code
   has to serve both, so do not break it.
-- **Splices lose their cover.** Today a source restart hides behind the
-  cushion. At 1-2s it will be visible. Live mode probably wants to avoid
-  restarts entirely, which means overlay changes must be applied to a running
-  graph rather than by respawning — a genuinely different design.
+- **Splices lose their cover.** Not because the cushion is shallow — it can
+  stay 15s — but because once drained it cannot refill at 1x. Live mode wants
+  to avoid restarts entirely, which means overlay changes must be applied to a
+  running graph rather than by respawning. A genuinely different design, and
+  the main piece of real work here.
 - **Two decodes plus a composite plus an encode.** The N100 will not do this;
   it is already at 0.83x on Apocalypto alone. Live mode is desktop-class
   hardware only, and should say so rather than fail.
@@ -130,6 +131,6 @@ replacement" is the point of the product.
    encoder on real hardware.
 3. Measure. Decide whether live mode is desktop-only.
 4. Compositing before the encoder, shared by both modes.
-5. Live mode with a shrunk cushion.
+5. Live mode: cushion as a delay line, no respawn on overlay change.
 6. Webhook triggers last — they are cheap once (5) exists, and pointless
    before it.
