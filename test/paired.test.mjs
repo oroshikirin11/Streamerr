@@ -2,10 +2,14 @@
  * PairedLibrary has to satisfy the whole library interface.
  *
  * It wraps a catalogue and a media provider and forwards nearly everything.
- * A method it forgets is not a graceful degradation: CompositeLibrary calls
- * it, gets undefined, and the route answers 400 with an empty library behind
- * it — which reads like a configuration problem and is not. That happened
- * with items(), so the requirement is asserted here rather than remembered.
+ * A method it forgets is not a graceful degradation — it is a TypeError
+ * wearing a plausible disguise. items() answered 400 with an empty library,
+ * which reads as a configuration problem; size() answered 502, which reads
+ * as a network fault. Both were missing methods.
+ *
+ * So the requirement is derived, not remembered: the names are read out of
+ * every file that calls one, and anything unimplemented fails here instead
+ * of in front of an operator.
  *
  * Run: node test/paired.test.mjs
  */
@@ -26,15 +30,15 @@ console.log('\ninterface');
  * Read the requirement from the composite itself rather than a hand-kept
  * list, so adding a call there fails here instead of in production.
  */
-const composite = readFileSync(new URL('../src/library/composite.js', import.meta.url), 'utf8');
-const required = [...new Set(
-  [...composite.matchAll(/\.lib[?.]*\.([a-zA-Z]+)/g)].map((m) => m[1]),
-)].sort();
-console.log(`  composite calls: ${required.join(' ')}`);
+const callers = ['../src/library/composite.js', '../src/index.js'];
+const required = [...new Set(callers.flatMap((f) => [
+  ...readFileSync(new URL(f, import.meta.url), 'utf8').matchAll(/\.lib[?.]*\.([a-zA-Z]+)/g),
+].map((m) => m[1])))].sort();
+console.log(`  callers require: ${required.join(' ')}`);
 
 const proto = PairedLibrary.prototype;
 const has = (n) => n in proto || Boolean(Object.getOwnPropertyDescriptor(proto, n));
-check('every method the composite calls is implemented',
+check('every method any caller uses is implemented',
   required.filter((n) => !has(n)), []);
 
 console.log('\ndelegation');
@@ -76,6 +80,9 @@ const noStream = new PairedLibrary({}, { configured: true }, []);
 check('a share advertises it', typeof withStream.stream, 'function');
 check('and it reaches the media half', withStream.stream(), 'bytes');
 check('a folder does not advertise it', typeof noStream.stream, 'undefined');
+
+check('size is served by the media half',
+  new PairedLibrary({}, { size: (r) => `size:${r}` }, []).size('tv/x.mkv'), 'size:tv/x.mkv');
 
 console.log('\nconfigured means BOTH halves');
 const cfgd = (c, m) => new PairedLibrary({ configured: c }, { configured: m }).configured;

@@ -89,6 +89,14 @@ export class PairedLibrary {
   }
 
   /**
+   * Byte size, also the media half's. The bridge asks for it before serving
+   * a range, so without it every read answered 502 and ffprobe reported a
+   * 5XX — with a catalogue that listed perfectly, which made it look like a
+   * network fault rather than a missing method.
+   */
+  size(...a) { return this.media.size(...a); }
+
+  /**
    * The one method that is ours.
    *
    * The catalogue's reported path is translated by the derived rules and
