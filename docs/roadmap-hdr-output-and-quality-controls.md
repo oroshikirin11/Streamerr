@@ -34,6 +34,7 @@ of the cost here is re-learning what a driver will and will not do.
    2026-08-29 as `encoder.tonemap`.)
 7. Bulletproof. Every combination tested against a real library, not synthetic
    clips.
+8. **AV1 output support.** Worth more than items 1-4 combined — see Part 7.
 
 Plus: grey out anything the host **physically cannot do**, and only that —
 "unsupported by this hardware", never "we would rather you didn't".
@@ -349,3 +350,32 @@ The container's SVT-AV1 is an instrumented build — it prints `SvtMalloc[info]`
 lines and runs ~18% slower than the host's release build (14.1x vs 17.1x on
 identical input). Worth fixing in the Dockerfile regardless of whether AV1 is
 ever adopted.
+
+---
+
+## Part 8 — how H.264-shaped is the engine?
+
+Only at its two ends. Checked 2026-08-29.
+
+### Tied to H.264
+
+| where | what |
+|---|---|
+| `encoders.js` | all five backends hardcode `h264_vaapi` / `h264_qsv` / `h264_nvenc` / `h264_amf` / `libx264`. The codec is part of the backend's identity, so another codec means new entries or a codec parameter |
+| `publish.js:173`, `playout.js:576` | `-tag:v 7` is the FLV tag for AVC specifically. HEVC and AV1 need Enhanced RTMP fourCC tags |
+| `probe.js` | the encoder probe tests H.264 encoders |
+| `pipeline.js` | `format=nv12` throughout — 8 bit assumed |
+| **`web/.../studio` preview** | **`mpegts.js`, which is H.264/AAC oriented.** An AV1 or HEVC broadcast would not decode in our OWN preview pane. Easy to miss until the editor goes blind |
+
+### Codec-agnostic
+
+The mpegts pipe between clip and publisher, the bank and chunker (they work on
+packets), splice and timestamp handling, pacing, overlay compositing (it works
+on frames, before the encoder), and the entire library and scheduling layer.
+
+### What this means
+
+The engine is not H.264-shaped — its two ENDS are. The middle, which is the
+part that was expensive to get right, carries over to any codec untouched.
+Adding AV1 is: new backend entries, delivery tagging, a preview that can
+decode it, and the test matrix. Not a re-architecture.
