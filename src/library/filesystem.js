@@ -228,6 +228,31 @@ export class FilesystemLibrary {
     return { ok: true, roots: this.roots.length };
   }
 
+  /**
+   * Every media path under the configured roots.
+   *
+   * The other half of the catalogue match: these are the files we can
+   * actually open, so they are the truth a reported path has to line up
+   * with. Capped for the same reason as the catalogue side.
+   */
+  async allPaths({ limit = 5000 } = {}) {
+    const out = [];
+    const walk = (dir, depth) => {
+      if (out.length >= limit || depth > 6) return;
+      let entries = [];
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (out.length >= limit) return;
+        if (e.name.startsWith('.')) continue;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walk(full, depth + 1);
+        else if (VIDEO_EXTS.has(extname(e.name).toLowerCase())) out.push(full);
+      }
+    };
+    for (const r of this.roots) walk(r, 0);
+    return out;
+  }
+
   async libraries() {
     const out = [];
     for (const r of this.roots) {

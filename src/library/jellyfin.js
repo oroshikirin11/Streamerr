@@ -138,6 +138,27 @@ export class JellyfinLibrary {
    * includes virtual/missing episodes (a hardcoded `|| User.GetIsApiKey()`),
    * which have no file and a null path.
    */
+  /**
+   * Every episode path in the catalogue, in one request.
+   *
+   * Used only to line the catalogue up against the media we can open. Going
+   * series by series would be one round trip per show — hundreds for a real
+   * library — where a recursive query returns the lot. Capped, because the
+   * answer is a sample either way: a few thousand paths settle a prefix rule
+   * as well as fifty thousand would.
+   */
+  async allPaths({ limit = 5000 } = {}) {
+    const data = await this._get('/Items', {
+      IncludeItemTypes: 'Episode,Movie',
+      Recursive: true,
+      Fields: 'Path',
+      Limit: limit,
+      EnableImages: false,
+      EnableUserData: false,
+    });
+    return (data?.Items ?? []).map((i) => i.Path).filter(Boolean);
+  }
+
   async episodes(seriesId, { seasonId } = {}) {
     const data = await this._get(`/Shows/${seriesId}/Episodes`, {
       SeasonId: seasonId || undefined,

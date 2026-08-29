@@ -37,7 +37,8 @@ import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
-import { makeLibrary } from './library/index.js';
+import { makeLibrary, JellyfinLibrary } from './library/index.js';
+import { deriveMapping, describeMatch } from './library/match.js';
 import { SmbStreamLibrary } from './library/smbstream.js';
 import { thumbnail, isRemote, isVideoFile, cachedFrame } from './library/thumbs.js';
 import { suggestRules } from './library/pathmap.js';
@@ -1179,6 +1180,48 @@ app.get('/api/check/encoders', async (req, res) => {
     ffmpeg: caps.version,
     recursionDepth: caps.recursionDepth,
   });
+});
+
+/**
+ * Line a metadata catalogue up against the media we can open.
+ *
+ * Answers the only question the operator should have to think about — "is
+ * this the same library?" — and derives the path translation as a side
+ * effect, so nobody types a mapping rule. Read-only: it enumerates both
+ * sides and compares strings.
+ */
+app.post('/api/match/library', async (req, res) => {
+  try {
+    const { media, jellyfin } = req.body ?? {};
+    if (!media?.provider) return res.status(400).json({ error: 'No media source given' });
+    if (!jellyfin?.url) return res.status(400).json({ error: 'No Jellyfin address given' });
+
+    const mediaLib = makeLibrary({ library: { sources: [media] } }).sources[0]?.lib;
+    if (typeof mediaLib?.allPaths !== 'function') {
+      return res.status(400).json({ error: 'This media source cannot be matched yet' });
+    }
+    // The panel never holds a real key, so the sentinel resolves to what is
+    // stored for the source being edited.
+    const stored = (config.library?.sources ?? [])
+      .find((x) => x.jellyfin?.apiKey)?.jellyfin?.apiKey ?? '';
+    const apiKey = jellyfin.apiKey === '__SET__' ? stored : (jellyfin.apiKey ?? '');
+    const jf = new JellyfinLibrary({ url: jellyfin.url, apiKey });
+
+    const [reported, local] = await Promise.all([jf.allPaths(), mediaLib.allPaths()]);
+    const result = deriveMapping(reported, local);
+    res.json({
+      matched: result.matched,
+      total: result.total,
+      rules: result.rules,
+      ambiguous: result.ambiguous,
+      // A handful of examples, never the whole list: this is a summary, and
+      // the paths are the operator's business rather than a payload.
+      examples: result.unmatched.slice(0, 3),
+      description: describeMatch(result),
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post('/api/check/library', async (req, res) => {
