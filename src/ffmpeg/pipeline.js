@@ -45,6 +45,7 @@ import {
   imageOverlayChain, vaapiImageOverlayChain, canvasImageChain,
   splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
 } from './overlay-image.js';
+import { publishOutputArgs, targetUrl, SECRET_FIELDS } from '../publish.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -330,11 +331,32 @@ export class PipelinePlayout extends EventEmitter {
    * @param {object} [o.selection] track selection from selectTracks()
    */
   constructor({
-    target, profile, selection = null, statsPeriodMs = 500, cacheDir = null,
+    target = null, destinations = null, profile, selection = null,
+    statsPeriodMs = 500, cacheDir = null,
     resolveSelection = null, runAhead = null, overlayDir = null,
   }) {
     super();
     this.target = target;
+    /**
+     * Where this broadcast goes. A legacy caller passing a bare `target`
+     * string still works and is treated as one RTMP destination, so nothing
+     * that predates the multi-target model has to change to keep running.
+     */
+    this.destinations = destinations ?? [{ protocol: 'rtmp', creds: { url: '', key: '' }, primary: true }];
+    if (!destinations && target) {
+      const m = /^(rtmps?):\/\/(.*)\/([^/]*)$/i.exec(String(target));
+      this.destinations = m
+        ? [{ protocol: m[1].toLowerCase(), creds: { url: `${m[1]}://${m[2]}`, key: m[3] }, primary: true }]
+        : this.destinations;
+    }
+    /**
+     * Every secret across every destination, so none of them can reach a log
+     * line. Short values are skipped: replacing a three-character string
+     * would mangle unrelated output.
+     */
+    this._secrets = this.destinations
+      .flatMap((d) => SECRET_FIELDS.map((f) => String(d.creds?.[f] ?? '')))
+      .filter((v) => v.length >= 6);
     /**
      * The configured output box. `this.profile` is this with the shape of
      * whatever is on air folded in, so every downstream consumer — filters,
@@ -1137,21 +1159,15 @@ export class PipelinePlayout extends EventEmitter {
       // the server dropped the starved stream minutes later.
       '-fflags', '+discardcorrupt',
       '-f', 'mpegts', '-i', 'pipe:0',
-      '-c', 'copy',
-      // FLV's codec ids for AVC and AAC. Copying from MPEG-TS carries the TS
-      // stream types across, which the flv muxer rejects.
-      '-tag:v', '7', '-tag:a', '10',
-      // Only to fill in onMetaData's videodatarate. H.264 carries no bitrate
-      // of its own and this is a stream copy, so the flv muxer would write a
-      // zero there — which Owncast reports as "Unknown kbps" and logs as
-      // "Bandwidth info not available". Copying is unaffected: with -c copy
-      // this never reaches an encoder, and the muxed payload is byte for
-      // byte the same. (AAC carries its own rate, so audio already reports.)
-      ...(this.profile?.videoBitrate ? ['-b:v', String(this.profile.videoBitrate)] : []),
-      '-muxdelay', '0', '-muxpreload', '0', '-max_interleave_delta', '0',
-      '-flvflags', 'no_duration_filesize+no_sequence_end',
-      ...(/^rtmps?:\/\//i.test(this.target) ? [] : ['-y']),
-      '-f', 'flv', this.target,
+      /**
+       * Muxer, flags and target all come from the destination set now — see
+       * src/publish.js, which carries the measurements behind the codec tags
+       * and the tee. One destination produces exactly the argument list this
+       * used to hardcode; several produce a tee.
+       */
+      ...publishOutputArgs(this.destinations, {
+        videoBitrate: this.profile?.videoBitrate ?? null,
+      }),
     ];
 
     const startedAt = Date.now();
@@ -3384,10 +3400,11 @@ export class PipelinePlayout extends EventEmitter {
 
   _redact(text) {
     if (!text) return text;
-    if (!/^rtmps?:\/\//i.test(String(this.target))) return text;
-    const key = String(this.target).split('/').pop();
-    if (!key || key.length < 4) return text;
-    return text.split(key).join('*'.repeat(8));
+    let out = String(text);
+    for (const secret of this._secrets ?? []) {
+      out = out.split(secret).join('*'.repeat(8));
+    }
+    return out;
   }
 }
 

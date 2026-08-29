@@ -6,6 +6,7 @@
  * so nothing here carries a real default.
  */
 
+import { publishDefaults, targetUrl, redactUrl, destinations } from './publish.js';
 import {
   readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, unlinkSync,
 } from 'fs';
@@ -20,6 +21,11 @@ const CONFIG_PATH = process.env.JELLYSTREAMERR_CONFIG
 
 const DEFAULTS = {
   server: { port: 8099, host: '0.0.0.0' },
+  /**
+   * Where the broadcast goes. Credentials sit in a slot PER PROTOCOL so
+   * switching between them never discards the other set — see publish.js.
+   */
+  publish: publishDefaults(),
   owncast: {
     rtmpUrl: '',
     streamKey: '',
@@ -354,6 +360,33 @@ export function assertRtmpUrl(url) {
  * The full RTMP target. Kept out of logs and API responses — it embeds the
  * stream key, and RTMP carries it in the handshake as plaintext.
  */
+/**
+ * Every destination this broadcast should reach: the selected protocol
+ * first, then any enabled extras. Legacy owncast.rtmpUrl/streamKey are read
+ * as the RTMP slot when publish has not been configured, so an existing
+ * install keeps streaming without being touched.
+ */
+export function publishDestinations(cfg = config) {
+  const pub = { ...publishDefaults(), ...(cfg.publish ?? {}) };
+  if (!pub.rtmp?.url && cfg.owncast?.rtmpUrl) {
+    pub.rtmp = { url: cfg.owncast.rtmpUrl, key: cfg.owncast.streamKey ?? '' };
+  }
+  const dests = destinations(pub);
+  // Validate here rather than at spawn: a bad target should be an error on
+  // the settings page, not a publisher that dies thirty seconds into a show.
+  for (const d of dests) targetUrl(d.protocol, d.creds);
+  return dests;
+}
+
+/** One line per destination, secrets replaced, for logs and the console. */
+export function publishTargetsRedacted(cfg = config) {
+  try {
+    return publishDestinations(cfg).map((d) => `${d.protocol}: ${redactUrl(d.protocol, d.creds)}`);
+  } catch {
+    return ['(unconfigured)'];
+  }
+}
+
 export function rtmpTarget(cfg = config) {
   if (!cfg.owncast.rtmpUrl) throw new Error('owncast.rtmpUrl is not configured');
   const base = assertRtmpUrl(cfg.owncast.rtmpUrl);

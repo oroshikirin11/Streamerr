@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url';
 
 import {
   config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, assertRtmpUrl,
+  publishDestinations, publishTargetsRedacted,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT,
 } from './config.js';
 import {
@@ -428,7 +429,7 @@ function runAheadBudget() {
 
 function buildEngine({ profile, selection }) {
   const e = new PipelinePlayout({
-    target: rtmpTarget(),
+    destinations: publishDestinations(),
     profile,
     selection,
     // Extracted subtitle tracks and embedded fonts live here.
@@ -1741,7 +1742,7 @@ scheduleAutoScan();
 const { port, host } = config.server;
 server.listen(port, host, () => {
   console.log(`jellystreamerr listening on http://${host}:${port}`);
-  console.log(`  target : ${rtmpTargetRedacted()}`);
+  for (const line of publishTargetsRedacted()) console.log(`  target : ${line}`);
   const srcs = config.library?.sources ?? [];
   console.log(`  library: ${srcs.length ? srcs.map((s) => `${s.name} (${s.provider})`).join(', ') : 'none configured'}`);
   if (!passwordHash()) console.log('  no password set — open the panel to run setup');
