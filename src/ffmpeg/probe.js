@@ -196,53 +196,95 @@ export async function probeConcatCapabilities() {
  * cannot answer this. Intel iHD passes; some drivers draw the overlay opaque.
  */
 /**
- * How this device can turn an HDR source into the SDR stream we broadcast.
+ * How to turn an HDR source into the SDR stream we broadcast.
  *
- * `tonemap_vaapi` is fixed-function on Intel's iHD driver and simply absent
- * from Mesa: on AMD it refuses at filter-config time with "VAAPI driver
- * doesn't support HDR", the graph never builds, and the clip dies with
- * `h264_vaapi ... error code: -22` before a frame is produced. That reads as
- * an encoder fault, which is why it cost an evening to find. The same
- * binary, the same filter, a different GPU.
+ * Two drivers, two different refusals, and only one of them is a real
+ * capability gap. Measured directly:
  *
- * So ask the driver instead of guessing from the vendor. The probe input is
- * tagged bt2020/smpte2084 rather than left SDR, because a driver that DOES
- * support tone mapping is entitled to reject an SDR input — an untagged
- * probe would report "unsupported" on the one machine where it works.
+ *   Mesa / RX 6900 XT   "VAAPI driver doesn't support HDR"
+ *   Intel iHD / N100    "No mastering display data from input"
  *
- * Returns the strategy, not a boolean, because there are three outcomes and
- * the third one matters: 'none' means the picture goes out washed out, which
- * is bad but is still a broadcast.
+ * The first is a capability query failing — Mesa has no HDR tone mapper and
+ * never will for this graph. The second is the filter running fine and
+ * rejecting the FRAME: iHD needs HDR10 mastering-display metadata, which a
+ * synthetic lavfi source does not carry. Reading that second message as
+ * "unsupported" demoted an N100 that had been tone mapping on the GPU all
+ * along, onto a CPU path that cannot hold 1x at 4K. So the two are told
+ * apart deliberately.
+ *
+ * It follows that this is not purely a property of the device. On iHD it is
+ * a property of the FILE too, because a source without mastering metadata
+ * fails the same way at frame time. So:
+ *
+ *   1. once per device, cheaply: is the tone mapper there at all?
+ *   2. per file, only where it is: can it map THIS one?
+ *
+ * Step 2 costs one frame of the real source. That is the only probe that
+ * cannot lie, because it is the exact operation the clip will perform.
  *
  * @returns {Promise<'vaapi'|'cpu'|'none'>}
  */
-export async function pickTonemap(device = '/dev/dri/renderD128') {
-  const hdrSrc = [
+
+/** Runs ffmpeg, returning {ok, err} rather than throwing. */
+function tryRun(args, timeoutMs = 25_000) {
+  return new Promise((res) => {
+    const c = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args],
+      { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    c.stderr.on('data', (d) => { err += d; });
+    const kill = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, timeoutMs);
+    c.on('error', () => { clearTimeout(kill); res({ ok: false, err: 'spawn failed' }); });
+    c.on('close', (code) => { clearTimeout(kill); res({ ok: code === 0, err }); });
+  });
+}
+
+/**
+ * Does this driver have a VAAPI HDR tone mapper at all?
+ *
+ * Synthetic input, so it costs nothing and touches no media. A frame-level
+ * complaint about missing mastering data is a PASS: the filter existed and
+ * ran. Only the capability query failing is a no.
+ */
+export async function vaapiTonemapPresent(device = '/dev/dri/renderD128') {
+  const { ok, err } = await tryRun([
+    '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
     '-f', 'lavfi', '-i',
     'color=c=red:s=640x360:r=25,format=p010,'
     + 'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
-  ];
-  const ok = (args) => new Promise((res) => {
-    const c = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args],
-      { stdio: 'ignore' });
-    const kill = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 20_000);
-    c.on('error', () => { clearTimeout(kill); res(false); });
-    c.on('close', (code) => { clearTimeout(kill); res(code === 0); });
-  });
-
-  if (await ok([
-    '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va', ...hdrSrc,
     '-vf', 'hwupload,tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709',
     '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '1M', '-f', 'null', '-',
-  ])) return 'vaapi';
+  ]);
+  if (ok) return true;
+  // The filter ran and objected to the input, not to itself.
+  return /mastering display/i.test(err);
+}
 
-  // Costs a round trip through system memory, so it runs AFTER the GPU has
-  // already scaled 4K down to output size. Measured on a 7800X3D at 4.1x
-  // realtime for 4K HDR10 -> 1080p, against 6.1x for no tone mapping at all.
-  if (await ok([...hdrSrc, '-vf', `${CPU_TONEMAP},format=nv12`,
-    '-frames:v', '1', '-f', 'null', '-'])) return 'cpu';
+/**
+ * Can this driver tone map THIS file? One frame of the real source.
+ *
+ * Decodes only the head, so over the SMB bridge it costs the first small
+ * stripe — the same order as the warm head read that already happens.
+ */
+export async function vaapiTonemapsFile(srcPath, device = '/dev/dri/renderD128') {
+  const { ok } = await tryRun([
+    '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+    '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi',
+    '-i', srcPath,
+    '-vf', 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709',
+    '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '1M', '-f', 'null', '-',
+  ], 60_000);
+  return ok;
+}
 
-  return 'none';
+/** Is the software tone map usable as a fallback on this build? */
+export async function cpuTonemapAvailable() {
+  const { ok } = await tryRun([
+    '-f', 'lavfi', '-i',
+    'color=c=red:s=640x360:r=25,format=p010,'
+    + 'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
+    '-vf', `${CPU_TONEMAP},format=nv12`, '-frames:v', '1', '-f', 'null', '-',
+  ]);
+  return ok;
 }
 
 export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width = 1920, height = 1080 } = {}) {

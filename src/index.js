@@ -27,7 +27,8 @@ import {
   throttleCheck, throttleFail, throttleReset, destroyOtherSessions,
 } from './auth.js';
 import {
-  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored, pickTonemap,
+  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
+  vaapiTonemapPresent, vaapiTonemapsFile, cpuTonemapAvailable,
   pickPillarboxGraph,
 } from './ffmpeg/probe.js';
 import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
@@ -151,28 +152,52 @@ let library = makeLibrary(config);
  * the driver was never asked about. Probe results are cached per geometry,
  * so this costs nothing after the first clip of each shape.
  */
-async function tuneProfile(profile, selection) {
+async function tuneProfile(profile, selection, srcPath = null) {
   if (profile.backend !== 'vaapi') return;
 
   /**
-   * HDR needs a tone map, and which one exists is a property of the DRIVER,
-   * not the vendor or the codec. Asked once per process, before anything
-   * tries to build a graph around the answer.
+   * HDR needs a tone map, and which one works is a question about the
+   * driver AND about the file. Asking only the driver demoted an N100 that
+   * had been mapping on the GPU all along — see probe.js.
    */
   if (selection?.video?.hdr) {
-    if (globalThis.__tonemap === undefined) {
-      globalThis.__tonemap = await pickTonemap(profile.device);
-      console.log(globalThis.__tonemap === 'vaapi'
-        ? '[hdr] tone mapping on the GPU'
-        : globalThis.__tonemap === 'cpu'
-          ? '[hdr] this driver cannot tone map — doing it on the CPU after the '
-            + 'GPU downscale, which costs roughly a third of the headroom'
-          : '[hdr] nothing on this machine can tone map — HDR titles will look '
-            + 'washed out. Colours will be wrong; the broadcast will run.');
+    globalThis.__tonemapCap ??= await vaapiTonemapPresent(profile.device);
+    if (!globalThis.__tonemapCap) {
+      globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
+      profile.tonemap = globalThis.__tonemapCpu ? 'cpu' : 'none';
+    } else if (srcPath) {
+      // The driver has the filter; only this file can answer whether it
+      // carries what the filter needs. Cached per file, because the answer
+      // travels with the media, not the machine.
+      globalThis.__tonemapFile ??= new Map();
+      if (!globalThis.__tonemapFile.has(srcPath)) {
+        globalThis.__tonemapFile.set(srcPath,
+          await vaapiTonemapsFile(srcPath, profile.device));
+      }
+      profile.tonemap = globalThis.__tonemapFile.get(srcPath) ? 'vaapi' : 'cpu';
+      if (profile.tonemap === 'cpu') {
+        globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
+        if (!globalThis.__tonemapCpu) profile.tonemap = 'none';
+      }
+    } else {
+      profile.tonemap = 'vaapi';
     }
-    profile.tonemap = globalThis.__tonemap;
+    if (profile.tonemap !== globalThis.__tonemapSaid) {
+      globalThis.__tonemapSaid = profile.tonemap;
+      console.log(profile.tonemap === 'vaapi'
+        ? '[hdr] tone mapping on the GPU'
+        : profile.tonemap === 'cpu'
+          ? '[hdr] tone mapping on the CPU — '
+            + (globalThis.__tonemapCap
+              ? 'this file carries no mastering-display metadata, which this '
+                + 'driver needs'
+              : 'this driver has no HDR tone mapper')
+            + '. Costs real headroom at 4K; a 1080p output frame size gives '
+            + 'it back.'
+          : '[hdr] nothing here can tone map — HDR titles will look washed '
+            + 'out. Colours wrong; the broadcast runs.');
+    }
   }
-
 
   if (config.encoder.gpuSubs === false) return;
   profile.gpuFull = true;
@@ -233,7 +258,7 @@ async function selectionFor(item, profile = null) {
   const subs = await listSubtitles(item.srcPath, tracks);
   const selection = selectTracks(tracks, subs, trackPrefs());
   selection.video = tracks.video[0] ?? null;
-  if (profile) await tuneProfile(profile, selection);
+  if (profile) await tuneProfile(profile, selection, item.srcPath);
   return selection;
 }
 
@@ -1547,7 +1572,9 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // subtitle-free 4K films were software-decoding at 0.6x while the GPU
   // idled, because this used to be gated on subtitles existing. The overlay
   // (subtitled) variant additionally needs the driver to honour alpha.
-  await tuneProfile(profile, selection);
+  // items[0], not `item`: that one is scoped to the resolve loop above, and
+  // this is the file the tracks were probed from.
+  await tuneProfile(profile, selection, items[0]?.srcPath ?? null);
 
   /**
    * Pre-flight the destination actually configured, not the legacy field.
