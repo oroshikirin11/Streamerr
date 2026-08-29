@@ -271,6 +271,7 @@ export function contentRect(video, profile) {
 }
 import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
 import { ChunkScheduler } from './chunker.js';
+import { CPU_TONEMAP } from './probe.js';
 
 /** Treat a source that dies this fast as broken rather than finished. */
 const SOURCE_FAIL_MS = 2_000;
@@ -2406,7 +2407,18 @@ export class PipelinePlayout extends EventEmitter {
         && (v.width !== p0.width || v.height !== p0.height)) {
         out.push(`scaling ${v.width}x${v.height} -> ${p0.width}x${p0.height} every frame`);
       }
-      if (v.hdr) out.push('HDR source — tonemapped on the GPU every frame');
+      if (v.hdr) {
+        // Which of these is running is a measured property of the driver,
+        // and the CPU one is a real cost worth naming when someone is
+        // reading this because the stream is struggling.
+        out.push(this.profile?.tonemap === 'cpu'
+          ? 'HDR source — tonemapped on the CPU every frame (this driver '
+            + 'cannot do it on the GPU)'
+          : this.profile?.tonemap === 'none'
+            ? 'HDR source — NOT tonemapped; this machine cannot, so colours '
+              + 'are wrong'
+            : 'HDR source — tonemapped on the GPU every frame');
+      }
     }
     const sub = this.selection?.subtitle;
     if (!sub) {
@@ -3564,10 +3576,7 @@ export function buildSourceArgs({
     // null, not the scale: a full-frame VPP pass that changes nothing is
     // still a full-frame VPP pass. See scaleIsIdentity.
     const scalePart = scaleIsIdentity(selection?.video, profile, rect) ? 'null'
-      : selection?.video?.hdr
-        ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
-          + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
-        : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
+      : scaleAndTonemap(selection?.video, profile, rect, smode);
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
     const vaapiChain = (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
       ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
@@ -3648,13 +3657,7 @@ export function buildSourceArgs({
     // excludes every case where this filter is actually doing something,
     // pillarboxed clips included.
     const scalePart = scaleIsIdentity(selection?.video, profile, rect) ? 'null'
-      : selection?.video?.hdr
-      ? `scale_vaapi=w=${rect.w}:h=${rect.h}${smode},`
-        + 'tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'
-      // format=nv12 is load-bearing: 10-bit sources decode to P010 surfaces,
-      // and h264_vaapi accepts only NV12 — without the GPU-side conversion
-      // the encoder dies with -22 (Invalid argument) on every 10-bit file.
-      : `scale_vaapi=w=${rect.w}:h=${rect.h}:format=nv12${smode}`;
+      : scaleAndTonemap(selection?.video, profile, rect, smode);
     // The subtitle canvas is always rendered at the video's content
     // rectangle, so ASS positioning is authored-correct; only how that
     // composite gets placed into a pillarboxed output frame varies.
@@ -4243,3 +4246,36 @@ export function buildCountdownArgs({
 function lastLines(s, n) {
   return (s || '').split('\n').filter(Boolean).slice(-n).join('\n');
 }
+
+/**
+ * Scale to output size and, for HDR sources, get to BT.709 somehow.
+ *
+ * "Somehow" is the point: tonemap_vaapi exists on Intel and not on Mesa, so
+ * the strategy is measured once per device by pickTonemap() and arrives here
+ * as profile.tonemap. Building the Intel filter on an AMD box does not
+ * degrade the picture — it kills the clip at -22 before any frame exists.
+ *
+ * The CPU route deliberately runs AFTER the GPU scale, so the tone mapper
+ * sees 1080p rather than 4K, and re-uploads so everything downstream still
+ * composites on the GPU.
+ */
+function scaleAndTonemap(video, profile, rect, smode) {
+  const scale = `scale_vaapi=w=${rect.w}:h=${rect.h}`;
+  if (!video?.hdr) {
+    // format=nv12 is load-bearing: 10-bit sources decode to P010 surfaces,
+    // and h264_vaapi accepts only NV12 — without the GPU-side conversion
+    // the encoder dies with -22 (Invalid argument) on every 10-bit file.
+    return `${scale}:format=nv12${smode}`;
+  }
+  const how = profile?.tonemap ?? 'vaapi';
+  if (how === 'vaapi') {
+    return `${scale}${smode},tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709`;
+  }
+  if (how === 'cpu') {
+    return `${scale}${smode},hwdownload,format=p010le,${CPU_TONEMAP},format=nv12,hwupload`;
+  }
+  // Nothing on this box can tone map. Washed-out beats dead air, and the
+  // operator was told why when the strategy was chosen.
+  return `${scale}:format=nv12${smode}`;
+}
+

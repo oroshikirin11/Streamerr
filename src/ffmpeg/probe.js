@@ -17,6 +17,15 @@ import { BACKENDS, LADDER } from './encoders.js';
 
 const PROBE_TIMEOUT_MS = 25_000;
 
+/**
+ * The software tone-map, in one place because the probe must test exactly
+ * what the pipeline runs. npl=100 is the reference SDR white the hable curve
+ * maps onto; desat=0 keeps the operator from washing saturated highlights,
+ * which on animation is the difference between a sunset and a grey smear.
+ */
+export const CPU_TONEMAP = 'zscale=t=linear:npl=100,tonemap=hable:desat=0,'
+  + 'zscale=p=bt709:t=bt709:m=bt709:r=tv';
+
 /** Minimal profile just large enough to force full encoder initialisation. */
 const probeProfile = (device) => ({
   width: 320, height: 240, fps: 30,
@@ -186,6 +195,56 @@ export async function probeConcatCapabilities() {
  * fully transparent overlay onto green and samples the pixel — exit codes
  * cannot answer this. Intel iHD passes; some drivers draw the overlay opaque.
  */
+/**
+ * How this device can turn an HDR source into the SDR stream we broadcast.
+ *
+ * `tonemap_vaapi` is fixed-function on Intel's iHD driver and simply absent
+ * from Mesa: on AMD it refuses at filter-config time with "VAAPI driver
+ * doesn't support HDR", the graph never builds, and the clip dies with
+ * `h264_vaapi ... error code: -22` before a frame is produced. That reads as
+ * an encoder fault, which is why it cost an evening to find. The same
+ * binary, the same filter, a different GPU.
+ *
+ * So ask the driver instead of guessing from the vendor. The probe input is
+ * tagged bt2020/smpte2084 rather than left SDR, because a driver that DOES
+ * support tone mapping is entitled to reject an SDR input — an untagged
+ * probe would report "unsupported" on the one machine where it works.
+ *
+ * Returns the strategy, not a boolean, because there are three outcomes and
+ * the third one matters: 'none' means the picture goes out washed out, which
+ * is bad but is still a broadcast.
+ *
+ * @returns {Promise<'vaapi'|'cpu'|'none'>}
+ */
+export async function pickTonemap(device = '/dev/dri/renderD128') {
+  const hdrSrc = [
+    '-f', 'lavfi', '-i',
+    'color=c=red:s=640x360:r=25,format=p010,'
+    + 'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
+  ];
+  const ok = (args) => new Promise((res) => {
+    const c = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args],
+      { stdio: 'ignore' });
+    const kill = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 20_000);
+    c.on('error', () => { clearTimeout(kill); res(false); });
+    c.on('close', (code) => { clearTimeout(kill); res(code === 0); });
+  });
+
+  if (await ok([
+    '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va', ...hdrSrc,
+    '-vf', 'hwupload,tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709',
+    '-frames:v', '1', '-c:v', 'h264_vaapi', '-b:v', '1M', '-f', 'null', '-',
+  ])) return 'vaapi';
+
+  // Costs a round trip through system memory, so it runs AFTER the GPU has
+  // already scaled 4K down to output size. Measured on a 7800X3D at 4.1x
+  // realtime for 4K HDR10 -> 1080p, against 6.1x for no tone mapping at all.
+  if (await ok([...hdrSrc, '-vf', `${CPU_TONEMAP},format=nv12`,
+    '-frames:v', '1', '-f', 'null', '-'])) return 'cpu';
+
+  return 'none';
+}
+
 export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width = 1920, height = 1080 } = {}) {
   const { tmpdir } = await import('os');
   const { join } = await import('path');

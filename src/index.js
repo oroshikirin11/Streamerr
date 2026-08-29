@@ -27,7 +27,7 @@ import {
   throttleCheck, throttleFail, throttleReset, destroyOtherSessions,
 } from './auth.js';
 import {
-  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
+  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored, pickTonemap,
   pickPillarboxGraph,
 } from './ffmpeg/probe.js';
 import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
@@ -152,7 +152,29 @@ let library = makeLibrary(config);
  * so this costs nothing after the first clip of each shape.
  */
 async function tuneProfile(profile, selection) {
-  if (profile.backend !== 'vaapi' || config.encoder.gpuSubs === false) return;
+  if (profile.backend !== 'vaapi') return;
+
+  /**
+   * HDR needs a tone map, and which one exists is a property of the DRIVER,
+   * not the vendor or the codec. Asked once per process, before anything
+   * tries to build a graph around the answer.
+   */
+  if (selection?.video?.hdr) {
+    if (globalThis.__tonemap === undefined) {
+      globalThis.__tonemap = await pickTonemap(profile.device);
+      console.log(globalThis.__tonemap === 'vaapi'
+        ? '[hdr] tone mapping on the GPU'
+        : globalThis.__tonemap === 'cpu'
+          ? '[hdr] this driver cannot tone map — doing it on the CPU after the '
+            + 'GPU downscale, which costs roughly a third of the headroom'
+          : '[hdr] nothing on this machine can tone map — HDR titles will look '
+            + 'washed out. Colours will be wrong; the broadcast will run.');
+    }
+    profile.tonemap = globalThis.__tonemap;
+  }
+
+
+  if (config.encoder.gpuSubs === false) return;
   profile.gpuFull = true;
   profile.gpuSubs = false;
   profile.barsGraph = undefined;
