@@ -6,7 +6,7 @@
 
   // Each step validates rather than just collecting — a value that has been
   // proven to work is worth far more than one that has been typed.
-  const STEPS = ['Owncast', 'Encoder', 'Library', 'Paths', 'Languages'];
+  const STEPS = ['Destination', 'Encoder', 'Library', 'Paths', 'Languages'];
   let step = $state(0);
   let saving = $state(false);
   let error = $state('');
@@ -56,6 +56,26 @@
   let height = $state(1080);
   let fps = $state(30);
   let videoBitrate = $state('4500k');
+  /**
+   * Presets with a Custom escape, the same shape the settings page uses.
+   *
+   * The field here was a bare text box under a "(kbps)" label, bound to a
+   * value that actually reads "4500k" — so it showed the unit inside the box
+   * and contradicted its own label. Bitrates are picked from a short list
+   * far more often than typed.
+   */
+  const VBR_PRESETS = ['2000k', '3000k', '4500k', '6000k', '8000k', '12000k', '16000k'];
+  let vbrSel = $state('4500k');
+  /**
+   * The render node, which the wizard never asked about.
+   *
+   * Settings has offered it all along, and it is the difference between
+   * hardware encoding working and not: a host with two nodes may only encode
+   * on one, and a container with none cannot do it at all. Finishing setup
+   * and discovering that at the first broadcast is the wrong order.
+   */
+  let device = $state('/dev/dri/renderD128');
+  let devSel = $state('/dev/dri/renderD128');
 
   // step 3
   let provider = $state('jellyfin');
@@ -150,6 +170,8 @@
       backend = cfg.encoder.backend;
       width = cfg.encoder.width; height = cfg.encoder.height;
       fps = cfg.encoder.fps; videoBitrate = cfg.encoder.videoBitrate;
+      vbrSel = VBR_PRESETS.includes(String(videoBitrate)) ? String(videoBitrate) : 'custom';
+      if (cfg.encoder.device) device = cfg.encoder.device;
       provider = cfg.library.provider;
       jellyfinUrl = cfg.library.jellyfin?.url || '';
       jellyfinKey = cfg.library.jellyfin?.apiKey === '__SET__' ? '__SET__' : '';
@@ -164,6 +186,8 @@
         subtitleMode: cfg.tracks?.subtitleMode ?? 'auto',
       };
       try { options = await api.get('/api/options'); } catch { options = null; }
+      const devs = options?.renderDevices ?? [];
+      devSel = devs.includes(device) ? device : (devs.length ? 'custom' : device);
       const offered = new Set((options?.languages ?? []).map((l) => l.code));
       cfgTracks = { ...cfgTracks, languages: normalizeLangs(cfgTracks.languages ?? []) };
       extraLangs = (cfgTracks.languages ?? []).filter((c) => !offered.has(c)).join(', ');
@@ -247,7 +271,7 @@
          * conditional for the same reason; the address needed to be too.
          */
         ...publishPatch(),
-        encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate },
+        encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate, device },
         library: libraryPayload(),
         tracks: cfgTracks,
       };
@@ -380,8 +404,43 @@
         <div><label>Width</label><input type="number" bind:value={width} /></div>
         <div><label>Height</label><input type="number" bind:value={height} /></div>
         <div><label>FPS</label><input type="number" bind:value={fps} /></div>
-        <div><label>Bitrate (kbps)</label><input bind:value={videoBitrate} /></div>
+        <div>
+          <label>Video bitrate</label>
+          <select bind:value={vbrSel}
+                  onchange={() => { if (vbrSel !== 'custom') videoBitrate = vbrSel; }}>
+            {#each VBR_PRESETS as b}<option value={b}>{parseInt(b, 10).toLocaleString()} kbps</option>{/each}
+            <option value="custom">Custom</option>
+          </select>
+          {#if vbrSel === 'custom'}
+            <input bind:value={videoBitrate} spellcheck="false"
+                   aria-label="Exact video bitrate" placeholder="4500k" style="margin-top:6px;" />
+          {/if}
+        </div>
       </div>
+
+      <label>Render device</label>
+      {#if options?.renderDevices?.length}
+        <select bind:value={devSel}
+                onchange={() => { if (devSel !== 'custom') device = devSel; }}>
+          {#each options.renderDevices as d}<option value={d}>{d}</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if devSel === 'custom'}
+          <input bind:value={device} spellcheck="false" style="margin-top:8px;" />
+        {/if}
+        {#if options.renderDevices.length > 1}
+          <p class="muted small">
+            {options.renderDevices.length} render nodes here. If the probe
+            fails on one, try the other.
+          </p>
+        {/if}
+      {:else}
+        <input bind:value={device} spellcheck="false" />
+        <p class="muted small">
+          No <code>/dev/dri</code> render node here &mdash; hardware encoding needs
+          one passed into the container.
+        </p>
+      {/if}
 
     {:else if step === 2}
       <h2>Where is your media?</h2>
