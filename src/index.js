@@ -184,7 +184,7 @@ async function tuneProfile(profile, selection, srcPath = null) {
     console.log(profile.tonemap === 'vaapi'
       ? '[hdr] tone mapping on the GPU'
       : profile.tonemap === 'cpu'
-        ? '[hdr] this driver has no HDR tone mapper — doing it on the CPU. '
+        ? '[hdr] this driver has no VAAPI tone-map filter — doing it on the CPU. '
           + 'That costs real headroom at 4K; a 1080p output frame size gives '
           + 'it back.'
         : '[hdr] nothing here can tone map — HDR titles will look washed out. '

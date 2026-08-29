@@ -204,8 +204,12 @@ export async function probeConcatCapabilities() {
  *   Mesa / RX 6900 XT   "VAAPI driver doesn't support HDR"
  *   Intel iHD / N100    "No mastering display data from input"
  *
- * The first is a capability query failing — Mesa has no HDR tone mapper and
- * never will for this graph. The second is the filter running fine and
+ * The first is a capability query failing: Mesa's VAAPI does not expose the
+ * HDR tone-mapping VPP filter. That is a statement about THIS filter, not
+ * about Mesa — the same GPU tone maps happily through OpenCL, measured at
+ * 2.8x realtime for 4K HDR10 with rusticl. It is simply slower than doing
+ * it on the CPU (4.1x), which is why the CPU is the fallback. The second is
+ * the filter running fine and
  * rejecting the FRAME: iHD needs HDR10 mastering-display metadata, which a
  * synthetic lavfi source does not carry. Reading that second message as
  * "unsupported" demoted an N100 that had been tone mapping on the GPU all
