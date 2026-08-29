@@ -55,14 +55,39 @@ trimming or `_srcGen` realignment machinery.
 
 ---
 
-## Phase 4 — Close the gaps, then polish
+## Phase 4 — Engine correctness, then close the gaps, then polish
 
-Everything that stops this being "done".
+Everything that stops this being "done". **Engine first** — it is what the new
+project inherits, and a bug left here gets found twice.
+
+### Engine — known outstanding, from real debugging
+
+- [ ] **`_box` is a shallow COPY of the profile** (`pipeline.js:377`). `_play`
+      rebuilds `this.profile` from it, so anything `tuneProfile` writes during a
+      LATER clip never reaches the graph. Only the tone-map path is worked
+      around today. This is the root cause, not a symptom.
+- [ ] **Demotions keyed on state that can drift from what actually ran.**
+      `gpuSubs`, `noGpuImages` and `noIdentitySkip` all still test
+      `this.profile?.…` / `this.selection?.…` (lines ~3272, 3292, 3304). Tone
+      mapping was moved to matching the spawned argv after a demotion silently
+      failed to fire twice in a row. The others have the same shape.
+- [ ] **`ISSUES_URL` is still `github.com/OWNER/…`** (`pipeline.js:189`) — it is
+      printed to operators in performance reports.
+- [ ] `shm_size` too small — `[cache] budget clamped to 1575MB, /dev/shm holds 2048MB`
+- [ ] Subtitle extraction over SMB gives up on some files (Evangelion reached
+      13% in 100s and abandoned; the episode aired unsubtitled)
+- [ ] `spawnSync` on the SRT→ASS conversion — blocks the event loop
+- [ ] The Studio `busy`/`hidden` race — diagnosed, never fixed
+- [ ] **+** Test matrix against a real library, every combination
+
+### Gaps
 
 - [ ] **+** Subtitle extraction reads the whole file — 56 GB for a 65 KB subtitle on Apocalypto. Fetch subtitles from Jellyfin instead.
 - [ ] **+** Bitrate guidance: warn when the encoder cannot hold the target (the N100 silently drops to 2.5 Mbps at 4K)
-- [ ] **+** Test matrix against a real library, every combination
-- [ ] UI deep polish
+
+### Product
+
+- [ ] UI polish — only as far as THIS product needs it
 - [ ] General bug fixing
 
 Goal: the media streaming service is **complete**.
@@ -95,6 +120,9 @@ bloat.
   UI only as far as THIS product needs it, not as preparation for the next one.
 - No syncing obligation afterwards. If a bad engine bug turns up later it can
   be ported by hand, but neither side owes the other anything.
+- The new project can and should make its own engine changes where it needs
+  them. Phase 4 is about **correctness, not perfection** — a clean starting
+  point, not a finished one.
 
 ---
 
