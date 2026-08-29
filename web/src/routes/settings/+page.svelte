@@ -20,6 +20,47 @@
     { id: 'srt', label: 'SRT', blurb: 'survives a lossy link; relays and pro ingest' },
   ];
   const uid = () => Math.random().toString(36).slice(2, 10);
+
+  /**
+   * A saved secret arrives as the sentinel, and rendering that in a password
+   * box shows eight dots that look like a value and are not: the placeholder
+   * never appears, and editing means clearing a fake string first. So the
+   * field is blanked for display and the sentinel is put back on save for
+   * anything the operator did not type into — which is exactly what the
+   * server expects, and how the Owncast key field has always behaved.
+   */
+  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'] };
+  let publishSaved = $state({});
+  function unmaskPublish(pub) {
+    const seen = {};
+    for (const proto of ['rtmp', 'rtmps', 'srt']) {
+      for (const f of SECRET_OF[proto]) {
+        if (pub?.[proto]?.[f] === '__SET__') { seen[`${proto}.${f}`] = true; pub[proto][f] = ''; }
+      }
+    }
+    for (const e of pub?.extras ?? []) {
+      for (const f of SECRET_OF[e.protocol] ?? []) {
+        if (e[f] === '__SET__') { seen[`x.${e.id}.${f}`] = true; e[f] = ''; }
+      }
+    }
+    publishSaved = seen;
+    return pub;
+  }
+  function maskPublish(pub) {
+    const out = JSON.parse(JSON.stringify(pub));
+    for (const proto of ['rtmp', 'rtmps', 'srt']) {
+      for (const f of SECRET_OF[proto]) {
+        if (!out[proto][f] && publishSaved[`${proto}.${f}`]) out[proto][f] = '__SET__';
+      }
+    }
+    for (const e of out.extras ?? []) {
+      for (const f of SECRET_OF[e.protocol] ?? []) {
+        if (!e[f] && publishSaved[`x.${e.id}.${f}`]) e[f] = '__SET__';
+      }
+    }
+    return out;
+  }
+  const savedHint = (k) => (publishSaved[k] ? 'saved — type to replace' : null);
   function addExtra() {
     cfg.publish.extras = [...(cfg.publish.extras ?? []),
       { id: uid(), enabled: true, protocol: 'rtmp', url: '', key: '',
@@ -190,6 +231,7 @@
   async function load() {
     try {
       cfg = await api.config();
+      if (cfg.publish) cfg.publish = unmaskPublish(cfg.publish);
       keyStored = cfg.owncast.streamKey === '__SET__';
       tokenStored = cfg.owncast.accessToken === '__SET__';
       accessToken = '';
@@ -273,7 +315,7 @@
     // the one actually in effect.
     a.hours = Math.min(168, Math.max(1, Math.round(Number(a.hours) || 12)));
     await api.saveConfig({
-        publish: cfg.publish, library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
+        publish: maskPublish(cfg.publish), library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
     saved = 'autoscan';
     setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
   }
@@ -451,11 +493,11 @@
 
       <label>Stream ID <span class="muted small">optional</span></label>
       <input type="password" bind:value={cfg.publish.srt.streamId}
-             placeholder={cfg.publish.srt.streamId === '__SET__' ? 'saved — type to replace' : 'e.g. #!::r=live/stream,m=publish'} />
+             placeholder={savedHint('srt.streamId') ?? 'e.g. #!::r=live/stream,m=publish'} />
 
       <label>Passphrase <span class="muted small">optional, 10–79 characters</span></label>
       <input type="password" bind:value={cfg.publish.srt.passphrase}
-             placeholder={cfg.publish.srt.passphrase === '__SET__' ? 'saved — type to replace' : 'encrypts the link'} />
+             placeholder={savedHint('srt.passphrase') ?? 'encrypts the link'} />
 
       <label>Latency <span class="muted small">{cfg.publish.srt.latencyMs ?? 200} ms</span></label>
       <input type="range" min="20" max="2000" step="10"
@@ -473,8 +515,7 @@
 
       <label>Stream key</label>
       <input type="password" bind:value={cfg.publish[cfg.publish.protocol].key}
-             placeholder={cfg.publish[cfg.publish.protocol].key === '__SET__'
-               ? 'saved — type to replace' : 'from your server'} />
+             placeholder={savedHint(`${cfg.publish.protocol}.key`) ?? 'from your server'} />
     {/if}
     <p class="muted small">Secrets are never sent back to the browser.</p>
 
@@ -495,10 +536,10 @@
         <input bind:value={ex.url} spellcheck="false" placeholder={`${ex.protocol}://…`} />
         {#if ex.protocol === 'srt'}
           <input type="password" bind:value={ex.streamId}
-                 placeholder={ex.streamId === '__SET__' ? 'stream ID saved' : 'stream ID (optional)'} />
+                 placeholder={savedHint(`x.${ex.id}.streamId`) ?? 'stream ID (optional)'} />
         {:else}
           <input type="password" bind:value={ex.key}
-                 placeholder={ex.key === '__SET__' ? 'key saved' : 'stream key'} />
+                 placeholder={savedHint(`x.${ex.id}.key`) ?? 'stream key'} />
         {/if}
       </div>
     {/each}
