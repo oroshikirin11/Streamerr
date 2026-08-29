@@ -22,19 +22,31 @@ ahead of air, banks those packets, and replays them. That cushion is what makes
 splices invisible, lets an overlay change land without a re-buffer, and lets a
 seek be served from cache.
 
-**Live sources cannot be banked, because their frames do not exist yet.**
+**Live sources cannot be banked AHEAD, because their frames do not exist yet.**
 
-That is not a difficulty, it is an impossibility, and it propagates to
-everything in the request:
+An earlier draft of this document called that an impossibility. It is not, and
+the correction matters: **delay is fine.** This is a broadcast, not a video
+call — Twitch runs 10-30s behind glass and nobody notices. Once latency is
+acceptable the bank simply changes job:
 
-| feature | what the cushion does to it |
+- today it is a LOOK-AHEAD. The engine encodes faster than realtime and stays
+  ~15s in front of air.
+- with a live source it becomes a DELAY LINE. Composite camera + media +
+  overlays, encode at 1x, hold 15s of output, then publish.
+
+Viewers see everything in sync, just late. A webhook GIF fires now and airs 15s
+later, which for a broadcast is entirely normal.
+
+What genuinely does change:
+
+| | consequence |
 |---|---|
-| desktop / webcam capture | cannot be encoded ahead at all |
-| **mixing live with media** | media is ALREADY ENCODED in the bank. You cannot composite a camera onto encoded packets. Compositing must happen before the encoder — which would need the camera's frames 15s before they exist |
-| **webhook GIF trigger** | fires "now", appears ~15s later. For a chat-reactive overlay that is useless |
+| compositing must move BEFORE the encoder | you cannot composite a camera onto packets already encoded into the bank. This is real and unavoidable |
+| **the cushion can no longer refill** | a camera produces frames at 1x, so the engine cannot encode faster than realtime to catch up. The bank absorbs jitter but cannot recover from a gap |
+| therefore splices stop being free | today a source restart hides behind the cushion, which then refills. In live mode the cushion drains and stays drained. Overlay changes want to be applied to a RUNNING graph rather than by respawning |
 
-So the request is not four features on top of the engine. It is a **second
-operating mode** for it.
+So it is still a **second operating mode**, but for a narrower reason than
+"live cannot be buffered": it is that the cushion becomes non-renewable.
 
 ## What that means concretely
 
@@ -43,9 +55,10 @@ Two modes, sharing the library, overlays, scheduling and publisher:
 **Playout mode** — what exists today. Files, deep cushion, splices hidden,
 cheap. Correct for an unattended channel.
 
-**Live mode** — capture and camera composited at air time. Cushion shrinks to
-~1-2s (enough to absorb jitter, not enough to hide a splice). Everything is
-per-frame, so it costs far more. Correct for an attended, interactive stream.
+**Live mode** — capture and camera composited before the encoder, output held
+as a delay line. The cushion can stay deep (delay is acceptable); it just
+cannot refill after a gap. Everything is per-frame, so it costs far more.
+Correct for an attended stream.
 
 The cushion depth is already a setting (`BANK_SECONDS`, default 15, exposed in
 Settings). Live mode is close to "cushion = minimum, compose every frame" —
@@ -94,6 +107,14 @@ active composite for N seconds. The hard parts are the cushion (above) and:
 - **A fixed catalogue.** Triggers should select from GIFs the operator has
   already added, never accept a URL — otherwise it is arbitrary remote content
   on the stream.
+
+## The goal, as stated
+
+> We just want the mightyness of OBS step by step in a nice web format + our
+> media streaming support we already have.
+
+Incremental. Each piece should be usable on its own — a webcam that works
+alone is worth shipping before mixing exists.
 
 ## Cheaper alternative, still true
 
