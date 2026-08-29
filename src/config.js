@@ -71,6 +71,21 @@ const DEFAULTS = {
     videoBitrate: '4500k',
     audioBitrate: '160k',
     gopSeconds: 2,
+    /**
+     * How HDR sources are brought down to the SDR stream we broadcast.
+     *
+     * 'auto' asks the driver and falls back on its own, which is right for
+     * almost everyone. The explicit values exist because the trade is not
+     * ours to make: the GPU filter is free but its curve is fixed, the
+     * software one looks different and competes for a CPU that may already
+     * be burning subtitles, and 'none' is faster than both if someone would
+     * rather have the speed than the colours.
+     *
+     * A forced value is a starting point, not a guarantee — see the tonemap
+     * demotion in pipeline.js. Hardware that cannot honour it falls back
+     * and says so, because dead air is worse than a substitution.
+     */
+    tonemap: 'auto',   // auto | vaapi | cpu | none
     // Decode on the GPU. Whether this helps depends entirely on the machine
     // and the source: it is a large win for 10-bit HEVC on a weak CPU, and a
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer

@@ -3217,9 +3217,15 @@ export class PipelinePlayout extends EventEmitter {
             && this.profile?.tonemap === 'vaapi' && !this._tonemapDemoted) {
           this._tonemapDemoted = true;
           this._demote({ tonemap: 'cpu' });
-          this.emit('warn', 'This driver would not tone map this HDR file on '
-            + 'the GPU — doing it on the CPU for this broadcast. That costs '
-            + `real headroom at 4K; a 1080p output frame size gives it back. (${tail})`);
+          this.emit('warn', (this.profile?.tonemapForced
+            ? 'HDR tone mapping is set to "GPU" in Settings, but this driver '
+              + 'would not do it for this file — falling back to the CPU so the '
+              + 'broadcast keeps running. Change the setting to Auto to stop '
+              + 'seeing this.'
+            : 'This driver would not tone map this HDR file on the GPU — doing '
+              + 'it on the CPU for this broadcast.')
+            + ' That costs real headroom at 4K; a 1080p output frame size gives '
+            + `it back. (${tail})`);
           this._play(this.current.item, this.position,
             { duration: this.current.duration });
           return;
@@ -3233,9 +3239,12 @@ export class PipelinePlayout extends EventEmitter {
             && this.profile?.tonemap === 'cpu' && !this._tonemapGaveUp) {
           this._tonemapGaveUp = true;
           this._demote({ tonemap: 'none' });
-          this.emit('warn', 'Tone mapping failed on the GPU and the CPU. This '
-            + 'HDR title will go out with washed-out colours rather than not '
-            + `at all. (${tail})`);
+          this.emit('warn', (this.profile?.tonemapForced
+            ? 'The HDR tone mapping chosen in Settings could not run on this '
+              + 'machine, and neither could the CPU fallback. '
+            : 'Tone mapping failed on the GPU and the CPU. ')
+            + 'This HDR title will go out with washed-out colours rather than '
+            + `not at all. (${tail})`);
           this._play(this.current.item, this.position,
             { duration: this.current.duration });
           return;

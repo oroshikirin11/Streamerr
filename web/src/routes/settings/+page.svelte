@@ -462,6 +462,7 @@
           videoBitrate: cfg.encoder.videoBitrate,
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
+          tonemap: cfg.encoder.tonemap || 'auto',
           frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
@@ -946,6 +947,27 @@
     {:else}
       <input bind:value={cfg.encoder.backend} spellcheck="false" />
     {/if}
+
+    <label>HDR tone mapping</label>
+    <select bind:value={cfg.encoder.tonemap}>
+      <option value="auto">Automatic</option>
+      <option value="vaapi">GPU</option>
+      <option value="cpu">CPU</option>
+      <option value="none">Off</option>
+    </select>
+    <p class="muted small">
+      {#if cfg.encoder.tonemap === 'auto'}
+        Picks whatever this machine can do, and falls back on its own.
+      {:else if cfg.encoder.tonemap === 'vaapi'}
+        Free, but the curve is fixed and not every driver has it. Falls back to
+        the CPU if this one does not.
+      {:else if cfg.encoder.tonemap === 'cpu'}
+        Works anywhere and looks different; costs CPU that subtitles and
+        decoding may also want. Roughly four times dearer at 4K than at 1080p.
+      {:else}
+        HDR goes out untouched — fastest, but the colours will look washed out.
+      {/if}
+    </p>
 
     <label>Render device</label>
     {#if options?.renderDevices?.length}

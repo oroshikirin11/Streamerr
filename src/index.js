@@ -172,15 +172,25 @@ async function tuneProfile(profile, selection, srcPath = null) {
    * way. That question is settled by attempting it and believing the
    * result; see the tonemap demotion in pipeline.js.
    */
-  globalThis.__tonemapCap ??= await vaapiTonemapPresent(profile.device);
-  if (globalThis.__tonemapCap) {
-    profile.tonemap = 'vaapi';
+  const wanted = config.encoder?.tonemap ?? 'auto';
+  if (wanted !== 'auto') {
+    // Taken at face value. If the hardware disagrees the demotion ladder
+    // catches it and says whose choice failed, rather than quietly
+    // overriding it here where nobody would ever see.
+    profile.tonemap = wanted;
+    profile.tonemapForced = true;
   } else {
-    globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
-    profile.tonemap = globalThis.__tonemapCpu ? 'cpu' : 'none';
+    globalThis.__tonemapCap ??= await vaapiTonemapPresent(profile.device);
+    if (globalThis.__tonemapCap) {
+      profile.tonemap = 'vaapi';
+    } else {
+      globalThis.__tonemapCpu ??= await cpuTonemapAvailable();
+      profile.tonemap = globalThis.__tonemapCpu ? 'cpu' : 'none';
+    }
+    profile.tonemapForced = false;
   }
   // Said once, and only when there is HDR content to say it about.
-  if (selection?.video?.hdr && !globalThis.__tonemapSaid) {
+  if (selection?.video?.hdr && !globalThis.__tonemapSaid && !profile.tonemapForced) {
     globalThis.__tonemapSaid = true;
     console.log(profile.tonemap === 'vaapi'
       ? '[hdr] tone mapping on the GPU'
@@ -190,6 +200,10 @@ async function tuneProfile(profile, selection, srcPath = null) {
           + 'it back.'
         : '[hdr] nothing here can tone map — HDR titles will look washed out. '
           + 'Colours wrong; the broadcast runs.');
+  }
+  if (selection?.video?.hdr && profile.tonemapForced && !globalThis.__tonemapSaid) {
+    globalThis.__tonemapSaid = true;
+    console.log(`[hdr] tone mapping set to "${wanted}" in settings — not auto-detected`);
   }
 
   if (config.encoder.gpuSubs === false) return;
@@ -915,6 +929,11 @@ app.put('/api/config', (req, res) => {
   }
   if (patch.encoder?.fps !== undefined) {
     patch.encoder.fps = clamp(patch.encoder.fps, 1, 240, config.encoder.fps);
+  }
+  if (patch.encoder?.tonemap !== undefined) {
+    // An unknown value must not silently become a filter graph.
+    patch.encoder.tonemap = ['auto', 'vaapi', 'cpu', 'none']
+      .includes(patch.encoder.tonemap) ? patch.encoder.tonemap : config.encoder.tonemap;
   }
   if (patch.encoder?.gopSeconds !== undefined) {
     patch.encoder.gopSeconds = clamp(patch.encoder.gopSeconds, 1, 60, config.encoder.gopSeconds);

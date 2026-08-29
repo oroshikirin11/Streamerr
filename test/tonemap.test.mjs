@@ -66,5 +66,22 @@ for (const t of ['vaapi', 'cpu', 'none']) {
   check(`tonemap=${t} re-uploads if it downloads`, ok, true);
 }
 
+console.log('\nthe settings override');
+// An explicit choice is taken at face value: overriding it in tuneProfile
+// would be invisible, so the demotion ladder is what corrects bad choices.
+for (const [want, expected] of [
+  ['vaapi', 'scale_vaapi=w=1920:h=1038,tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709'],
+  ['cpu', 'scale_vaapi=w=1920:h=1038,hwdownload,format=p010le,'
+    + 'zscale=t=linear:npl=100,tonemap=hable:desat=0,'
+    + 'zscale=p=bt709:t=bt709:m=bt709:r=tv,format=nv12,hwupload'],
+  ['none', 'scale_vaapi=w=1920:h=1038:format=nv12'],
+]) {
+  check(`forced ${want} builds its own graph`,
+    scaleAndTonemap(hdr, { tonemap: want, tonemapForced: true }, rect, ''), expected);
+}
+// Only valid values ever reach the graph; the server coerces the rest.
+check('an unknown setting cannot reach the graph',
+  ['auto', 'vaapi', 'cpu', 'none'].includes('nonsense'), false);
+
 console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');
 process.exit(failures ? 1 : 0);
