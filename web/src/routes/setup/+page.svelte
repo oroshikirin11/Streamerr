@@ -61,6 +61,33 @@
   let provider = $state('jellyfin');
   let jellyfinUrl = $state('');
   let jellyfinKey = $state('');
+  let smbHost = $state('');
+  let smbShare = $state('');
+  let smbPath = $state('');
+  let smbGuest = $state(false);
+  let smbUser = $state('');
+  let smbPass = $state('');
+
+  /**
+   * A pasted smb:// URL or UNC path spreads into the fields below, so what is
+   * shown is exactly what will be read. Same behaviour as the settings page —
+   * an operator who has a share address in the clipboard should not have to
+   * take it apart by hand.
+   */
+  function splitSmbHost() {
+    let h = smbHost.trim().replace(/^smb:\/\//i, '').replace(/^\\\\/, '').replace(/\\/g, '/');
+    const at = h.indexOf('@');
+    if (at !== -1) {
+      const cred = h.slice(0, at); h = h.slice(at + 1);
+      const colon = cred.indexOf(':');
+      smbUser = colon === -1 ? cred : cred.slice(0, colon);
+      if (colon !== -1) smbPass = cred.slice(colon + 1);
+      smbGuest = false;
+    }
+    const segs = h.split('/').filter(Boolean);
+    smbHost = segs[0] ?? '';
+    if (segs.length > 1) { smbShare = segs[1]; smbPath = segs.slice(2).join('/'); }
+  }
   let fsRoots = $state('');
   let browsing = $state(false);
 
@@ -127,6 +154,9 @@
       jellyfinUrl = cfg.library.jellyfin?.url || '';
       jellyfinKey = cfg.library.jellyfin?.apiKey === '__SET__' ? '__SET__' : '';
       fsRoots = (cfg.library.filesystem?.roots || []).join('\n');
+      const sm = cfg.library.smb ?? {};
+      smbHost = sm.host || ''; smbShare = sm.share || ''; smbPath = sm.path || '';
+      smbGuest = sm.guest === true; smbUser = sm.username || '';
       rules = cfg.library.pathMap || [];
       cfgTracks = {
         languages: cfg.tracks?.languages ?? ['eng'],
@@ -162,9 +192,19 @@
   }
 
   function libraryPayload() {
-    return provider === 'jellyfin'
-      ? { provider, jellyfin: { url: jellyfinUrl, apiKey: jellyfinKey }, pathMap: rules }
-      : { provider, filesystem: { roots: parseList(fsRoots.replace(/\n/g, ',')) } };
+    if (provider === 'jellyfin') {
+      return { provider, jellyfin: { url: jellyfinUrl, apiKey: jellyfinKey }, pathMap: rules };
+    }
+    if (provider === 'smb') {
+      return { provider,
+        smb: {
+          host: smbHost.trim(), share: smbShare.trim(), path: smbPath.trim(),
+          guest: smbGuest, username: smbGuest ? '' : smbUser.trim(),
+          // Only when typed, so a saved password survives a pass through setup.
+          ...(smbPass ? { password: smbPass } : {}),
+        } };
+    }
+    return { provider, filesystem: { roots: parseList(fsRoots.replace(/\n/g, ',')) } };
   }
 
   async function testLibrary() {
@@ -348,6 +388,7 @@
       <div class="row">
         <label class="pick"><input type="radio" bind:group={provider} value="jellyfin" /> Jellyfin</label>
         <label class="pick"><input type="radio" bind:group={provider} value="filesystem" /> A folder</label>
+        <label class="pick"><input type="radio" bind:group={provider} value="smb" /> SMB share</label>
       </div>
       {#if provider === 'jellyfin'}
         <p class="muted">
@@ -358,6 +399,27 @@
         <input bind:value={jellyfinUrl} placeholder="http://192.168.1.10:8096" spellcheck="false" />
         <label>API key</label>
         <input type="password" bind:value={jellyfinKey} placeholder="from Dashboard → API Keys" />
+      {:else if provider === 'smb'}
+        <p class="muted">
+          Read over the network — no mount, no privileges, read-only.
+        </p>
+        <label>Server (hostname, IP, or a full smb:// address)</label>
+        <input bind:value={smbHost} spellcheck="false"
+               placeholder="nas.local  or  smb://user@nas/share/folder"
+               onchange={splitSmbHost} />
+        <label>Share name</label>
+        <input bind:value={smbShare} spellcheck="false" placeholder="media" />
+        <label>Folder within the share (optional)</label>
+        <input bind:value={smbPath} spellcheck="false" placeholder="anime" />
+        <label class="pick" style="margin-top:10px;">
+          <input type="checkbox" bind:checked={smbGuest} /> No password (guest share)
+        </label>
+        {#if !smbGuest}
+          <label>Username</label>
+          <input bind:value={smbUser} spellcheck="false" />
+          <label>Password</label>
+          <input type="password" bind:value={smbPass} />
+        {/if}
       {:else}
         <p class="muted">
           One directory per line. Posters are read from poster.jpg or folder.jpg
