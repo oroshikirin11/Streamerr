@@ -443,7 +443,7 @@
 
   const ACK_KEY = 'jsr-ack-cost';
   let ackCost = $state(0);
-  const costShown = $derived(Boolean(liveCost) && costLevel > ackCost);
+  const costShown = $derived(warningsOn && Boolean(liveCost) && costLevel > ackCost);
   function ackCostNow() {
     ackCost = costLevel;
     try { localStorage.setItem(ACK_KEY, String(ackCost)); } catch { /* private mode */ }
@@ -578,8 +578,18 @@
    * the button flashed 'Applying…' for a few milliseconds and then nothing
    * visible happened until the overlay appeared out of nowhere.
    */
-  let pending = $state('');   // '' | 'apply' | 'hide'
+  let pending = $state('');   // '' | 'apply' | 'hide' | 'apply-hidden'
   let pendingTimer = null;
+  /**
+   * How long a change takes to reach air, from the setting rather than a
+   * guess. This used to be the words "about 15 seconds", which stopped being
+   * true the moment the cushion became configurable — and was only ever
+   * right by coincidence.
+   */
+  const applySecs = $derived(Math.max(0, Math.round(cfg?.buffer?.applySeconds ?? 15)));
+  const applyWhen = $derived(applySecs < 1 ? 'immediately' : `in about ${applySecs} seconds`);
+  /** Studio's own cost notices, which an operator can turn off. */
+  const warningsOn = $derived(cfg?.buffer?.studioWarnings !== false);
 
   async function apply() {
     busy = 'apply'; error = '';
@@ -599,7 +609,7 @@
       // Cleared on a timer rather than on a signal: the panel is not told the
       // reserve depth, so there is nothing to count down from honestly. The
       // note says "about", and the timer outlasts a full bank.
-      pendingTimer = setTimeout(() => { pending = ''; }, 20000);
+      pendingTimer = setTimeout(() => { pending = ''; }, applySecs * 1000 + 6000);
     } catch (err) { error = err.message; }
     busy = '';
   }
@@ -627,7 +637,7 @@
       // had done nothing.
       pending = 'hide';
       clearTimeout(pendingTimer);
-      pendingTimer = setTimeout(() => { pending = ''; }, 20000);
+      pendingTimer = setTimeout(() => { pending = ''; }, applySecs * 1000 + 6000);
     } catch (err) { error = err.message; }
     busy = '';
   }
@@ -730,8 +740,8 @@
     <p class="pending" role="status">
       <span class="spin" aria-hidden="true"></span>
       {pending === 'hide'
-        ? 'Taking the overlays off air — about 15 seconds.'
-        : 'Applied — going on air in about 15 seconds.'}
+        ? `Taking the overlays off air — ${applyWhen}.`
+        : `Applied — going on air ${applyWhen}.`}
       The broadcast plays out what it has already encoded first, so viewers
       see no interruption.
     </p>

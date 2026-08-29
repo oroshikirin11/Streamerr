@@ -22,6 +22,18 @@
   const uid = () => Math.random().toString(36).slice(2, 10);
 
   /**
+   * Lowering the depth must carry the apply point down with it, or the
+   * setting would ask for more cushion than exists and the engine would
+   * quietly clamp it — the slider would then be showing a number that never
+   * happens.
+   */
+  function setBuffer(n) {
+    const secs = Math.min(60, Math.max(1, Math.round(Number(n) || 15)));
+    cfg.buffer.seconds = secs;
+    if (cfg.buffer.applySeconds > secs) cfg.buffer.applySeconds = secs;
+  }
+
+  /**
    * A saved secret arrives as the sentinel, and rendering that in a password
    * box shows eight dots that look like a value and are not: the placeholder
    * never appears, and editing means clearing a fake string first. So the
@@ -232,6 +244,7 @@
     try {
       cfg = await api.config();
       if (cfg.publish) cfg.publish = unmaskPublish(cfg.publish);
+      cfg.buffer = { seconds: 15, applySeconds: 15, studioWarnings: true, ...(cfg.buffer ?? {}) };
       keyStored = cfg.owncast.streamKey === '__SET__';
       tokenStored = cfg.owncast.accessToken === '__SET__';
       accessToken = '';
@@ -315,7 +328,8 @@
     // the one actually in effect.
     a.hours = Math.min(168, Math.max(1, Math.round(Number(a.hours) || 12)));
     await api.saveConfig({
-        publish: maskPublish(cfg.publish), library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
+        publish: maskPublish(cfg.publish),
+        buffer: cfg.buffer, library: { autoRefresh: { enabled: a.enabled, hours: a.hours } } });
     saved = 'autoscan';
     setTimeout(() => { if (saved === 'autoscan') saved = ''; }, 2500);
   }
@@ -553,6 +567,63 @@
       Every destination receives the same encode, so extras cost almost
       nothing. A destination that cannot be reached is skipped and the rest
       keep streaming.
+    </p>
+  </section>
+
+  <!-- Buffer -->
+  <section class="card">
+    <h3>Buffer</h3>
+    <p class="muted small" style="margin-top:0">
+      The encoded cushion held ahead of air. Deeper survives a title that
+      cannot quite keep up, at the cost of longer before any change reaches
+      viewers and more work thrown away on every skip. Applies to the GPU
+      path; titles that burn subtitles on the CPU manage their own.
+    </p>
+
+    <label>Depth <span class="muted small">{cfg.buffer.seconds} seconds</span></label>
+    <div class="protos">
+      {#each [5, 10, 15, 30, 45, 60] as n}
+        <button type="button" class="proto" class:on={cfg.buffer.seconds === n}
+                onclick={() => setBuffer(n)}>{n}s</button>
+      {/each}
+    </div>
+    <label>Or a custom value <span class="muted small">1–60 seconds</span></label>
+    <input type="number" min="1" max="60" value={cfg.buffer.seconds}
+           oninput={(e) => setBuffer(+e.currentTarget.value)} />
+
+    <label>
+      Overlay changes go on air
+      <span class="muted small">
+        {cfg.buffer.applySeconds < 1
+          ? 'immediately'
+          : `after about ${cfg.buffer.applySeconds}s`}
+      </span>
+    </label>
+    <input type="range" min="0" max={cfg.buffer.seconds} step="1"
+           value={cfg.buffer.applySeconds}
+           oninput={(e) => { cfg.buffer.applySeconds = +e.currentTarget.value; }} />
+    <p class="muted small">
+      {#if cfg.buffer.applySeconds >= cfg.buffer.seconds}
+        Nothing is discarded, so viewers see no interruption — the change
+        appears when the cushion drains. This is the safe choice.
+      {:else if cfg.buffer.applySeconds < 1}
+        The cushion is dropped and the change goes out at once. Viewers
+        re-buffer while the encoder catches up, and everything already
+        encoded is re-encoded.
+      {:else}
+        Part of the cushion is discarded, so the change arrives sooner and
+        that much has to be re-encoded. Viewers keep watching as long as the
+        encoder stays ahead.
+      {/if}
+    </p>
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+      <input type="checkbox" bind:checked={cfg.buffer.studioWarnings} style="width:auto" />
+      Show encoder cost warnings in Studio
+    </label>
+    <p class="muted small">
+      The red notes about moving pictures and animated GIFs. Turning them off
+      does not change what is reported in the console when a clip runs slow.
     </p>
   </section>
 

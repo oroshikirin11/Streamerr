@@ -799,6 +799,24 @@ app.put('/api/config', (req, res) => {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
   }
   if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, publishConfig());
+  /**
+   * The bank is sized from these, so they are clamped here as well as in the
+   * engine — a hand-edited config should not be able to ask for a 10-hour
+   * cushion, and applySeconds above the depth would silently do nothing.
+   */
+  if (patch.buffer) {
+    const n = (v, lo, hi, d) => {
+      const x = Number(v);
+      return Number.isFinite(x) ? Math.min(hi, Math.max(lo, Math.round(x))) : d;
+    };
+    const secs = n(patch.buffer.seconds, 1, 60, config.buffer?.seconds ?? 15);
+    patch.buffer = {
+      ...patch.buffer,
+      seconds: secs,
+      applySeconds: n(patch.buffer.applySeconds, 0, secs, secs),
+      studioWarnings: patch.buffer.studioWarnings !== false,
+    };
+  }
   if (Array.isArray(patch.library?.sources)) {
     patch.library.sources = restoreSourceSecrets(patch.library.sources);
   }
