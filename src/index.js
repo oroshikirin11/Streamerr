@@ -1246,6 +1246,10 @@ app.post('/api/check/library', async (req, res) => {
      */
     const body = req.body ?? {};
     const submitted = Array.isArray(body.sources) ? body : (body.provider ? { sources: [body] } : null);
+    // The panel holds no real secrets, so a submitted source carries the
+    // sentinel. Without resolving it here, testing a source with a saved
+    // key probed with the literal string and reported a 401.
+    if (submitted) submitted.sources = restoreSourceSecrets(submitted.sources);
     const probe = submitted ? makeLibrary({ library: submitted }) : library;
     if (!probe.configured) return res.status(400).json({ error: 'Not configured' });
     res.json(await probe.test());

@@ -302,9 +302,17 @@
     return { sources: [src] };
   }
 
+  /**
+   * Tests the media half only.
+   *
+   * It used to send the whole payload, catalogue included, so pressing Test
+   * while configuring a share reported "Jellyfin rejected the API key" — an
+   * error about a step the operator had not reached yet, on a screen asking
+   * about something else. The catalogue has its own Check, one step later.
+   */
   async function testLibrary() {
     testing = true; libResult = null;
-    try { libResult = { ok: true, ...(await api.checkLibrary(libraryPayload())) }; }
+    try { libResult = { ok: true, ...(await api.checkLibrary({ sources: [mediaSource()] })) }; }
     catch (err) { libResult = { ok: false, error: err.message }; }
     finally { testing = false; }
   }
