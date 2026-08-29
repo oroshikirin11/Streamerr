@@ -379,3 +379,50 @@ The engine is not H.264-shaped — its two ENDS are. The middle, which is the
 part that was expensive to get right, carries over to any codec untouched.
 Adding AV1 is: new backend entries, delivery tagging, a preview that can
 decode it, and the test matrix. Not a re-architecture.
+
+---
+
+## Part 9 — the gate is going away
+
+Recorded 2026-08-29: Owncast is to be replaced, medium term, by our own
+service built on top of it, accepting many more input variants.
+
+That **removes the blocker named throughout this document**. "Does Owncast
+accept Enhanced RTMP" was the hard gate on both AV1 (Part 7) and HDR output
+(Part 3), and it was the one thing outside our control. If we own the
+receiver, we accept what we choose to send.
+
+### The consequence: stop sending FLV
+
+RTMP carries FLV, and FLV is why HEVC and AV1 need the Enhanced RTMP extension
+and codec-tag games at all — see the `-tag:v 7` note in Part 8. **mpegts has no
+such problem**: it carries HEVC and AV1 natively, and that was measured working
+on this machine already (Part 3).
+
+We ALSO already emit SRT, which is mpegts. So the cleanest ingest for our own
+service is **SRT/mpegts, not RTMP/FLV** — at which point the codec question
+largely disappears on the sending side, and Part 8's FLV tagging work is not
+needed at all.
+
+This should shape the receiver's design: if it is being written anyway, take
+mpegts on ingest and the whole Enhanced-RTMP problem never exists.
+
+### What is still constrained
+
+Owning the receiver does not own the viewer. Delivery to browsers still
+decides the codec:
+
+- **AV1** — decoded by Chrome, Firefox, Edge, Safari 17+. Viable.
+- **HEVC** — Safari-mostly. Still not a general answer.
+- **HDR rendering** in a browser remains weak regardless of codec, and most
+  viewers have SDR displays. SDR out stays the correct default; HDR output is
+  for the SRT-to-a-real-player case.
+
+So AV1 remains the right target, and it is now unblocked end to end:
+SVT-AV1 encode (measured live-capable at 1080p on both hosts) -> SRT/mpegts
+ingest into our own service -> HLS/fMP4 -> browsers that already decode it.
+
+### Unchanged by any of this
+
+The Studio preview still uses `mpegts.js` and would go blind on AV1. That is
+ours to fix whatever the receiver does.
