@@ -458,6 +458,7 @@ async function sgArtId(it) {
 }
 
 let sgAnnounced = null;
+let sgRestateTimer = null;
 async function sgNowPlaying({ announce = false } = {}) {
   if (!sgActive()) return;
   const snap = engine?.snapshot?.();
@@ -702,7 +703,23 @@ function buildEngine({ profile, selection }) {
     });
   });
   e.on('warn', (m) => { dpush('warn', m); broadcast('warn', { message: redact(String(m)) }); });
-  e.on('log', (m) => dpush('ffmpeg', m));
+  e.on('log', (m) => {
+    dpush('ffmpeg', m);
+    /**
+     * An EXTRA destination reconnecting is invisible to the engine — the
+     * fifo muxer handles it inside ffmpeg — but its own log line is the
+     * signal, and a restarted receiver has empty in-memory metadata and
+     * artwork. Restate everything, debounced (recoveries can rapid-fire),
+     * with a beat of grace for the receiver's HTTP to follow its RTMP up.
+     */
+    if (String(m).includes('Recovery successful') && !sgRestateTimer) {
+      sgRestateTimer = setTimeout(() => {
+        sgRestateTimer = null;
+        sgArtPushed.clear();
+        sgSchedule(); sgNowPlaying();
+      }, 2000);
+    }
+  });
   // Distinct from a generic warning: this one predicts the stream failing.
   e.on('tooslow', (d) => broadcast('error', {
     message: `Cannot encode fast enough (${d.speed}x). The stream will stall — `
