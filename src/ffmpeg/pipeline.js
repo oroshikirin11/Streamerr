@@ -3871,8 +3871,17 @@ export function planOverlayPipe({
    * Configured-but-hidden overlays count as something to draw, so the
    * show/hide toggle stays free.
    */
-  const anythingToDraw = Boolean(sub?.filter)
-    || (overlayImages ?? []).length > 0
+  /**
+   * STUDIO content only — subtitles alone never arm the pipe. Operator
+   * decree after Jujutsu Kaisen regressed: the proven inline graphs are
+   * the default for plain playback, subtitled or not, and the compositor
+   * machinery exists exactly when the operator is compositing. A clip
+   * with subtitles and no studio overlays runs the same graph it ran
+   * before Phase 1; the first studio apply arms the pipe through the
+   * cushion-kept respawn, and from then on applies are live swaps.
+   */
+  const anythingToDraw = (overlayImages ?? []).length > 0
+    || Boolean(overlayAnimated)
     || (profile.overlay ?? []).some((i) => i?.enabled !== false);
   if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);

@@ -47,11 +47,18 @@ const planFor = (params, extra = {}) => planOverlayPipe({
   selection: params.selection,
   sub: subOf(params),
   duration: params.duration ?? null,
+  overlayImages: params.overlayImages ?? [],
 });
 
 console.log('\neligibility — every no must route somewhere that works');
-check('subtitled 16:9 is eligible',
-  planFor(cases['subtitled 16:9, gpu canvas']) !== null, true);
+// Operator decree: subtitles ALONE never arm the pipe — plain playback
+// (subtitled or not) runs the proven pre-pipe graphs, and the compositor
+// machinery exists exactly when the studio is compositing.
+check('subtitled 16:9 WITHOUT studio content stays inline',
+  planFor(cases['subtitled 16:9, gpu canvas']), null);
+check('subtitled 16:9 WITH a studio picture is eligible',
+  planFor({ ...cases['subtitled 16:9, gpu canvas'],
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }] }) !== null, true);
 // A truly bare clip now takes the exact pre-pipe fast path — the composite
 // pass measured 0.24x on a 4K title compositing nothing.
 check('subtitle-less clip WITH a picture is eligible',
@@ -67,8 +74,9 @@ check('a clip with NOTHING to draw is refused — no free composite',
 check('configured-but-hidden overlays still pipe (show/hide stays free)',
   planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
     { overlay: [{ type: 'image', file: 'x.png', enabled: true }] }) !== null, true);
-check('probed pillarbox with subtitles is eligible',
-  planFor(cases['subtitled pillarbox, pad-overlay']) !== null, true);
+check('probed pillarbox with subtitles + a picture is eligible',
+  planFor({ ...cases['subtitled pillarbox, pad-overlay'],
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }] }) !== null, true);
 check('pillarbox WITHOUT subtitles is refused — barsGraph is unprobed',
   planFor({ ...cases['no subtitles, fast path'], profile: { ...cases['no subtitles, fast path'].profile, gpuSubs: true } }), null);
 check('subtitles with gpuSubs off are refused — alpha unproven',
@@ -99,11 +107,15 @@ for (const name of ['subtitled 16:9, gpu canvas', 'subtitled pillarbox, pad-over
     ...params,
     profile: { ...params.profile, overlayPipe: true },
     overlayPipe: '/tmp/x.fifo',
+    // the decree: studio content arms the pipe; these fixtures test the
+    // piped graph, so give them a still.
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
   };
   const args = buildSourceArgs(piped);
   const i = args.indexOf('/tmp/x.fifo');
   check(`${name}: main graph consumes the pipe`, i > 0, true);
   const spec = buildRendererSpec({
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
     profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
     shift: piped.offset, duration: piped.duration,
     extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
@@ -124,6 +136,7 @@ for (const name of ['subtitled 16:9, gpu canvas', 'subtitled pillarbox, pad-over
 console.log('\nwide-canvas carries the padded frame');
 const wc = cases['subtitled pillarbox, wide-canvas'];
 const wcSpec = buildRendererSpec({
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
   profile: { ...wc.profile, overlayPipe: true }, selection: wc.selection,
   srcPath: wc.srcPath, shift: 0, duration: wc.duration,
   extractedPath: wc.extractedPath,
@@ -135,6 +148,7 @@ check('renderer pads the canvas itself',
 console.log('\ncontinuation — the renderer keys off the shift');
 const jjk = cases['subtitled 16:9, gpu canvas'];
 const at = (shift) => buildRendererSpec({
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
   profile: { ...jjk.profile, overlayPipe: true }, selection: jjk.selection,
   srcPath: jjk.srcPath, shift, duration: jjk.duration,
   extractedPath: jjk.extractedPath, fontsDir: jjk.fontsDir,
@@ -184,6 +198,7 @@ console.log('\nzero restarts: EVERYTHING rides the pipe in live mode');
     stillOnly.spec.inputs.join(' ').includes('r=24000/2002'), true);
   check('bouncing text rides the pipe too',
     buildRendererSpec({
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
       profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
       shift: 0, duration: piped.duration,
       extractedPath: piped.extractedPath ?? null,
@@ -205,6 +220,7 @@ console.log('\nperformance interior — the regression that hit the N100');
     filter: "subtitles=filename='/cache/band.ass'" };
   const prof = { ...mr.profile, overlayPipe: true };
   const quiet = buildRendererSpec({
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
     profile: prof, selection: mr.selection, srcPath: mr.srcPath,
     shift: 0, duration: mr.duration, extractedPath: mr.extractedPath,
     subBand: band,
@@ -238,6 +254,7 @@ console.log('\nperformance interior — the regression that hit the N100');
   // The swap stamps clip-relative timestamps continuing from the encode
   // head — the timestamps ARE the alignment now.
   const cont = buildRendererSpec({
+    overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }],
     profile: prof, selection: mr.selection, srcPath: mr.srcPath,
     shift: 154.2, clipOffset: 33.7, duration: mr.duration,
     extractedPath: mr.extractedPath, subBand: band, pin,

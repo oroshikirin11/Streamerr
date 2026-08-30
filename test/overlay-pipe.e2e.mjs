@@ -59,6 +59,11 @@ writeFileSync(ass1, ass('OVERLAY'));
 writeFileSync(ass2, ass(''));            // the "apply": everything removed
 
 console.log('\npreparing a 10s clip');
+let armImg = null;
+const armPng = join(dir, 'arm.png');
+await run(['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray@0.5:s=32x32',
+  '-frames:v', '1', armPng]);
+armImg = armPng;
 const gen = await run(['-y', '-v', 'error', '-f', 'lavfi',
   '-i', 'testsrc2=s=640x360:r=24', '-t', '10',
   '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', media]);
@@ -76,9 +81,12 @@ const selection = {
   audio: { typeIndex: 0 },
   subtitle: { codec: 'ass', typeIndex: 0, external: false },
 };
+// The decree: the pipe arms only with studio content — act A carries a
+// tiny grey arming still alongside its subtitles.
 const specFor = (path, shift) => buildRendererSpec({
   profile, selection, srcPath: media, shift, clipOffset: 0, duration: 10,
   extractedPath: path,
+  overlayImages: armImg ? [{ path: armImg, size: 0.05, x: 0.05, y: 0.05 }] : [],
 });
 
 const feed = new OverlayFeed({ path: fifo, log: (m) => console.log('   ', m.trim()) });
@@ -94,6 +102,7 @@ try {
   const args = buildSourceArgs({
     srcPath: media, offset: 0, profile, selection,
     extractedPath: ass1, duration: 10, overlayPipe: fifo,
+    overlayImages: [{ path: armImg, size: 0.05, x: 0.05, y: 0.05 }],
   });
   const iMedia = args.indexOf('-i');
   args.splice(iMedia, 0, '-re');
