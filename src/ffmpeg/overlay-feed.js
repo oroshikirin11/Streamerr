@@ -48,10 +48,11 @@ export class OverlayFeed {
     this.active = false;
   }
 
-  /** Whole frames delivered since the last reset — the shared clock. */
-  get frames() {
-    return this._frameBytes ? Math.floor(this._bytes / this._frameBytes) : 0;
-  }
+  /**
+   * Bytes forwarded since the last reset. Diagnostics only — with NUT the
+   * TIMESTAMPS are the continuation clock, so nothing depends on this.
+   */
+  get bytes() { return this._bytes; }
 
   /**
    * Fresh pipe for a fresh source process.
@@ -104,16 +105,11 @@ export class OverlayFeed {
     const done = new Promise((resolve) => {
       child.on('close', (code) => {
         if (this._renderer?.child === child) this._renderer = null;
-        // The pad that keeps the stream frame-aligned after a mid-frame
-        // death. Counted as delivered: the reader will consume it.
-        if (this._sock === sock && this._frameBytes) {
-          const leftover = this._bytes % this._frameBytes;
-          if (leftover) {
-            const pad = Buffer.alloc(this._frameBytes - leftover);
-            this._bytes += pad.length;
-            sock.write(pad);
-          }
-        }
+        // No padding here, deliberately. The canvas travels as NUT, which
+        // is framed and timestamped: the demuxer survives a writer killed
+        // mid-packet and resyncs on the next renderer's stream (measured —
+        // one 'damaged' log line, zero lost video). Padding raw zeros into
+        // a NUT stream would BE the corruption it used to prevent.
         if (code !== 0 && code !== null && this._sock === sock) {
           this.log(`[overlay-pipe] renderer exited ${code}: ${tail.split('\n').filter(Boolean).slice(-2).join(' | ')}\n`);
         }

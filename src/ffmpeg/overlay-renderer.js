@@ -78,7 +78,21 @@ export function rendererArgs(spec) {
     '-map', `[${out}]`,
     // No audio, ever. This is a picture layer.
     '-an',
-    ...pipeFormatArgs(spec).slice(0, 4),   // -f rawvideo -pix_fmt rgba
+    /**
+     * NUT, not headerless rawvideo — and this one choice carries most of
+     * the design:
+     *
+     *  - frames are TIMESTAMPED, so the renderer only sends a frame when
+     *    the canvas CHANGES and the composite holds the last one. Uploads
+     *    drop from every-frame to roughly the subtitle change rate, which
+     *    is the difference between the N100 broadcasting and not.
+     *  - a replacement renderer opens a fresh NUT stream and the demuxer
+     *    resyncs onto it mid-read — measured: a SIGKILLed writer cost one
+     *    'damaged' log line and zero frames of the video input.
+     *  - the stream is self-describing, so the geometry-mismatch class of
+     *    bugs (headerless rawvideo shears silently) cannot exist.
+     */
+    '-c:v', 'rawvideo', '-f', 'nut',
     'pipe:1',
   ];
 }
@@ -91,7 +105,7 @@ export function rendererArgs(spec) {
  */
 export function pipeInputArgs(spec, path, { capSecs = null } = {}) {
   return [
-    ...pipeFormatArgs(spec),
+    '-f', 'nut',
     /**
      * The input-side bound is what lets the main process EXIT.
      *

@@ -17,7 +17,7 @@ import { rmSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
-  pipeFormatArgs, pipeInputArgs, rendererArgs, pipeBytesPerSecond,
+  pipeInputArgs, rendererArgs, pipeBytesPerSecond,
   makePipe, holdOpen,
 } from '../src/ffmpeg/overlay-renderer.js';
 
@@ -36,20 +36,21 @@ const spec = {
   filters: ['[0:v]null[out]'],
 };
 
-console.log('\nboth ends agree');
-const fmt = pipeFormatArgs(spec);
-check('format is rawvideo rgba at the agreed geometry', fmt,
-  ['-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', '1920x1038', '-r', '24000/1001']);
-// The encoder's input args must repeat the renderer's format exactly, or the
-// frames are misread with no error anywhere.
+console.log('\nboth ends speak NUT');
+// Self-describing on purpose: with headerless rawvideo a geometry mismatch
+// sheared the picture with no error anywhere. NUT carries its own format
+// and timestamps, so that bug class cannot exist.
 const consumer = pipeInputArgs(spec, '/tmp/x.fifo');
-check('the consumer repeats it verbatim', consumer.slice(0, fmt.length), fmt);
+check('the consumer demuxes NUT', consumer.slice(0, 2), ['-f', 'nut']);
 check('and then names the pipe', consumer.slice(-2), ['-i', '/tmp/x.fifo']);
+check('a bounded consumer carries -t before the pipe',
+  pipeInputArgs(spec, '/tmp/x.fifo', { capSecs: 12 }).join(' '),
+  '-f nut -t 12.000 -i /tmp/x.fifo');
 
 console.log('\nthe renderer command');
 const args = rendererArgs(spec);
-check('emits rawvideo rgba to stdout', args.slice(-5),
-  ['-an', '-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1'].slice(-5));
+check('emits rawvideo-in-NUT to stdout', args.slice(-6),
+  ['-an', '-c:v', 'rawvideo', '-f', 'nut', 'pipe:1']);
 check('maps the spec output label', args[args.indexOf('-map') + 1], '[out]');
 check('carries the spec inputs', args.includes('color=c=red:s=1920x1038:r=24,format=rgba'), true);
 // -re would pace the canvas at 1x and throttle a cushion being built ahead.

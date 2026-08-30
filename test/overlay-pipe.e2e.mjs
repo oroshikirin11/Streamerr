@@ -77,7 +77,8 @@ const selection = {
   subtitle: { codec: 'ass', typeIndex: 0, external: false },
 };
 const specFor = (path, shift) => buildRendererSpec({
-  profile, selection, srcPath: media, shift, duration: 10, extractedPath: path,
+  profile, selection, srcPath: media, shift, clipOffset: 0, duration: 10,
+  extractedPath: path,
 });
 
 const feed = new OverlayFeed({ path: fifo, log: (m) => console.log('   ', m.trim()) });
@@ -115,10 +116,13 @@ try {
 
   if (process.env.NOSWAP !== '1') {
     await sleep(4000);
-    const frames = feed.frames;
-    const shift = frames / spec1.fps;
+    // The continuation clock is TIME now (the engine uses the encode head);
+    // with -re pacing, wall time since start ≈ media time.
+    const shift = 4.0;
+    const before = feed.bytes;
     await feed.swap(rendererArgs(specFor(ass2, shift).spec));
-    console.log(`    swapped at frame ${frames} (${shift.toFixed(2)}s) — encoder untouched`);
+    console.log(`    swapped at ~${shift.toFixed(1)}s media — encoder untouched`
+      + ` (${(before / 1024).toFixed(0)}KB crossed the pipe so far)`);
   }
 
   const res = await mainDone;
@@ -151,6 +155,15 @@ try {
   });
   check(`full clip encoded (${probe} frames of ~240)`,
     Math.abs(Number(probe) - 240) <= 3);
+  // The VFR economy: a static canvas crosses the pipe at the heartbeat
+  // rate (mpdecimate max=12 -> roughly every 13th frame), not the frame
+  // rate. Assert against the canvas's own full-rate cost so the check
+  // scales with geometry instead of hardcoding one — the first version
+  // hardcoded 640x360 while the canvas was 1280x720 and cried wolf.
+  const fullRate = 10 * spec1.fps * spec1.width * spec1.height * 4;
+  check(`canvas bytes stayed change-driven `
+    + `(${(feed.bytes / 1e6).toFixed(0)}MB of ${(fullRate / 1e6).toFixed(0)}MB full-rate)`,
+    feed.bytes < fullRate / 4);
 } finally {
   try { main?.kill('SIGKILL'); } catch { /* gone */ }
   feed.stopSync();

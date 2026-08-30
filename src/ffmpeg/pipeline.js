@@ -188,7 +188,7 @@ export function availableCores() {
  * output settings, so a title can be diagnosed without anyone shipping the
  * media.
  */
-const ISSUES_URL = 'https://github.com/OWNER/Jellystreamerr/issues';
+const ISSUES_URL = 'http://192.168.178.180:3000/Alex/Jellystreamerr/issues';
 
 export function gpuDecodable(video) {
   if (!video) return true;
@@ -1056,30 +1056,24 @@ export class PipelinePlayout extends EventEmitter {
         if (this._stopping || this._selToken !== tok) return undefined;
         if (this.current?.item !== item || this.status !== 'running') return undefined;
         if (!this._pipedClip || !this._ovFeed?.active) return undefined;
-        const shift = this._pipeClipOffset
-          + this._ovFeed.frames / (this._pipeFps || 24);
+        /**
+         * The continuation point is simply where the encode head IS. The
+         * new renderer stamps clip-relative timestamps from here; anything
+         * already queued in framesync pairs first, a frame stamped slightly
+         * behind is dropped benignly, and the heartbeat covers any gap
+         * within half a second. The old byte-counting clock died with the
+         * rawvideo pipe.
+         */
+        const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0);
         const cached = this._cachedSubs(item.srcPath);
         const overlayFile = this._overlayFile(item, 0);
         const overlayImages = this._overlayImages(item, shift);
-        const nowAnimated = (this.profile?.overlay ?? []).some(
-          (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
-        ) || overlayImages.some((i) => i?.animated || isMoving(i));
-        /**
-         * The pin's rate cannot change, so motion added to a half-rate pipe
-         * runs stepped until the next clip plans full rate. Said out loud,
-         * because a silently janky bounce reads as a bug.
-         */
-        if (nowAnimated && this._pipePin
-            && String(this._pipePin.rate) !== String(this._pipePin.eff?.rate ?? '')) {
-          this.emit('log', '[overlay] note: motion added mid-clip runs at half '
-            + 'frame rate until the next episode — the running encoder\'s '
-            + 'canvas rate is fixed\n');
-        }
         const spec = buildRendererSpec({
           profile: this.profile,
           selection: this.selection,
           srcPath: item.srcPath,
           shift,
+          clipOffset: this._pipeClipOffset ?? 0,
           duration: dur,
           extractedPath: cached?.path ?? null,
           fontsDir: cached?.fontsDir ?? null,
@@ -2314,6 +2308,7 @@ export class PipelinePlayout extends EventEmitter {
         selection: this.selection,
         srcPath: item.srcPath,
         shift: offset,
+        clipOffset: offset,
         duration: clipDuration,
         extractedPath: cached?.path ?? null,
         fontsDir: cached?.fontsDir ?? null,
@@ -2333,7 +2328,6 @@ export class PipelinePlayout extends EventEmitter {
           pipePath = this._ovFeed.path;
           this._pipedClip = true;
           this._pipeClipOffset = offset;
-          this._pipeFps = rSpec.fps;
           /**
            * The pipe format, frozen for this source's life. Swaps rebuild
            * the renderer's interior against it — geometry and rate can
@@ -2397,7 +2391,9 @@ export class PipelinePlayout extends EventEmitter {
        * still lands in cacheDir, so nothing downstream can tell the
        * difference between this and an extracted one.
        */
-      subBand: this._subtitleBand(
+      // The same analysis the renderer plan used — running it twice printed
+      // two [band] lines and could in principle disagree with itself.
+      subBand: pipeBand ?? this._subtitleBand(
         this.selection?.subtitle?.external
           ? this.selection.subtitle.path ?? null
           : cached?.path ?? null,
@@ -2641,10 +2637,16 @@ export class PipelinePlayout extends EventEmitter {
       const rect = contentRect(v, this.profile);
       if (this._pipedClip && this._pipePin) {
         const pin = this._pipePin;
-        const half = String(pin.rate) !== String(pin.eff?.rate ?? pin.rate);
-        out.push(`overlay pipe ${pin.width}x${pin.height} RGBA at `
-          + `${half ? 'half' : 'FULL'} frame rate — transferred and uploaded `
-          + 'every canvas frame, composited onto every video frame');
+        out.push(`overlay pipe ${pin.width}x${pin.height} RGBA, `
+          + 'change-driven — frames cross the pipe and upload only when the '
+          + 'canvas changes; the composite itself runs every video frame');
+        // A deliberate trade, chosen with the numbers on the table: the
+        // always-on composite is what makes overlay changes free, and on a
+        // small iGPU it costs real headroom. Say so, with the lever, so an
+        // operator reading this at 0.7x knows it is policy rather than a bug.
+        out.push('  the always-on overlay pipe trades GPU headroom for '
+          + 'restart-free overlay changes; "overlayPipe": false in '
+          + 'config.json trades it back');
       } else {
       const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
       const halfRate = !all.some((i) => i?.motion === 'bounce'
@@ -3802,24 +3804,14 @@ export function planOverlayPipe({
   const width = wide ? profile.width : rect.w;
   const height = wide ? profile.height : rect.h;
   /**
-   * The pipe's RATE is part of its format and cannot change mid-source, so
-   * it is chosen from what is on the canvas AT SPAWN, exactly as the inline
-   * path chooses: half rate unless something moves. An Apply that adds
-   * motion to a half-rate pipe keeps piping — the motion is stepped at half
-   * rate until the next clip plans full — because a restart is precisely
-   * what this feature exists to never do. Measured cost of full rate where
-   * half would do: it is what put Mr. Robot on the N100 from 1.03x to
-   * under realtime.
+   * Rate is NOT part of the pipe's format any more. The canvas travels as
+   * VFR NUT: the renderer's chain runs at the full effective rate and
+   * mpdecimate forwards a frame only when the picture CHANGED, so a static
+   * canvas costs ~2 small uploads a second (the heartbeat) and a moving one
+   * costs exactly its real new pixels. Half-rate pinning — and the stepped
+   * motion it forced on mid-clip applies — is gone with it.
    */
-  const imgList = (overlayImages ?? []).filter((i) => i?.path);
-  const perFrame = Boolean(overlayAnimated)
-    || imgList.some((i) => i?.animated || isMoving(i));
-  const rate = (!perFrame && halfRate(eff.rate)) || eff.rate;
-  const rs = String(rate);
-  const fps = rs.includes('/')
-    ? Number(rs.split('/')[0]) / Number(rs.split('/')[1])
-    : Number(rs);
-  return { rect, eff, wide, width, height, rate, fps };
+  return { rect, eff, wide, width, height, rate: eff.rate, fps: eff.fps };
 }
 
 /**
@@ -3834,7 +3826,7 @@ export function planOverlayPipe({
  * canvas keys off the spawn offset.
  */
 export function buildRendererSpec({
-  profile, selection, srcPath, shift = 0, duration = null,
+  profile, selection, srcPath, shift = 0, clipOffset = null, duration = null,
   extractedPath = null, fontsDir = null, overlayPath = null,
   overlayImages = [], subBand = null, overlayAnimated = false, pin = null,
 }) {
@@ -3877,12 +3869,21 @@ export function buildRendererSpec({
   const baseH = band ? band.height : rect.h;
   const inputs = ['-f', 'lavfi', ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${plan.rate},format=rgba`];
+  /**
+   * Timestamps are the continuation clock now, and they are CLIP-relative:
+   * the main graph's video starts at zero after its -ss, and NUT carries
+   * these pts across, so a replacement renderer that starts stamping at
+   * (shift - clipOffset) continues the stream exactly where the last one
+   * stopped. No byte counting, no padding, no drift — the timestamps ARE
+   * the alignment.
+   */
+  const rebase = Number(shift - (clipOffset ?? shift)).toFixed(3);
   // The same head the inline canvas builds, with the base at input 0
   // instead of 1 — the renderer is its own process and numbers from zero.
   const head = sub.filter
     ? `[0:v]setpts=PTS+${sh}/TB,${band ? band.filter : sub.filter}:alpha=1,`
-      + 'setpts=PTS-STARTPTS,format=rgba'
-    : '[0:v]null';
+      + `setpts=PTS-STARTPTS+${rebase}/TB,format=rgba`
+    : `[0:v]setpts=PTS+${rebase}/TB`;
   const imgs = canvasImageChain(imgList, {
     width: rect.w, firstInput: 1, inLabel: 'sub', outLabel: 'cv', phase: shift,
   });
@@ -3894,9 +3895,21 @@ export function buildRendererSpec({
   // No trailing format=rgba: the subtitle head ends on one, the image
   // chain guarantees one, and the bare-transparent base IS one. pad of an
   // rgba frame stays rgba.
+  /**
+   * mpdecimate is the whole economy: it forwards a frame only when the
+   * canvas actually changed, and max=12 forces one through every half
+   * second so framesync's pairing never waits long (the wait is pipeline
+   * latency, absorbed by the bank — never throughput). A static canvas
+   * therefore costs ~2 uploads a second; a bouncing logo passes every
+   * frame, full rate, because its pixels genuinely differ. Its own compare
+   * cost lives in the renderer process where there is headroom, not in the
+   * encode loop where there is none — the old in-graph measurement that
+   * rejected mpdecimate does not apply here.
+   */
+  const thin = ',mpdecimate=max=12';
   const filters = imgs.filters.length
-    ? [`${head}[sub]`, ...imgs.filters, `[cv]null${pad}[out]`]
-    : [`${head}${pad}[out]`];
+    ? [`${head}[sub]`, ...imgs.filters, `[cv]null${pad}${thin}[out]`]
+    : [`${head}${pad}${thin}[out]`];
   inputs.push(...imgs.inputs);
   return {
     ...plan,

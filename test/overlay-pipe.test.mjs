@@ -96,10 +96,10 @@ for (const name of ['subtitled 16:9, gpu canvas', 'subtitled pillarbox, pad-over
   });
   // Parse by flag, not by offset — offsets broke twice as options grew.
   const before = args.slice(0, i);
-  check(`${name}: sizes agree`,
-    before[before.lastIndexOf('-s') + 1], `${spec.width}x${spec.height}`);
-  check(`${name}: rates agree`,
-    before[before.lastIndexOf('-r') + 1], String(spec.rate));
+  // NUT is self-describing: the reader declares no geometry at all, so the
+  // two ends CANNOT disagree — the property the old checks guarded for.
+  check(`${name}: the pipe input is NUT`,
+    before[before.lastIndexOf('-f') + 1], 'nut');
   check(`${name}: no canvas remains in the main graph`,
     args.join(' ').includes('alpha=1'), false);
   check(`${name}: the pipe input is bounded so the process can exit`,
@@ -149,7 +149,10 @@ console.log('\nperformance interior — the regression that hit the N100');
     shift: 0, duration: mr.duration, extractedPath: mr.extractedPath,
     subBand: band,
   });
-  check('no motion -> the pipe runs at HALF rate', quiet.rate, '24000/2002');
+  check('the chain runs at the full effective rate — VFR thins it instead',
+    quiet.rate, '24000/1001');
+  check('mpdecimate forwards only changed frames, heartbeat bounded',
+    quiet.spec.filters.join(';').includes('mpdecimate=max=12'), true);
   check('band applies -> rasterise at band height',
     quiet.spec.inputs.join(' ').includes('s=1920x420'), true);
   check('band interior pads into the full-rect format',
@@ -168,7 +171,16 @@ console.log('\nperformance interior — the regression that hit the N100');
     pin,
   });
   check('apply holds the pinned format',
-    `${withPic.width}x${withPic.height}@${withPic.rate}`, '1920x1080@24000/2002');
+    `${withPic.width}x${withPic.height}`, '1920x1080');
+  // The swap stamps clip-relative timestamps continuing from the encode
+  // head — the timestamps ARE the alignment now.
+  const cont = buildRendererSpec({
+    profile: prof, selection: mr.selection, srcPath: mr.srcPath,
+    shift: 154.2, clipOffset: 33.7, duration: mr.duration,
+    extractedPath: mr.extractedPath, subBand: band, pin,
+  });
+  check('a swap rebases pts to clip time',
+    cont.spec.filters[0].includes('setpts=PTS-STARTPTS+120.500/TB'), true);
   check('the band yields to the picture inside the renderer', withPic.band, false);
   check('the picture lands on the full canvas',
     /overlay/.test(withPic.spec.filters.join(';')), true);
@@ -180,39 +192,27 @@ console.log('\nperformance interior — the regression that hit the N100');
     overlayImages: [{ path: '/o/logo.png', x: 0.1, y: 0.1, size: 0.2,
       opacity: 1, enabled: true, motion: 'bounce', speed: 0.1 }],
   });
-  check('motion at spawn -> full rate', moving.rate, '24000/1001');
+  check('motion needs no special rate — VFR passes its frames through',
+    moving.rate, '24000/1001');
 }
 
-console.log('\nthe feed — continuous frame-aligned bytes across renderers');
+console.log('\nthe feed — an unbroken NUT byte stream across renderers');
+/**
+ * With NUT the feed is a dumb, reliable byte mover: no frame counting, no
+ * padding — the container's own framing and timestamps carry alignment.
+ * What must still hold: bytes flow, a swap appends the NEW renderer's
+ * stream with no EOF in between, and the reader can prove it received two
+ * distinct streams (two NUT headers).
+ */
 const fifo = join(tmpdir(), `jsr-feed-test-${process.pid}.fifo`);
 const feed = new OverlayFeed({ path: fifo, log: (m) => console.log('   ', m.trim()) });
-/**
- * Reads are async with a deadline, never readSync: a blocking read on the
- * main thread cannot be interrupted by any timer, so a renderer that fails
- * to start would hang the whole test silently — which it did, when
- * -frames:v (an output option) was passed as an input option.
- */
-const pull = (stream, n, ms = 20000) => new Promise((resolve, reject) => {
+const pull = (stream, ms = 15000) => new Promise((resolve) => {
   const chunks = [];
-  let got = 0;
-  const t = setTimeout(() => {
-    stream.off('data', onData);
-    reject(new Error(`timed out waiting for ${n} bytes (got ${got})`));
-  }, ms);
-  const onData = (d) => {
-    chunks.push(d);
-    got += d.length;
-    if (got >= n) {
-      clearTimeout(t);
-      stream.off('data', onData);
-      stream.pause();
-      resolve(Buffer.concat(chunks).subarray(0, n));
-    }
-  };
-  stream.on('data', onData);
+  const t = setTimeout(() => { stream.pause(); resolve(Buffer.concat(chunks)); }, ms);
+  stream.on('data', (d) => { chunks.push(d); });
+  stream.on('close', () => { clearTimeout(t); resolve(Buffer.concat(chunks)); });
   stream.resume();
 });
-// `-t` bounds a lavfi INPUT; -frames:v does not exist on the input side.
 const paint = (colour, frames) => rendererArgs({
   width: 4, height: 2, rate: 10, out: 'out',
   inputs: ['-f', 'lavfi', '-t', (frames / 10).toFixed(1), '-i',
@@ -220,34 +220,18 @@ const paint = (colour, frames) => rendererArgs({
   filters: ['[0:v]null[out]'],
 });
 try {
-  // 4x2 RGBA = 32 bytes per frame; three frames = 96 bytes.
   feed.resetSync({ width: 4, height: 2 });
-  const rd = createReadStream(fifo, { highWaterMark: 1024 });
+  const rd = createReadStream(fifo, { highWaterMark: 4096 });
+  const collecting = pull(rd, 6000);
   feed.spawnRenderer(paint('red', 3));
-  const first = await pull(rd, 96);
-  check('renderer v1 delivers 3 aligned frames', first.length, 96);
-  check('and they are red', first[0] > 200 && first[2] < 60, true);
+  await new Promise((r) => { setTimeout(r, 1500); });
   await feed.swap(paint('blue', 3));
-  const second = await pull(rd, 96);
-  check('swap appends v2 with no EOF between', second.length, 96);
-  check('and v2 is blue', second[2] > 200 && second[0] < 60, true);
-  check('the shared clock counts every frame', feed.frames, 6);
+  const bytes = await collecting;
   rd.destroy();
-
-  // Frame alignment across a mid-frame death: a renderer emitting 4x2
-  // frames (32B) into a feed sized for 28B frames leaves a 4B overhang —
-  // after it exits the feed must pad to the 28B boundary or every later
-  // frame is sheared by the shortfall.
-  feed.resetSync({ width: 1, height: 7 });
-  const rd2 = createReadStream(fifo, { highWaterMark: 1024 });
-  feed.spawnRenderer(paint('red', 1));   // 32 bytes into 28-byte frames
-  const padded = await pull(rd2, 56);
-  check('a misaligned renderer death is padded to the frame boundary',
-    padded.length, 56);
-  check('and the clock lands on whole frames', feed.frames, 2);
-  check('the pad is transparent, not garbage',
-    padded.subarray(32).every((b) => b === 0), true);
-  rd2.destroy();
+  const headers = bytes.toString('latin1').split('nut/multimedia container').length - 1;
+  check('bytes flowed through the feed', bytes.length > 200, true);
+  check('a swap appends a SECOND NUT stream, no EOF between', headers, 2);
+  check('the byte odometer moved', feed.bytes > 0, true);
 } finally {
   feed.stopSync();
   rmSync(fifo, { force: true });

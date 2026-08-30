@@ -264,3 +264,31 @@ Shipped. What the build taught beyond the feasibility experiment:
   this project earned its -22 scars.
 - Chunked clips keep the classic path: many parallel encoders cannot share
   one fifo.
+
+## Phase 1, round two — the VFR canvas (2026-08-30)
+
+The N100 falsified the first design within minutes: full-rect rawvideo at a
+pinned rate cost it 30% on plain playback (Mr. Robot 1.03x -> 0.62x). The
+operator's bar: idle cost = pre-pipe exactly, applies never cut the stream,
+no visual compromises, no restarts. The answer was to stop shipping frames
+that didn't change:
+
+- the canvas travels as **rawvideo-in-NUT**, timestamped and self-describing;
+- the renderer runs at full rate and **mpdecimate=max=12** forwards a frame
+  only when the picture changed, with one forced through every half second
+  (the heartbeat that bounds framesync's pairing wait — pipeline latency the
+  bank absorbs, never throughput);
+- **timestamps are the continuation clock**: a replacement renderer stamps
+  clip-relative pts from the encode head and the stream just continues. The
+  byte-counting clock, the frame padding and the geometry pinning of rates
+  all died — NUT's framing makes a SIGKILLed writer cost one 'damaged' log
+  line and zero video frames (measured);
+- rate is no longer format, so the stepped-motion compromise is gone too:
+  a static canvas costs ~2 small uploads/s, a bouncing logo passes its real
+  frames at full rate.
+
+Measured: a static subtitle canvas keeps 19 of 240 frames; the e2e crossed
+100MB where full-rate would be 884MB. A static picture overlay now costs
+LESS than the inline path ever did (which paid a full-rate canvas for any
+picture). The remaining standing cost is the composite pass itself on
+otherwise-clean clips — the price of applies being free there.
