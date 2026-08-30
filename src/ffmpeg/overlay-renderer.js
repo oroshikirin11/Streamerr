@@ -105,6 +105,12 @@ export function rendererArgs(spec) {
  */
 export function pipeInputArgs(spec, path, { capSecs = null } = {}) {
   return [
+    // The canvas is a GROWING file: follow=1 makes the file protocol
+    // retry at EOF instead of ending the input when the reader catches
+    // the writer — the append-file transport's equivalent of the fifo
+    // that never EOF'd. The -t bound below still ends the input at clip
+    // end, so the process can exit.
+    '-follow', '1',
     '-f', 'nut',
     /**
      * The input-side bound is what lets the main process EXIT.

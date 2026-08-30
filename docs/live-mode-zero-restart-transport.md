@@ -49,3 +49,21 @@ the canvas too. The inline paths remain only for legacy mode.
 If shm full-rate still cannot sustain on the N100, the next levers in
 order: renderer thread pinning/priority, canvas at readrate 1.1 with
 deeper -t, and only then any talk of trade-offs — with numbers.
+
+## Status + first defect (found by e2e, same session)
+
+Transport lands: append-file feed, -follow 1 reader, reaper; the feed
+unit suite proves four appended streams with two mid-stream TERMs all
+decode damage-free. e2e acts fail on ONE new physics fact: the file
+PRESERVES the old renderer's run-ahead (readrate 1.3 = ~1.3s of future
+canvas at any moment), so a replacement stream stamped from the play
+position starts BEHIND the file head and its first frames are dropped
+as stale — the swap never airs. The fifo's backpressure used to cap
+run-ahead at delivery, hiding this.
+
+Fix: swap() must stamp the new renderer from the old one's WRITTEN
+HEAD — parse the last NUT syncpoint's pts from the file tail (node
+reads the last ~2MB, finds the startcode, decodes the pts varint), and
+use max(position, headPts) as the shift. Alternative if parsing fights
+back: cap run-ahead by pacing renderers at readrate 1.05 and accept a
+sub-second shadow. Parsing is the right answer; the shadow is a hack.

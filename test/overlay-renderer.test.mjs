@@ -41,11 +41,12 @@ console.log('\nboth ends speak NUT');
 // sheared the picture with no error anywhere. NUT carries its own format
 // and timestamps, so that bug class cannot exist.
 const consumer = pipeInputArgs(spec, '/tmp/x.fifo');
-check('the consumer demuxes NUT', consumer.slice(0, 2), ['-f', 'nut']);
+check('the consumer follows the growing file, then demuxes NUT',
+  consumer.slice(0, 4), ['-follow', '1', '-f', 'nut']);
 check('and then names the pipe', consumer.slice(-2), ['-i', '/tmp/x.fifo']);
 check('a bounded consumer carries -t before the pipe',
   pipeInputArgs(spec, '/tmp/x.fifo', { capSecs: 12 }).join(' '),
-  '-f nut -t 12.000 -i /tmp/x.fifo');
+  '-follow 1 -f nut -t 12.000 -i /tmp/x.fifo');
 
 console.log('\nthe renderer command');
 const args = rendererArgs(spec);

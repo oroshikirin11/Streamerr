@@ -1,36 +1,14 @@
 /**
- * Keeps the overlay pipe fed across renderer restarts.
- *
- * The main encoder reads RGBA frames from a fifo for the whole life of a
- * source process. Renderers come and go — every Apply kills one and starts
- * another — and this class is what makes that survivable:
- *
- *  - it holds the fifo's write end open for the life of the source, so the
- *    reader never sees EOF between renderers (a fifo EOFs the moment its
- *    LAST writer closes, and eof_action=repeat then freezes the overlay
- *    forever);
- *  - at a swap it guarantees the reader only ever sees whole NUT frame
- *    groups: the dying renderer drains into a buffer and anything after
- *    the last syncpoint — the packet a kill may have torn — is dropped at
- *    the boundary. Steady-state bytes flow untouched; the guard costs
- *    nothing while a renderer is simply running.
- *
- * The write side is the holder fd wrapped in a net.Socket, which libuv
- * treats as a pipe: writes are non-blocking with real backpressure. This
- * matters more than it looks. A plain fs.write to a full fifo parks a
- * threadpool thread until a reader drains it — and when the reader is gone
- * (source respawn), that thread is parked forever. Node has four by
- * default, so four clip boundaries would silently starve every fs
- * operation in the process. The socket buffers instead, pausing the
- * renderer's stdout via pipe backpressure, and destroy() discards cleanly.
- *
- * The fd is opened read-write, not write-only: a fifo opened O_WRONLY
- * blocks until a reader appears (deadlock when the feed starts before the
- * encoder), and a fifo whose reader is also itself can never take EPIPE.
+ * Keeps the overlay canvas fed across renderer restarts — as a growing
+ * NUT file on /dev/shm that successive renderers APPEND to and the
+ * source follows (-follow 1). File writes never block, so a swap's
+ * SIGTERM always lands on an unblocked renderer and the stream joins at
+ * clean boundaries; a reaper punches consumed head pages so a full-rate
+ * canvas cannot fill the ramdisk. This replaced the fifo+forwarding
+ * transport, whose lockstep and copies cost ~0.35x at full rate.
  */
 
 import { spawn, spawnSync } from 'child_process';
-import { Socket } from 'net';
 import { closeSync, openSync, rmSync, statSync } from 'fs';
 import { setPriority } from 'os';
 
@@ -57,17 +35,31 @@ export class OverlayFeed {
   resetSync() {
     this._teardown();
     try { rmSync(this.path, { force: true }); } catch { /* fine */ }
-    const made = spawnSync('mkfifo', [this.path], { stdio: 'ignore' });
-    if (made.status !== 0 || !statSync(this.path).isFIFO()) {
-      throw new Error(`could not create the overlay pipe at ${this.path}`);
-    }
-    // r+ so the fifo never EOFs between renderers, and never blocks on
-    // open. Wrapped in a Socket for non-blocking writes with real
-    // backpressure — a plain fs.write to a full fifo parks a threadpool
-    // thread, and when the reader is gone it parks it forever.
-    this._fd = openSync(this.path, 'r+');
-    this._sock = new Socket({ fd: this._fd, readable: false, writable: true });
-    this._sock.on('error', (err) => this.log(`[overlay-pipe] ${err.message}\n`));
+    /**
+     * The canvas is an APPEND FILE now (put it on /dev/shm), not a fifo.
+     * File writes are page-cache memcpys: no 64KB pipe lockstep, no
+     * forwarding hop, and they never block — so a swap's SIGTERM always
+     * lands on an unblocked renderer, which exits at a clean NUT
+     * boundary. The tear/guard apparatus the fifo needed is gone with
+     * the fifo. The reader follows the growing file (-follow 1) and a
+     * reaper punches consumed head pages so a full-rate canvas cannot
+     * fill the ramdisk.
+     */
+    this._fd = openSync(this.path, 'a');
+    this._punched = 0;
+    this._reaper = setInterval(() => {
+      try {
+        const size = statSync(this.path).size;
+        const keep = 64 * 1024 * 1024; // ~3s of full-rate canvas, > reader lag
+        const upTo = size - keep;
+        if (upTo - this._punched > 16 * 1024 * 1024) {
+          spawnSync('fallocate', ['-p', '-o', '0', '-l', String(upTo), this.path],
+            { stdio: 'ignore' });
+          this._punched = upTo;
+        }
+      } catch { /* file may be mid-reset */ }
+    }, 2000);
+    this._reaper.unref?.();
     this.active = true;
   }
 
@@ -102,7 +94,7 @@ export class OverlayFeed {
   spawnRenderer(args) {
     if (!this.active) throw new Error('overlay feed is not active');
     if (this._renderer) throw new Error('a renderer is already running');
-    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', this._fd, 'pipe'] });
     /**
      * The renderer is latency-tolerant by design — the bank absorbs its
      * hiccups — while the encoder is not. Deprioritising it means its
@@ -110,25 +102,6 @@ export class OverlayFeed {
      * four-core box, which is exactly where this matters.
      */
     try { setPriority(child.pid, 10); } catch { /* best effort */ }
-    const sock = this._sock;
-    /**
-     * Steady state: forward immediately, with backpressure. Draining: a
-     * swap is in progress — buffer instead, so the kill's torn tail never
-     * reaches the fifo, and so the renderer is never blocked in write()
-     * when SIGTERM arrives (node keeps its pipe drained), which is what
-     * lets it exit at a packet boundary.
-     */
-    let draining = false;
-    const tailChunks = [];
-    const onData = (d) => {
-      if (this._sock !== sock) return;
-      if (draining) { tailChunks.push(d); return; }
-      if (!sock.write(d)) {
-        child.stdout.pause();
-        sock.once('drain', () => child.stdout.resume());
-      }
-    };
-    child.stdout.on('data', onData);
     let tail = '';
     child.stderr.on('data', (d) => {
       tail = (tail + d.toString()).slice(-2000);
@@ -136,55 +109,16 @@ export class OverlayFeed {
     const done = new Promise((resolve) => {
       child.on('close', (code) => {
         if (this._renderer?.child === child) this._renderer = null;
-        if (this._sock === sock && tailChunks.length) {
-          const buf = Buffer.concat(tailChunks);
-          tailChunks.length = 0;
-          if (code === 0) {
-            // Ran to its own end: whole frames plus the trailer.
-            sock.write(buf);
-          } else {
-            // Terminated at a swap (or killed). The tail is USUALLY whole
-            // — a TERM'd ffmpeg finishes its packet — but it is stamped
-            // with timestamps that can reach past the swap point, and VFR
-            // holds the newest frame: forwarding it would keep the dead
-            // renderer's canvas on air after its replacement started
-            // (measured: the e2e's removed overlay lingered). Cutting at
-            // the last syncpoint costs one invisible canvas frame and
-            // keeps both the byte stream and the timeline clean.
-            let last = -1;
-            let from = 0;
-            for (;;) {
-              const i = buf.indexOf(OverlayFeed.SYNC, from);
-              if (i === -1) break;
-              last = i;
-              from = i + OverlayFeed.SYNC.length;
-            }
-            if (last > 0) sock.write(buf.subarray(0, last));
-            else if (last === -1 && this.active) {
-              this.log('[overlay-pipe] renderer died mid-frame with no boundary in its tail — the reader may resync through garbage\n');
-            }
-          }
-        }
-        // A drained renderer died because WE killed it — its 255 is not
-        // news. Only an exit nobody asked for is worth a log line.
-        if (code !== 0 && code !== null && this.active && !draining) {
+        // 255 = exited on our SIGTERM: routine swap, not news. File
+        // writes never block, so TERM always completes at a boundary.
+        if (code !== 0 && code !== 255 && code !== null && this.active) {
           this.log(`[overlay-pipe] renderer exited ${code}: ${tail.split('\n').filter(Boolean).slice(-2).join(' | ')}\n`);
         }
         resolve(code);
       });
       child.on('error', () => resolve(-1));
     });
-    const rec = {
-      child,
-      done,
-      beginDrain: () => {
-        draining = true;
-        // If backpressure paused the pipe, wake it: draining must never
-        // leave the renderer blocked in write() when SIGTERM lands.
-        try { child.stdout.resume(); } catch { /* gone */ }
-      },
-    };
-    this._renderer = rec;
+    this._renderer = { child, done };
     // The exit promise is internal sequencing (swap awaits it to pad before
     // appending). Callers get nothing to await: a renderer runs until it is
     // replaced, and "done" here would mean "the overlay stopped".
@@ -208,11 +142,11 @@ export class OverlayFeed {
        * the close handler cuts the buffered tail at the last syncpoint so
        * a torn packet can never reach the reader.
        */
-      old.beginDrain();
       try { old.child.kill('SIGTERM'); } catch { /* already gone */ }
       const grace = setTimeout(() => {
+        this.log('[overlay-pipe] renderer ignored TERM for 5s — KILLed\n');
         try { old.child.kill('SIGKILL'); } catch { /* already gone */ }
-      }, 1500);
+      }, 5000);
       await old.done;
       clearTimeout(grace);
     }
@@ -224,11 +158,8 @@ export class OverlayFeed {
       try { this._renderer.child.kill('SIGKILL'); } catch { /* gone */ }
       this._renderer = null;
     }
-    if (this._sock) {
-      try { this._sock.destroy(); } catch { /* gone */ }
-      this._sock = null;
-      this._fd = null;
-    } else if (this._fd !== null) {
+    if (this._reaper) { clearInterval(this._reaper); this._reaper = null; }
+    if (this._fd !== null) {
       try { closeSync(this._fd); } catch { /* gone */ }
       this._fd = null;
     }
