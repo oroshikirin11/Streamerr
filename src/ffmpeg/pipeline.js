@@ -1112,7 +1112,12 @@ export class PipelinePlayout extends EventEmitter {
           pin: this._pipePin ?? null,
           cpuImages: this._pipeCpuImages ?? false,
         });
-        if (!spec) {
+        if (!spec
+            // Variant B bakes the band crop into the source graph; if this
+            // swap changes whether the band is in play, the crop would
+            // clip real content — a graph change, so a respawn.
+            || ((this._pipeCpuImages ?? false)
+              && Boolean(spec.band) !== Boolean(this._pipeBandUsed))) {
           // Eligibility changed underneath (a demotion mid-clip). The
           // classic restart still works; use it rather than not applying.
           this._bankTrimToPacket();
@@ -2390,6 +2395,10 @@ export class PipelinePlayout extends EventEmitter {
           this._pipeCpuImages = pipeCpuImages;
           this._pipeImgSig = JSON.stringify((this.profile?.overlay ?? [])
             .filter((i) => i?.type === 'image' && i?.enabled !== false));
+          // Variant B crops the canvas to the band inside the SOURCE, so a
+          // swap that changes whether the band is in play cannot be a
+          // renderer swap — the crop would clip real content.
+          this._pipeBandUsed = Boolean(rSpec.band);
         } catch (err) {
           this.emit('warn', 'overlay pipe unavailable — applying overlays '
             + `will restart the source: ${err.message}`);
@@ -2416,6 +2425,7 @@ export class PipelinePlayout extends EventEmitter {
       overlayPath: overlayFile,
       overlayImages,
       cpuImages: pipeCpuImages,
+      subBand: pipeBand,
       // A bouncing CAPTION is drawn by libass onto the same canvas, so it
       // needs every frame exactly as a moving picture does. Without this it
       // was animated at half rate and visibly stepped.
@@ -3971,7 +3981,7 @@ export function buildRendererSpec({
    * cap is also a lid on the SOURCE: framesync cannot advance video past
    * the canvas timestamps it has received, so the whole encoder is capped
    * at the renderer's pace. At 1.1 that pinned every cushion rebuild to
-   * ~1.05x observed. 2.0 keeps the runaway bounded while letting the
+   * ~1.05x observed. 1.3 clears the measured recovery ceiling (~1.2x) while letting the
    * encoder run at the hardware's real speed when it has surplus.
    *
    * Half cadence when nothing moves: a static canvas rendered 36 frames a
@@ -3984,7 +3994,7 @@ export function buildRendererSpec({
     || imgList.some((i) => i?.animated || isMoving(i));
   const chainRate = (!perFrame && halfRate(plan.rate)) || plan.rate;
   const beat = perFrame ? 12 : 6;
-  const inputs = ['-f', 'lavfi', '-readrate', '2.0', ...cap, '-i',
+  const inputs = ['-f', 'lavfi', '-readrate', '1.3', ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
    * Timestamps are the continuation clock now, and they are CLIP-relative:
@@ -4317,15 +4327,33 @@ export function buildSourceArgs({
         width: profile.width, firstInput: 2, inLabel: 'c0', outLabel: 'vi',
         phase: offset,
       });
+      /**
+       * The CPU blend iterates the overlay's rectangle every video frame,
+       * transparent rows included — and outside the subtitle band the
+       * canvas is transparent BY CONSTRUCTION (the renderer pads it). So
+       * when the band is in play, crop the canvas back to the band and
+       * blend at its offset: 39% of the rows for the same pixels on air.
+       * crop is pointer arithmetic, not a copy. The renderer keeps padding
+       * (the pipe FORMAT stays full-rect — swap stability), and the engine
+       * respawns if a swap changes whether the band is in play, so the
+       * crop can never clip real content.
+       */
+      const bandB = subBand && sub.filter && !pipePlan.wide
+        && subBand.rect?.w === rect.w && subBand.rect?.h === rect.h
+        ? subBand : null;
+      const canvasIn = bandB
+        ? `[1:v]crop=${rect.w}:${bandB.height}:0:${bandB.y}[ovc];`
+        : '[1:v]format=rgba[ovc];';
+      const at2 = bandB ? `x=0:y=${bandB.y}:` : '';
       const graph = `[0:v]${scalePart},hwdownload,format=nv12[bd];`
-        + '[1:v]format=rgba[ov];'
+        + canvasIn
         // shortest=1: without it framesync's default keeps REPEATING the
         // last video frame after the main input ends, for as long as the
         // canvas keeps its heartbeat coming — measured two extra seconds
         // of frozen frame on every clip end, and the process never exited.
         // Safe because the canvas cannot EOF mid-clip (the feed holds the
         // fifo open) and its reader-side -t bound always outlives the clip.
-        + '[bd][ov]overlay=eof_action=repeat:shortest=1:format=auto[c0];'
+        + `[bd][ovc]overlay=${at2}eof_action=repeat:shortest=1:format=auto[c0];`
         + [...cpuImgs2.filters,
           '[vi]format=nv12,hwupload[v]'].join(';');
       return [

@@ -166,6 +166,15 @@ console.log('\nvariant B — pictures composite on the CPU, canvas stays a trick
   check('the pipe input survives as input 1', args.indexOf('/tmp/x.fifo') > 0, true);
   check('classic surface pool — framesync queues CPU frames here',
     args[args.indexOf('-extra_hw_frames') + 1], '8');
+  // With a band, the source crops the canvas and blends only its rows.
+  const bandArgs = buildSourceArgs({
+    ...piped,
+    subBand: { rect: { w: 1920, h: 1080 }, height: 420, y: 660, filter: 'x' },
+  });
+  const bg = bandArgs[bandArgs.indexOf('-filter_complex') + 1];
+  check('banded variant B crops the canvas to the band',
+    bg.includes('crop=1920:420:0:660'), true);
+  check('and blends it back at the band offset', bg.includes('x=0:y=660:'), true);
   const spec = buildRendererSpec({
     profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
     shift: 0, duration: piped.duration,
@@ -210,7 +219,7 @@ console.log('\nperformance interior — the regression that hit the N100');
     quiet.spec.inputs.join(' ').includes('r=24000/2002')
       && quiet.spec.filters.join(';').includes('mpdecimate=max=6'), true);
   check('the renderer is paced, not free-running',
-    quiet.spec.inputs.join(' ').includes('-readrate 2.0'), true);
+    quiet.spec.inputs.join(' ').includes('-readrate 1.3'), true);
   check('band applies -> rasterise at band height',
     quiet.spec.inputs.join(' ').includes('s=1920x420'), true);
   check('band interior pads into the full-rect format',
