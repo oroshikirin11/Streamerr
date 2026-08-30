@@ -723,7 +723,7 @@ function runAheadBudget() {
 
 function buildEngine({ profile, selection }) {
   const e = new PipelinePlayout({
-    destinations: publishDestinations(),
+    destinations: publishDestinations(config, config.encoder.codec ?? 'h264'),
     buffer: config.buffer,
     profile,
     selection,
@@ -1945,15 +1945,22 @@ app.post('/api/stream/start', wrap(async (req, res) => {
    * encode entrypoint fails a 1-frame probe in ~300ms.
    */
   const codec = config.encoder.codec ?? 'h264';
-  if (codec !== 'h264'
-      && publishDestinations().some((d) => d.protocol.startsWith('rtmp'))) {
-    // Classic FLV carries neither; we tag enhanced-RTMP correctly but no
-    // deployed receiver here parses it — measured live: HEVC over RTMP
-    // connected and delivered nothing. SRT/mpegts (hevc) and
-    // SRT/matroska (av1) are the transports that work.
-    return res.status(400).json({
-      error: `${codec.toUpperCase()} cannot travel over classic RTMP — switch those destinations to SRT, or pick H.264`,
-    });
+  {
+    // Codec-aware selection (docs/codec-protocol-unification.md): the
+    // primary auto-moves to its SRT slot for hevc/av1 when configured;
+    // extras that cannot carry the codec sit out with a named warn and
+    // rejoin when the codec allows. Refuse only the unfixable: a primary
+    // with no compatible slot at all.
+    const sel = publishDestinations(config, codec);
+    const prim = sel[0];
+    if (codec !== 'h264' && prim && prim.protocol.startsWith('rtmp')) {
+      return res.status(400).json({
+        error: `${codec.toUpperCase()} cannot travel over classic RTMP and no SRT server is configured for the primary — fill the SRT slot in Settings, or pick H.264`,
+      });
+    }
+    for (const d of sel.skipped ?? []) {
+      dpush('warn', `skipping destination '${d.name || d.protocol}' — ${d.protocol} cannot carry ${codec.toUpperCase()}; it rejoins on H.264`);
+    }
   }
   if (codec !== 'h264') {
     const enc = { hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[codec];

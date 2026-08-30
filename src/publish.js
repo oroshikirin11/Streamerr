@@ -140,15 +140,35 @@ export function redactUrl(protocol, creds = {}) {
  * failures by slave index, and the one the operator configured first should
  * be the one they can find in the log.
  */
-export function destinations(publish) {
+/** Can this protocol carry this codec to the receivers we deploy to? */
+export const protocolCarries = (protocol, codec = 'h264') => (
+  codec === 'h264' ? true : protocol === 'srt'
+);
+
+export function destinations(publish, codec = 'h264') {
   const p = publish ?? publishDefaults();
-  const protocol = PROTOCOLS.includes(p.protocol) ? p.protocol : 'rtmp';
+  let protocol = PROTOCOLS.includes(p.protocol) ? p.protocol : 'rtmp';
+  /**
+   * Codec-aware selection, switch-resistant by design (see
+   * docs/codec-protocol-unification.md): configs persist per protocol
+   * and the codec CHOOSES — it never overwrites. A non-h264 codec moves
+   * the primary to its SRT slot when one is configured; extras that
+   * cannot carry the codec sit out (returned in `skipped` for the
+   * caller to warn about) and rejoin when the codec allows them.
+   */
+  if (!protocolCarries(protocol, codec) && String(p.srt?.url ?? '').trim()) {
+    protocol = 'srt';
+  }
   const out = [{ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name) }];
+  const skipped = [];
   for (const e of p.extras ?? []) {
     if (!e || e.enabled === false) continue;
     if (!PROTOCOLS.includes(e.protocol)) continue;
-    out.push({ protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name) });
+    const d = { protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name) };
+    if (protocolCarries(e.protocol, codec)) out.push(d);
+    else skipped.push(d);
   }
+  out.skipped = skipped;
   return out;
 }
 

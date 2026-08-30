@@ -425,8 +425,8 @@ export function publishConfig(cfg = config) {
   return pub;
 }
 
-export function publishDestinations(cfg = config) {
-  const dests = destinations(publishConfig(cfg));
+export function publishDestinations(cfg = config, codec = null) {
+  const dests = destinations(publishConfig(cfg), codec ?? cfg.encoder?.codec ?? 'h264');
   // Validate here rather than at spawn: a bad target should be an error on
   // the settings page, not a publisher that dies thirty seconds into a show.
   for (const d of dests) targetUrl(d.protocol, d.creds);
