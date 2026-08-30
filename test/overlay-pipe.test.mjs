@@ -301,8 +301,9 @@ try {
   await new Promise((r) => { setTimeout(r, 400); });
   feed.spawnRenderer(paced('lime', 300));
   await new Promise((r) => { setTimeout(r, 1200); });
-  const hard = feed._renderer;                // the swap's real path: graceful TERM
-  hard.child.kill('SIGTERM');
+  const hard = feed._renderer;                // hard path: drain, SIGKILL, no grace
+  hard.beginDrain();
+  hard.child.kill('SIGKILL');
   await hard.done;
   feed.spawnRenderer(paint('navy', 2));
   await new Promise((r) => { setTimeout(r, 800); });
@@ -320,7 +321,7 @@ try {
   for (let i = bytes.indexOf(magic); i !== -1; i = bytes.indexOf(magic, i + 1)) cuts.push(i);
   const expect = [
     ['red (TERM mid-stream)', 10], ['blue', 3],
-    ['lime (TERMed mid-stream)', 8], ['navy', 2],
+    ['lime (SIGKILL, zero grace)', 8], ['navy', 2],
   ];
   for (let n = 0; n < cuts.length; n += 1) {
     const seg = bytes.subarray(cuts[n], cuts[n + 1] ?? bytes.length);

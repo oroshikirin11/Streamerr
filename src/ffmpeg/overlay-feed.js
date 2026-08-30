@@ -102,17 +102,7 @@ export class OverlayFeed {
   spawnRenderer(args) {
     if (!this.active) throw new Error('overlay feed is not active');
     if (this._renderer) throw new Error('a renderer is already running');
-    /**
-     * DIRECT fd: the renderer writes straight into the fifo — node holds
-     * the write end open but never touches the bytes. The forwarding hop
-     * (stdout pipe -> node -> socket -> fifo) measured 8-25% of a core in
-     * wakeups and copies on shared-TDP silicon, riding on every piped
-     * clip. The canvas is trickle-only now (motion lives in the source),
-     * so a swap's SIGTERM lands between heartbeats essentially always and
-     * the graceful exit writes a clean boundary — the guard's job shrank
-     * to a generous grace and a loud log if KILL ever fires.
-     */
-    const child = spawn('ffmpeg', args, { stdio: ['ignore', this._fd, 'pipe'] });
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     /**
      * The renderer is latency-tolerant by design — the bank absorbs its
      * hiccups — while the encoder is not. Deprioritising it means its
@@ -120,6 +110,25 @@ export class OverlayFeed {
      * four-core box, which is exactly where this matters.
      */
     try { setPriority(child.pid, 10); } catch { /* best effort */ }
+    const sock = this._sock;
+    /**
+     * Steady state: forward immediately, with backpressure. Draining: a
+     * swap is in progress — buffer instead, so the kill's torn tail never
+     * reaches the fifo, and so the renderer is never blocked in write()
+     * when SIGTERM arrives (node keeps its pipe drained), which is what
+     * lets it exit at a packet boundary.
+     */
+    let draining = false;
+    const tailChunks = [];
+    const onData = (d) => {
+      if (this._sock !== sock) return;
+      if (draining) { tailChunks.push(d); return; }
+      if (!sock.write(d)) {
+        child.stdout.pause();
+        sock.once('drain', () => child.stdout.resume());
+      }
+    };
+    child.stdout.on('data', onData);
     let tail = '';
     child.stderr.on('data', (d) => {
       tail = (tail + d.toString()).slice(-2000);
@@ -127,14 +136,55 @@ export class OverlayFeed {
     const done = new Promise((resolve) => {
       child.on('close', (code) => {
         if (this._renderer?.child === child) this._renderer = null;
-        if (code !== 0 && code !== 255 && code !== null && this.active) {
+        if (this._sock === sock && tailChunks.length) {
+          const buf = Buffer.concat(tailChunks);
+          tailChunks.length = 0;
+          if (code === 0) {
+            // Ran to its own end: whole frames plus the trailer.
+            sock.write(buf);
+          } else {
+            // Terminated at a swap (or killed). The tail is USUALLY whole
+            // — a TERM'd ffmpeg finishes its packet — but it is stamped
+            // with timestamps that can reach past the swap point, and VFR
+            // holds the newest frame: forwarding it would keep the dead
+            // renderer's canvas on air after its replacement started
+            // (measured: the e2e's removed overlay lingered). Cutting at
+            // the last syncpoint costs one invisible canvas frame and
+            // keeps both the byte stream and the timeline clean.
+            let last = -1;
+            let from = 0;
+            for (;;) {
+              const i = buf.indexOf(OverlayFeed.SYNC, from);
+              if (i === -1) break;
+              last = i;
+              from = i + OverlayFeed.SYNC.length;
+            }
+            if (last > 0) sock.write(buf.subarray(0, last));
+            else if (last === -1 && this.active) {
+              this.log('[overlay-pipe] renderer died mid-frame with no boundary in its tail — the reader may resync through garbage\n');
+            }
+          }
+        }
+        // A drained renderer died because WE killed it — its 255 is not
+        // news. Only an exit nobody asked for is worth a log line.
+        if (code !== 0 && code !== null && this.active && !draining) {
           this.log(`[overlay-pipe] renderer exited ${code}: ${tail.split('\n').filter(Boolean).slice(-2).join(' | ')}\n`);
         }
         resolve(code);
       });
       child.on('error', () => resolve(-1));
     });
-    this._renderer = { child, done };
+    const rec = {
+      child,
+      done,
+      beginDrain: () => {
+        draining = true;
+        // If backpressure paused the pipe, wake it: draining must never
+        // leave the renderer blocked in write() when SIGTERM lands.
+        try { child.stdout.resume(); } catch { /* gone */ }
+      },
+    };
+    this._renderer = rec;
     // The exit promise is internal sequencing (swap awaits it to pad before
     // appending). Callers get nothing to await: a renderer runs until it is
     // replaced, and "done" here would mean "the overlay stopped".
@@ -158,11 +208,11 @@ export class OverlayFeed {
        * the close handler cuts the buffered tail at the last syncpoint so
        * a torn packet can never reach the reader.
        */
+      old.beginDrain();
       try { old.child.kill('SIGTERM'); } catch { /* already gone */ }
       const grace = setTimeout(() => {
-        this.log('[overlay-pipe] renderer ignored TERM for 5s — KILLed; a torn tail is possible\n');
         try { old.child.kill('SIGKILL'); } catch { /* already gone */ }
-      }, 5000);
+      }, 1500);
       await old.done;
       clearTimeout(grace);
     }
