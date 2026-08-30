@@ -461,6 +461,29 @@ let sgAnnounced = null;
 let sgRestateTimer = null;
 let sgOnAirKey = null;
 /**
+ * Transitions fan out through several engine events, and each used to
+ * push — 11-14 POSTs per skip, counted live. Coalesce: pushes requested
+ * within a beat collapse into one nowplaying + one schedule, keeping the
+ * strongest flags (announce survives coalescing).
+ */
+let sgFlushTimer = null;
+let sgWantNow = false;
+let sgWantAnnounce = false;
+let sgWantSched = false;
+function sgQueue({ now = false, announce = false, schedule = false } = {}) {
+  sgWantNow = sgWantNow || now || announce;
+  sgWantAnnounce = sgWantAnnounce || announce;
+  sgWantSched = sgWantSched || schedule;
+  if (sgFlushTimer) return;
+  sgFlushTimer = setTimeout(() => {
+    sgFlushTimer = null;
+    const doNow = sgWantNow; const doAnn = sgWantAnnounce; const doSched = sgWantSched;
+    sgWantNow = sgWantAnnounce = sgWantSched = false;
+    if (doNow) sgNowPlaying({ announce: doAnn });
+    if (doSched) sgSchedule();
+  }, 300);
+}
+/**
  * The invariant, enforced at one choke point: ANYTHING that changes what
  * is on air emits a push. Event coverage proved unreliable — a direct
  * library switch reached air without any of the wired events firing a
@@ -476,7 +499,7 @@ function sgSync() {
     ? `${it.id ?? ''}\u0000${it.series ?? ''}\u0000${it.title}` : null;
   if (key === sgOnAirKey) return;
   sgOnAirKey = key;
-  if (key) { sgNowPlaying({ announce: true }); sgSchedule(); }
+  if (key) sgQueue({ announce: true, schedule: true });
 }
 async function sgNowPlaying({ announce = false } = {}) {
   if (!sgActive()) return;
@@ -694,15 +717,15 @@ function buildEngine({ profile, selection }) {
 
   e.on('status', () => {
     broadcast('stream', streamStatus()); syncOwncastTitle();
-    sgSync(); sgNowPlaying(); sgSchedule();
+    sgSync(); sgQueue({ now: true, schedule: true });
   });
   e.on('nowplaying', () => {
     broadcast('stream', streamStatus()); syncOwncastTitle();
     sgSync();
   });
-  e.on('queue', () => { broadcast('stream', streamStatus()); sgSync(); sgNowPlaying(); sgSchedule(); });
-  e.on('seeked', () => { broadcast('stream', streamStatus()); sgSync(); sgNowPlaying(); });
-  e.on('selection', () => { broadcast('stream', streamStatus()); sgSync(); sgNowPlaying(); });
+  e.on('queue', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true, schedule: true }); });
+  e.on('seeked', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
+  e.on('selection', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
   e.on('progress', (b) => {
     sgSync();
     // The cache bands ride the half-second progress tick. They used to
@@ -736,7 +759,7 @@ function buildEngine({ profile, selection }) {
       sgRestateTimer = setTimeout(() => {
         sgRestateTimer = null;
         sgArtPushed.clear();
-        sgSchedule(); sgNowPlaying();
+        sgQueue({ now: true, schedule: true });
       }, 2000);
     }
   });
