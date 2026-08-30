@@ -7,20 +7,44 @@ plan — added where they seemed to belong; move or drop them freely.
 
 ## Phase 1 — Overlay changes without restarting the source
 
-The foundation. Ships value immediately and becomes the model for mixing later.
+The foundation. Ships value immediately, and the renderer it builds IS the
+compositor Phase 6 needs.
 
 `roadmap-live-sources.md`
 
-- [ ] Apply overlay changes to a **running** filter graph instead of respawning ffmpeg
-- [ ] No more stream aborts on apply
-- [ ] Studio gets smooth — no splice, no re-buffer
+**Feasibility: PROVEN by experiment — but not the way this originally said.**
+
+Sending commands to a running graph is a **dead end**. ffmpeg only accepts
+runtime commands for options flagged `T`, and `overlay_vaapi` — our actual path
+— has none. No opacity, size, rotation or subtitle swap. Inputs cannot be added
+to a running graph either.
+
+**The design that works:** keep the main graph fixed, feed the whole overlay
+layer in as raw RGBA on a pipe. A renderer we own fills the pipe and restarts
+freely. Verified: renderer swapped mid-stream (red -> blue), encoder produced
+all 8s in ONE process and never restarted.
+
+- [ ] Build the overlay renderer — largely the EXISTING subtitle/image graph, redirected to `-f rawvideo -pix_fmt rgba` on a pipe
+- [ ] Fix the main graph shape: `[media][rgba pipe] overlay_vaapi` — stops varying with overlays
+- [ ] "Apply" restarts the RENDERER, not the source
+- [ ] **A wrapper must hold the pipe's write end open across renderer restarts.** If it closes, ffmpeg sees EOF and `eof_action=repeat` freezes the last frame forever.
+- [ ] No more stream aborts on apply; no splice, no re-buffer
+
+Measure before committing:
+
+- [ ] Pipe bandwidth — ~199 MB/s at 1080p24 full-frame RGBA. Desktop fine, N100 unknown. Mitigations already in-tree: content-rect canvas, half-rate canvas.
+- [ ] Framesync — drop late overlay frames rather than let the main graph block
+- [ ] Renderer startup shows as a stale overlay for a few frames instead of a splice
+
+Scope: this removes restarts for **overlay** changes only. Clip changes and
+seeks still splice — that is what the cushion is for, and it is not the
+complaint.
 
 Why first: it fixes what we already have. Every apply today restarts ffmpeg and
 produces corrupt-packet, out-of-order and non-monotonic DTS errors in real
-logs. A graph that never restarts needs none of that, nor the partial-packet
-trimming or `_srcGen` realignment machinery.
+logs.
 
-- [ ] **+** Retire that machinery once nothing restarts mid-stream
+- [ ] **+** Retire the partial-packet trimming and `_srcGen` machinery once overlay applies no longer restart anything
 - [ ] **+** Keep overlay motion closed-form — it must still serve both modes
 
 ---
