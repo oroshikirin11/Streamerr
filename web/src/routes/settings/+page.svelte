@@ -629,9 +629,9 @@
          primary to the SRT slot on its own. -->
     <label>Codec</label>
     <select bind:value={cfg.encoder.codec}>
-      <option value="h264">H.264 — plays everywhere (default)</option>
-      <option value="hevc">H.265/HEVC — same quality at ~2/3 the bitrate; Apple + hw-decode Chromium</option>
-      <option value="av1">AV1 — best compression; Chromium/Firefox</option>
+      <option value="h264">H.264 — baseline bitrate; universal</option>
+      <option value="hevc">H.265 — 2/3 the bitrate; most</option>
+      <option value="av1">AV1 — half the bitrate; patchy</option>
     </select>
     {#if (cfg.encoder.codec || 'h264') !== 'h264'}
       <p class="muted small">
