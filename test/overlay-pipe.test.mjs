@@ -145,6 +145,47 @@ check('base cap shrinks with the shift',
     < Number(at(0).spec.inputs[at(0).spec.inputs.indexOf('-t') + 1]), true);
 check('no shift means clip start', at(0).spec.filters[0].includes('PTS+0.000/TB'), true);
 
+console.log('\nvariant B — pictures composite on the CPU, canvas stays a trickle');
+{
+  const base = cases['subtitled 16:9, gpu canvas'];
+  const img = { path: '/app/overlays/logo.png', size: 0.15, motion: 'bounce', speed: 0.06 };
+  const still = { path: '/app/overlays/badge.png', size: 0.1, x: 0.9, y: 0.1 };
+  const piped = {
+    ...base,
+    profile: { ...base.profile, overlayPipe: true },
+    overlayPipe: '/tmp/x.fifo',
+    overlayImages: [img, still],
+    cpuImages: true,
+  };
+  const args = buildSourceArgs(piped);
+  const g = args[args.indexOf('-filter_complex') + 1];
+  check('the source downloads once and uploads once', /hwdownload/.test(g) && /hwupload/.test(g), true);
+  check('the canvas composites on the CPU, not overlay_vaapi', g.includes('overlay_vaapi'), false);
+  check('the moving picture keeps its per-frame position expressions', /abs\(mod\(/.test(g), true);
+  check('both pictures are graph inputs', args.filter((x) => String(x).endsWith('.png')).length, 2);
+  check('the pipe input survives as input 1', args.indexOf('/tmp/x.fifo') > 0, true);
+  check('classic surface pool — framesync queues CPU frames here',
+    args[args.indexOf('-extra_hw_frames') + 1], '8');
+  const spec = buildRendererSpec({
+    profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
+    shift: 0, duration: piped.duration,
+    extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
+    overlayImages: [img, still], cpuImages: true,
+  });
+  check('the canvas carries no pictures', spec.spec.inputs.filter((x) => String(x).endsWith('.png')).length, 0);
+  check('and therefore stays at half rate with the heartbeat',
+    /mpdecimate=max=6/.test(spec.spec.filters.join(';')), true);
+  // The variant OFF: same inputs, cpuImages false -> pictures ride the canvas
+  const canvasSpec = buildRendererSpec({
+    profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
+    shift: 0, duration: piped.duration,
+    extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
+    overlayImages: [img, still], cpuImages: false,
+  });
+  check('without the variant the canvas still knows how to draw them',
+    canvasSpec.spec.inputs.filter((x) => String(x).endsWith('.png')).length, 2);
+}
+
 console.log('\nperformance interior — the regression that hit the N100');
 /**
  * A subtitle-only clip must not pay for capabilities it is not using: the

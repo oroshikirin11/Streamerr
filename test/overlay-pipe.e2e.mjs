@@ -156,6 +156,93 @@ try {
   // The byte odometer died when node left the data path; the VFR economy
   // stays pinned by the filter-chain unit test and the direct measurement
   // (a static canvas keeps 19 frames of 240).
+
+  /**
+   * Act B: variant B — pictures composite on the CPU inside the source
+   * graph (scale_vaapi -> hwdownload -> overlay xN -> hwupload), the
+   * canvas carries subtitles alone. A gray clip so the bouncing red logo
+   * is the only red on screen: its presence, its MOTION, and a mid-run
+   * subtitle swap (which must not touch the logo) are all checked on the
+   * decoded output.
+   */
+  console.log('\nvariant B: CPU pictures + subtitle trickle, swap mid-run');
+  const clipB = join(dir, 'gray.mp4');
+  const logo = join(dir, 'logo.png');
+  const outB = join(dir, 'outB.mkv');
+  await run(['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray:s=640x360:r=24',
+    '-t', '10', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', clipB]);
+  await run(['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=120x120',
+    '-frames:v', '1', logo]);
+  const logoDesc = { path: logo, size: 0.12, motion: 'bounce', speed: 0.2, opacity: 1 };
+  const specB = (path, shift) => buildRendererSpec({
+    profile, selection, srcPath: clipB, shift, clipOffset: 0, duration: 10,
+    extractedPath: path, overlayImages: [logoDesc], cpuImages: true,
+  });
+  const sB1 = specB(ass1, 0);
+  check('variant B canvas carries no pictures',
+    sB1.spec.inputs.every((x) => !String(x).endsWith('.png')));
+  check('variant B canvas is a half-rate trickle',
+    /mpdecimate=max=6/.test(sB1.spec.filters.join(';')));
+  feed.resetSync();
+  feed.spawnRenderer(rendererArgs(sB1.spec));
+  const argsB = buildSourceArgs({
+    srcPath: clipB, offset: 0, profile, selection,
+    extractedPath: ass1, duration: 10, overlayPipe: fifo,
+    overlayImages: [logoDesc], cpuImages: true,
+  });
+  check('variant B source composites on the CPU',
+    argsB[argsB.indexOf('-filter_complex') + 1].includes('hwdownload')
+    && !argsB[argsB.indexOf('-filter_complex') + 1].includes('overlay_vaapi'));
+  argsB.splice(argsB.indexOf('-i'), 0, '-re');
+  argsB.splice(argsB.indexOf('-progress'), 4);
+  argsB[argsB.indexOf('error')] = 'info';
+  argsB.splice(argsB.lastIndexOf('-f'), 3, '-y', outB);
+  const mainBDone = new Promise((resolve) => {
+    main = spawn('ffmpeg', argsB, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    main.stderr.on('data', (d) => { err += d; });
+    const t = setTimeout(() => { try { main.kill('SIGKILL'); } catch { /* gone */ } }, 45000);
+    main.on('close', (code) => { clearTimeout(t); resolve({ code, err }); });
+  });
+  await sleep(4000);
+  await feed.swap(rendererArgs(specB(ass2, 4.0).spec));
+  console.log('    subtitles swapped away at ~4s — the logo must not notice');
+  const resB = await mainBDone;
+  main = null;
+  check('variant B encoder survived the swap and exited cleanly',
+    resB.code === 0, `exit ${resB.code}: ${resB.err.slice(-600)}`);
+  // Red-pixel census + centroid straight off the decoded frames.
+  const redAt = async (at) => {
+    const raw = join(dir, 'pxB.raw');
+    await run(['-y', '-v', 'error', '-ss', String(at), '-i', outB,
+      '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', raw]);
+    const buf = readFileSync(raw);
+    let count = 0; let sx = 0; let sy = 0;
+    for (let i = 0; i + 2 < buf.length; i += 3) {
+      if (buf[i] > 170 && buf[i + 1] < 80 && buf[i + 2] < 80) {
+        const px = (i / 3) % 1280; const py = Math.floor(i / 3 / 1280);
+        count += 1; sx += px; sy += py;
+      }
+    }
+    return count ? { count, x: sx / count, y: sy / count } : { count: 0, x: 0, y: 0 };
+  };
+  const rEarly = await redAt(2);
+  const rLate = await redAt(8);
+  check(`logo on air early (${rEarly.count} red px)`, rEarly.count > 2000);
+  check(`logo STILL on air after the subtitle swap (${rLate.count} red px)`, rLate.count > 2000);
+  const dist = Math.hypot(rEarly.x - rLate.x, rEarly.y - rLate.y);
+  check(`logo genuinely bounces (moved ${dist.toFixed(0)}px)`, dist > 60);
+  const lumB = async (at) => {
+    const raw = join(dir, 'pxB2.raw');
+    await run(['-y', '-v', 'error', '-ss', String(at), '-i', outB,
+      '-vf', 'crop=300:200:490:260,scale=1:1', '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'gray', raw]);
+    return readFileSync(raw)[0];
+  };
+  const sEarly = await lumB(2);
+  const sLate = await lumB(8);
+  check(`subtitles from the trickle canvas visible early (centre ${sEarly})`, sEarly > 120);
+  check(`and gone after the swap (centre ${sLate})`, sLate < sEarly - 40);
 } finally {
   try { main?.kill('SIGKILL'); } catch { /* gone */ }
   feed.stopSync();
