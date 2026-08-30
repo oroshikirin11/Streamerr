@@ -49,15 +49,44 @@ export class OverlayFeed {
     this._punched = 0;
     this._headPts = 0;
     this._stopped = false;
+    this._pacePos = null;
+    this._samples = [];
+    /**
+     * CONSUMPTION-AWARE reaping. A fixed keep-window killed a broadcast:
+     * at full canvas rate 64MB is ~0.3s, a freshly respawned reader fell
+     * behind it instantly, and the punched holes read back as zeros — the
+     * demuxer hung, the watchdog respawned into the same trap, dead air.
+     * The reaper now samples (fileSize, headPts) each tick and punches
+     * only regions whose pts the READER has consumed (pace() reports the
+     * encode position) minus a 3s margin. And if the reader stalls
+     * entirely, the renderer is SIGSTOPped once it runs 6s past the last
+     * known consumption — the file cannot outgrow a bounded window even
+     * when nothing is draining it.
+     */
+    this._samples = [];
+    this._pacePos = null;
     this._reaper = setInterval(() => {
       try {
         const size = statSync(this.path).size;
-        const keep = 64 * 1024 * 1024; // ~3s of full-rate canvas, > reader lag
-        const upTo = size - keep;
-        if (upTo - this._punched > 16 * 1024 * 1024) {
-          spawnSync('fallocate', ['-p', '-o', '0', '-l', String(upTo), this.path],
-            { stdio: 'ignore' });
-          this._punched = upTo;
+        this._samples.push({ size, pts: this._headPts ?? 0 });
+        if (this._samples.length > 300) this._samples.shift();
+        const consumed = this._pacePos;
+        if (consumed != null) {
+          let upTo = 0;
+          for (const smp of this._samples) {
+            if (smp.pts < consumed - 3) upTo = smp.size; else break;
+          }
+          if (upTo - this._punched > 16 * 1024 * 1024) {
+            spawnSync('fallocate', ['-p', '-o', '0', '-l', String(upTo), this.path],
+              { stdio: 'ignore' });
+            this._punched = upTo;
+          }
+        }
+        // stalled-reader guard, independent of engine ticks
+        const lead = (this._headPts ?? 0) - (this._pacePos ?? this._headPts ?? 0);
+        const child = this._renderer?.child;
+        if (child && lead > 6 && !this._stopped) {
+          child.kill('SIGSTOP'); this._stopped = true;
         }
       } catch { /* file may be mid-reset */ }
     }, 2000);
@@ -104,6 +133,7 @@ export class OverlayFeed {
    * Swaps and teardown always CONT first so TERM can be handled.
    */
   pace(positionSecs) {
+    if (Number.isFinite(positionSecs)) this._pacePos = positionSecs;
     const child = this._renderer?.child;
     if (!child || !Number.isFinite(positionSecs)) return;
     const lead = (this._headPts ?? 0) - positionSecs;
