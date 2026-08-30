@@ -200,9 +200,15 @@ export function publishOutputArgs(dests, { videoBitrate = null, codec = 'h264' }
   // flv fourcc by codec: 7 = AVC, hvc1/av01 = enhanced-RTMP. Remapped per
   // muxer as before; mpegts ignores tags.
   const vtag = { h264: '7', hevc: 'hvc1', av1: 'av01' }[codec] ?? '7';
+  // "mpegts ignores tags" held right up until a muxer that does not:
+  // matroska REJECTS the flv fourccs ("Tag [10][0][0][0] incompatible
+  // with AAC", measured live on the first NUT/AV1 broadcast). AV1 only
+  // ever travels in matroska, so its tags are scrubbed to 0 — the flv
+  // fourccs exist for flv, which AV1 never touches here.
+  const scrub = codec === 'av1';
   const common = [
     '-c', 'copy',
-    '-tag:v', vtag, '-tag:a', '10',
+    '-tag:v', scrub ? '0' : vtag, '-tag:a', scrub ? '0' : '10',
     ...(videoBitrate ? ['-b:v', String(videoBitrate)] : []),
     '-muxdelay', '0', '-muxpreload', '0', '-max_interleave_delta', '0',
   ];

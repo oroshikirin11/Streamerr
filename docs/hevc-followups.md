@@ -34,7 +34,24 @@
    this path (tuned default stays untouched). test/passthrough.test.mjs
    pins eligibility both ways.
 
-5. OPEN — AV1 through the engine is blocked by TRANSPORT, not encoders:
+5. DONE (2026-08-31) — AV1 rides a NUT internal transport. mpegts cannot
+   carry AV1 (its own demuxer reads it back as bin_data), so when
+   codec=av1 every feeder — sources, hold cards, countdowns — emits NUT
+   and the publisher demuxes NUT. The bank splices on NUT syncpoints
+   (the same 8-byte startcode the overlay feed scans for) instead of the
+   188-byte TS grid; each source's 25-byte fileid magic is stripped
+   (legal only at byte 0) and its header block captured so publisher
+   restarts can prepend it (mid-stream duplicate headers are legal —
+   measured). Torn mid-frame splices resync at the next syncpoint at the
+   cost of at most one glitched frame (measured). The flv codec tags are
+   scrubbed for AV1 (matroska rejects them — the tag:a 10 crash). Panel
+   preview is off for AV1 broadcasts (mpegts.js cannot decode it) with a
+   one-time warn. SVT forces a single chunk worker — it threads itself.
+   Live-verified: broadcast, seek splice, overlay apply (logo visually
+   confirmed in the SRT capture), clip seam, pause/hold card/resume,
+   zero decode errors in captures. TS paths for h264/hevc byte-identical.
+
+   Previously: AV1 through the engine is blocked by TRANSPORT, not encoders:
    the source->bank->publisher hop is MPEG-TS, and ffmpeg's mpegts
    muxer writes AV1 its own demuxer reads back as bin_data (measured).
    The publisher then maps audio only and dies on the matroska header.

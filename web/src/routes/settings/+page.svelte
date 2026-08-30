@@ -638,7 +638,7 @@
     <select bind:value={cfg.encoder.codec}>
       <option value="h264">H.264 — baseline bitrate; universal</option>
       <option value="hevc">H.265 — 2/3 the bitrate; most</option>
-      <option value="av1">AV1 — half the bitrate; patchy (not carried yet)</option>
+      <option value="av1">AV1 — half the bitrate; patchy; software encode, no preview</option>
     </select>
     {#if (cfg.encoder.codec || 'h264') !== 'h264'}
       <p class="muted small">

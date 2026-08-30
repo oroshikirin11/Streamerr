@@ -325,6 +325,12 @@ const PUBLISHER_STAT_MS = 20_000;
 const BANK_SECONDS = 15;
 /** Widest the cushion may be configured, in seconds. */
 export const BANK_SECONDS_MAX = 60;
+
+/** NUT syncpoint startcode — the splice grid of the AV1 transport, the
+ *  same 8 bytes the overlay feed already scans for. */
+export const NUT_SYNC = Buffer.from('4e4be4adeeca4569', 'hex');
+/** NUT file magic; legal only at byte 0, stripped before banking. */
+export const NUT_FILEID = Buffer.from('nut/multimedia container\0', 'latin1');
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
 /**
  * A ceiling on the bank, in bytes, derived from the depth actually asked for
@@ -443,6 +449,19 @@ export class PipelinePlayout extends EventEmitter {
     // minutes after the broadcast ended.
     this._abort = new AbortController();
 
+    /**
+     * The internal transport between source, bank and publisher.
+     *
+     * MPEG-TS for H.264/HEVC — the 188-byte packet grid is what the whole
+     * splice machinery is built on. AV1 cannot ride it: ffmpeg's mpegts
+     * muxer writes AV1 as private data its own demuxer reads back as
+     * bin_data (measured), so the publisher mapped audio only and died.
+     * AV1 rides NUT instead — ffmpeg-native, carries any codec, and its
+     * syncpoints give the bank the same splice grid the TS RAI walk gave
+     * it. Every deviation below is gated on this field; the TS paths are
+     * byte-identical to before.
+     */
+    this._fmt = (profile?.codec === 'av1') ? 'nut' : 'ts';
     const kbps = parseInt(String(profile?.videoBitrate ?? '6000'), 10) || 6000;
     this._kbps = kbps;
     /** The configured rate — passthrough clips re-size per clip and this is
@@ -1280,7 +1299,7 @@ export class PipelinePlayout extends EventEmitter {
       // on, A/V input offsets diverged, audio was discarded as late, and
       // the server dropped the starved stream minutes later.
       '-fflags', '+discardcorrupt',
-      '-f', 'mpegts', '-i', 'pipe:0',
+      '-f', this._fmt === 'nut' ? 'nut' : 'mpegts', '-i', 'pipe:0',
       /**
        * Muxer, flags and target all come from the destination set now — see
        * src/publish.js, which carries the measurements behind the codec tags
@@ -1299,6 +1318,18 @@ export class PipelinePlayout extends EventEmitter {
 
     // A source dying mid-write must not take the publisher down with it.
     p.stdin.on('error', () => { /* EPIPE while swapping sources */ });
+
+    // A NUT demuxer opening mid-broadcast needs main/stream headers before
+    // the first syncpoint it meets — the bank's head is a trim-aligned
+    // syncpoint, headers long gone. Prepend the captured block; when the
+    // bank still begins with a source's own in-band headers the duplicate
+    // is legal (measured).
+    if (this._fmt === 'nut' && this._nutHeader) {
+      try {
+        p.stdin.write(this._nutHeader);
+        this._published = (this._published ?? 0) + this._nutHeader.length;
+      } catch { /* stdin already broken; supervision handles it */ }
+    }
 
     let stderr = '';
     // -Infinity, not 0: the first stats line of a clip should appear at
@@ -1415,6 +1446,35 @@ export class PipelinePlayout extends EventEmitter {
 
   _bankPush(src, chunk) {
     if (this.source !== src) return;   // superseded mid-flight
+    /**
+     * NUT head processing, once per source. The 25-byte fileid magic is
+     * only legal at byte 0 of a file, so it is stripped before banking —
+     * the demuxer keys on the main-header STARTCODE, measured working
+     * without the magic. The header block (main + stream headers, up to
+     * the first syncpoint) is captured for publisher restarts: bank trims
+     * land on syncpoints, and a fresh demuxer needs headers before one.
+     * Duplicate header packets mid-stream are legal (measured), so the
+     * in-band copy every source emits stays in.
+     */
+    if (this._fmt === 'nut' && !src._nutDone) {
+      src._nutBuf = src._nutBuf ? Buffer.concat([src._nutBuf, chunk]) : chunk;
+      let head = src._nutBuf;
+      if (head.length >= NUT_FILEID.length
+          && head.subarray(0, NUT_FILEID.length).equals(NUT_FILEID)) {
+        head = head.subarray(NUT_FILEID.length);
+      }
+      const sp = head.indexOf(NUT_SYNC);
+      if (sp === -1) {
+        // Headers not complete yet — a syncpoint follows within ~400
+        // bytes normally; 1MB without one means this is not NUT at all.
+        if (head.length < (1 << 20)) return;
+      } else {
+        this._nutHeader = Buffer.from(head.subarray(0, sp));
+      }
+      src._nutDone = true;
+      src._nutBuf = null;
+      chunk = head;
+    }
     this._bank ??= [];
     // Each chunk carries the playhead it was encoded at, so we always know
     // how far viewers have actually got — the encoder runs up to a bank
@@ -1570,6 +1630,16 @@ export class PipelinePlayout extends EventEmitter {
    */
   /** A throwing preview listener must never take the drain loop down. */
   _emitData(chunk) {
+    // The preview pane is mpegts.js, which probes byte 0 for the 0x47 TS
+    // sync marker — NUT bytes would blind it forever. Say so once instead
+    // of feeding it garbage.
+    if (this._fmt === 'nut') {
+      if (!this._previewSaid) {
+        this._previewSaid = true;
+        this.emit('warn', 'panel preview cannot decode AV1 — preview is off for this broadcast; the stream itself is unaffected');
+      }
+      return;
+    }
     try { this.emit('data', chunk); } catch { /* listener's problem */ }
   }
 
@@ -1621,6 +1691,25 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _bankTrimToPacket() {
+    // The NUT equivalent of a packet boundary is a syncpoint: cut the bank
+    // at the last one, dropping the partial frame group behind it, so the
+    // next source's headers splice onto a complete group (measured clean).
+    if (this._fmt === 'nut') {
+      if (!this._bank?.length) return 0;
+      const whole = Buffer.concat(this._bank.map((c) => c.data));
+      const cut = whole.lastIndexOf(NUT_SYNC);
+      if (cut <= 0) return 0;
+      let excess = whole.length - cut;
+      const dropped = excess;
+      while (excess > 0 && this._bank?.length) {
+        const last = this._bank[this._bank.length - 1];
+        if (last.data.length <= excess) { excess -= last.data.length; this._bank.pop(); } else {
+          last.data = last.data.subarray(0, last.data.length - excess); excess = 0;
+        }
+      }
+      this._bankBytes -= dropped;
+      return dropped;
+    }
     let excess = (this._bankBytes ?? 0) % 188;
     if (!excess) return 0;
     const dropped = excess;
@@ -1656,6 +1745,11 @@ export class PipelinePlayout extends EventEmitter {
    * Returns seconds dropped, so callers rewind the resume position.
    */
   _bankTrimToAccessPoint() {
+    // NUT: the syncpoint trim IS the access-point trim (the live pipe that
+    // calls this is vaapi-only and never runs for AV1, but stay safe).
+    if (this._fmt === 'nut') {
+      return this._bankTrimToPacket() / (this._kbps * 125);
+    }
     this._bankTrimToPacket();
     if (!this._bank?.length) return 0;
     const whole = Buffer.concat(this._bank.map((c) => c.data));
@@ -1692,7 +1786,10 @@ export class PipelinePlayout extends EventEmitter {
     // in-flight packet with its true bytes from the head of the bank, so
     // every splice lands exactly on a packet boundary.
     const w = this.publisher?.stdin;
-    const torn = (this._published ?? 0) % 188;
+    // NUT has no fixed packet size to complete; a torn frame packet at the
+    // seam demuxes with a warning and costs at most one glitched frame
+    // before the next syncpoint resyncs (measured on a mid-frame splice).
+    const torn = this._fmt === 'nut' ? 0 : (this._published ?? 0) % 188;
     if (torn && w?.writable) {
       let need = 188 - torn;
       const head = [];
@@ -2833,6 +2930,10 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _chunkWorkers() {
+    // SVT-AV1 threads itself across every core — parallel chunk workers
+    // would fight it for the same cores AND need NUT chunk-file joining
+    // the scheduler does not speak. One process is both simpler and right.
+    if (this.profile?.codec === 'av1') return 1;
     // An explicit 2+ in the config still wins, for debugging on a box
     // whose behaviour we cannot predict. 0/1/absent means "decide for me".
     const manual = Number(this.profile?.parallelChunks);
@@ -4870,9 +4971,11 @@ export function buildSourceArgs({
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-fps_mode', 'cfr',
     '-muxdelay', '0', '-muxpreload', '0',
-    '-mpegts_flags', '+resend_headers',
+    // AV1 rides NUT — mpegts writes it as private data its own demuxer
+    // cannot read back. Timestamps behave identically (measured).
+    ...(profile.codec === 'av1' ? [] : ['-mpegts_flags', '+resend_headers']),
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
-    '-f', 'mpegts', 'pipe:1',
+    '-f', profile.codec === 'av1' ? 'nut' : 'mpegts', 'pipe:1',
   ];
 }
 
@@ -5006,6 +5109,17 @@ function fontArg() {
  *  what broke, matched to the profile so the publisher never sees a seam. */
 function cardEncodeArgs(profile) {
   const gop = String((profile.gopSeconds ?? 2) * (profile.fps ?? 30));
+  // An AV1 broadcast is one NUT/AV1 stream end to end — an H.264 card
+  // spliced into it would change codec mid-stream. SVT at preset 12 on a
+  // static card costs next to nothing (cards are software anyway).
+  if (profile.codec === 'av1') {
+    return [
+      '-c:v', 'libsvtav1', '-preset', '12', '-pix_fmt', 'yuv420p',
+      '-b:v', profile.videoBitrate,
+      '-g', gop, '-svtav1-params', 'rc=2:pred-struct=1',
+      '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
+    ];
+  }
   return [
     '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
     '-b:v', profile.videoBitrate, '-maxrate', profile.videoBitrate,
@@ -5014,6 +5128,12 @@ function cardEncodeArgs(profile) {
     '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
   ];
 }
+
+/** The stream-tail every feeder shares: TS with repeating headers, or NUT
+ *  for AV1 (see the transport note on the engine). */
+const cardMuxArgs = (profile) => (profile.codec === 'av1'
+  ? ['-f', 'nut', 'pipe:1']
+  : ['-mpegts_flags', '+resend_headers', '-f', 'mpegts', 'pipe:1']);
 
 export function buildHoldArgs({
   profile, tsOffset = 0, statsPeriodMs = 500, label = 'Paused',
@@ -5032,9 +5152,9 @@ export function buildHoldArgs({
       + 'fontsize=h/18:x=(w-text_w)/2:y=(h-text_h)/2',
     ...cardEncodeArgs(profile),
     '-output_ts_offset', Number(tsOffset).toFixed(3),
-    '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+    '-muxdelay', '0', '-muxpreload', '0',
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
-    '-f', 'mpegts', 'pipe:1',
+    ...cardMuxArgs(profile),
   ];
 }
 
@@ -5087,9 +5207,9 @@ export function buildCountdownArgs({
     '-vf', vf,
     ...cardEncodeArgs(profile),
     '-output_ts_offset', Number(tsOffset).toFixed(3),
-    '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+    '-muxdelay', '0', '-muxpreload', '0',
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
-    '-f', 'mpegts', 'pipe:1',
+    ...cardMuxArgs(profile),
   ];
 }
 
