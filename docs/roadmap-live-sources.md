@@ -166,3 +166,73 @@ replacement" is the point of the product.
 5. Live mode: cushion as a delay line, no respawn on overlay change.
 6. Webhook triggers last — they are cheap once (5) exists, and pointless
    before it.
+
+---
+
+## Phase 1 feasibility — settled by experiment, 2026-08-29
+
+**It works, but NOT by sending commands to a running filter graph.** That
+approach is dead:
+
+| filter | runtime-changeable options |
+|---|---|
+| `overlay` (CPU) | `x`, `y` only |
+| **`overlay_vaapi`** — the path we actually use | **none** |
+| `subtitles` | none |
+| `scale_vaapi` | none |
+
+ffmpeg exposes runtime commands (via `zmq`, which IS built in) only for options
+flagged `T`. On the GPU path there are none at all, so opacity, size, rotation,
+swapping a subtitle file and adding or removing an overlay are all impossible
+that way. An input cannot be added to a running graph either — the input count
+is fixed when the graph is built.
+
+### What does work: the overlay layer as a piped RGBA stream
+
+Keep the main graph FIXED and change only the pixels flowing into it:
+
+    [media]  ─────────────────────┐
+                                  ├─ overlay_vaapi → encode → publish
+    [RGBA frames on a pipe] ──────┘
+
+The renderer that fills the pipe is ours, and it can be restarted freely.
+Verified end to end:
+
+- renderer v1 (red) ran, was killed at 3s, replaced by v2 (blue)
+- sampled output: `f70000` at t=1s, `0000ff` at t=6s
+- the encoder produced all 8s **in one process** and never restarted
+
+**The load-bearing detail:** a wrapper must hold the write end of the pipe open
+across renderer restarts. If it closes, ffmpeg sees EOF on that input and
+`eof_action=repeat` freezes the last frame forever — a later restart's frames
+are never read. In the test a subshell held the fifo across both renderer
+processes, which is the pattern to copy.
+
+### Why this is the right shape anyway
+
+The renderer is the thing that later takes a camera and a desktop capture as
+extra inputs. Building it for Phase 1 IS the compositor Phase 6 needs — which
+is exactly the sequencing intent.
+
+### Effort
+
+Moderate, and mostly rearrangement rather than new invention:
+
+- the renderer is largely the EXISTING subtitle/image graph, redirected to
+  `-f rawvideo -pix_fmt rgba` on a pipe instead of being fused into the main
+  graph
+- the main graph gets simpler, because its shape stops varying with overlays
+- "apply" changes from respawning the source to respawning the renderer
+- the splice machinery stays for CLIP changes and seeks — Phase 1 only removes
+  restarts for OVERLAY changes, which is the complaint
+
+### Risks to measure before committing
+
+- **Pipe bandwidth.** Full-frame RGBA at 1080p24 is ~199 MB/s of memcpy. The
+  desktop will not care; the N100 might. Mitigations already in the codebase:
+  render at the content rect rather than the output frame, and the existing
+  half-rate canvas.
+- **Framesync stalls.** If the renderer is slower than realtime the main graph
+  waits on it. Needs a policy — drop late overlay frames rather than block.
+- **Renderer startup latency** becomes visible as a stale overlay for a few
+  frames after each apply, instead of a splice.
