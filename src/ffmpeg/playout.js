@@ -197,7 +197,14 @@ export class PlayoutEngine extends EventEmitter {
 
     let stderr = '';
     child.stderr.on('data', (d) => {
-      const s = this._redact(d.toString());
+      let s = this._redact(d.toString());
+      // hevc-in-mpegts copy surfaces duplicate-DTS pairs the flv muxer
+      // silently tolerated; ffmpeg self-corrects them by one 90kHz tick.
+      // Once-a-second noise, not information — drop the line, keep the fix.
+      if (s.includes('Non-monotonic DTS')) {
+        s = s.split('\n').filter((l) => !l.includes('Non-monotonic DTS')).join('\n');
+        if (!s.trim()) return;
+      }
       stderr += s;
       if (stderr.length > 64_000) stderr = stderr.slice(-32_000);
       this.emit('log', s);
