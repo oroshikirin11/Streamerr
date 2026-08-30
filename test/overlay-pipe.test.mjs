@@ -145,7 +145,7 @@ check('base cap shrinks with the shift',
     < Number(at(0).spec.inputs[at(0).spec.inputs.indexOf('-t') + 1]), true);
 check('no shift means clip start', at(0).spec.filters[0].includes('PTS+0.000/TB'), true);
 
-console.log('\nvariant B — pictures composite on the CPU, canvas stays a trickle');
+console.log('\nmotion in the source, stills on the trickle — the split that holds the bank');
 {
   const base = cases['subtitled 16:9, gpu canvas'];
   const img = { path: '/app/overlays/logo.png', size: 0.15, motion: 'bounce', speed: 0.06 };
@@ -155,45 +155,38 @@ console.log('\nvariant B — pictures composite on the CPU, canvas stays a trick
     profile: { ...base.profile, overlayPipe: true },
     overlayPipe: '/tmp/x.fifo',
     overlayImages: [img, still],
-    cpuImages: true,
   };
   const args = buildSourceArgs(piped);
   const g = args[args.indexOf('-filter_complex') + 1];
-  check('the source decodes in SOFTWARE and uploads once — the shape that held the bank',
-    !/hwdownload/.test(g) && !args.includes('-hwaccel') && /hwupload/.test(g), true);
-  check('the canvas composites on the CPU, not overlay_vaapi', g.includes('overlay_vaapi'), false);
-  check('the moving picture keeps its per-frame position expressions', /abs\(mod\(/.test(g), true);
-  check('both pictures are graph inputs', args.filter((x) => String(x).endsWith('.png')).length, 2);
-  check('the pipe input survives as input 1', args.indexOf('/tmp/x.fifo') > 0, true);
-  check('no decode surfaces at all — the GPU only encodes here',
-    args.includes('-extra_hw_frames'), false);
-  // With a band, the source crops the canvas and blends only its rows.
-  const bandArgs = buildSourceArgs({
-    ...piped,
-    subBand: { rect: { w: 1920, h: 1080 }, height: 420, y: 660, filter: 'x' },
-  });
-  const bg = bandArgs[bandArgs.indexOf('-filter_complex') + 1];
-  check('banded variant B crops the canvas to the band',
-    bg.includes('crop=1920:420:0:660'), true);
-  check('and blends it back at the band offset', bg.includes('x=0:y=660:'), true);
+  check('the source full-rates the trickle with frame dups', /\[1:v\]fps=/.test(g), true);
+  check('and blends the MOVING picture itself, per-frame expressions intact',
+    /abs\(mod\(/.test(g), true);
+  check('the GPU composite survives — one overlay_vaapi as always',
+    g.includes('overlay_vaapi'), true);
+  check('only the moving picture is a source input',
+    args.filter((x) => String(x).endsWith('.png')).length, 1);
   const spec = buildRendererSpec({
     profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
     shift: 0, duration: piped.duration,
     extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
-    overlayImages: [img, still], cpuImages: true,
+    overlayImages: [img, still],
   });
-  check('the canvas carries no pictures', spec.spec.inputs.filter((x) => String(x).endsWith('.png')).length, 0);
-  check('and therefore stays at half rate with the heartbeat',
-    /mpdecimate=max=6/.test(spec.spec.filters.join(';')), true);
-  // The variant OFF: same inputs, cpuImages false -> pictures ride the canvas
-  const canvasSpec = buildRendererSpec({
-    profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
-    shift: 0, duration: piped.duration,
-    extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
-    overlayImages: [img, still], cpuImages: false,
-  });
-  check('without the variant the canvas still knows how to draw them',
-    canvasSpec.spec.inputs.filter((x) => String(x).endsWith('.png')).length, 2);
+  check('the canvas draws the STILL picture and never the moving one',
+    spec.spec.inputs.filter((x) => String(x).endsWith('.png')).join(','),
+    '/app/overlays/badge.png');
+  const chain = spec.spec.filters.join(';');
+  check('the still composites AFTER the thin — one blend per heartbeat',
+    chain.indexOf('mpdecimate') !== -1
+    && chain.indexOf('mpdecimate') < chain.indexOf('[img0]overlay'), true);
+  check('the canvas has no full-rate mode left', /mpdecimate=max=6/.test(chain), true);
+  // A bouncing TEXT caption is libass-drawn: the whole clip goes inline.
+  check('bouncing text sends the clip inline',
+    buildRendererSpec({
+      profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
+      shift: 0, duration: piped.duration,
+      extractedPath: piped.extractedPath ?? null,
+      overlayAnimated: true,
+    }), null);
 }
 
 console.log('\nperformance interior — the regression that hit the N100');
@@ -249,8 +242,10 @@ console.log('\nperformance interior — the regression that hit the N100');
   });
   check('a swap rebases pts to clip time',
     cont.spec.filters[0].includes('setpts=PTS-STARTPTS+120.500/TB'), true);
-  check('the band yields to the picture inside the renderer', withPic.band, false);
-  check('the picture lands on the full canvas',
+  // Stills composite AFTER the thin and the pad now, so the band no
+  // longer yields to them — the whole point of the reorder.
+  check('the band SURVIVES a still picture inside the renderer', withPic.band, true);
+  check('the picture still lands on the canvas',
     /overlay/.test(withPic.spec.filters.join(';')), true);
 
   // Motion present at spawn plans full rate.

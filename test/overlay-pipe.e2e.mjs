@@ -158,14 +158,15 @@ try {
   // (a static canvas keeps 19 frames of 240).
 
   /**
-   * Act B: variant B — pictures composite on the CPU inside the source
-   * graph (scale_vaapi -> hwdownload -> overlay xN -> hwupload), the
-   * canvas carries subtitles alone. A gray clip so the bouncing red logo
-   * is the only red on screen: its presence, its MOTION, and a mid-run
-   * subtitle swap (which must not touch the logo) are all checked on the
-   * decoded output.
+   * Act B: motion in the source, subtitles on the trickle. The source
+   * full-rates the sparse canvas with fps dups and blends the bouncing
+   * logo itself with per-frame expressions — the inline shape that holds
+   * the bank — while the pipe stays a trickle. A gray clip so the red
+   * logo is the only red on screen: its presence, its MOTION, and a
+   * mid-run subtitle swap (which must not touch the logo) are all
+   * checked on the decoded output.
    */
-  console.log('\nvariant B: CPU pictures + subtitle trickle, swap mid-run');
+  console.log('\nact B: source-blended motion + trickle subtitles, swap mid-run');
   const clipB = join(dir, 'gray.mp4');
   const logo = join(dir, 'logo.png');
   const outB = join(dir, 'outB.mkv');
@@ -176,23 +177,24 @@ try {
   const logoDesc = { path: logo, size: 0.12, motion: 'bounce', speed: 0.2, opacity: 1 };
   const specB = (path, shift) => buildRendererSpec({
     profile, selection, srcPath: clipB, shift, clipOffset: 0, duration: 10,
-    extractedPath: path, overlayImages: [logoDesc], cpuImages: true,
+    extractedPath: path, overlayImages: [logoDesc],
   });
   const sB1 = specB(ass1, 0);
-  check('variant B canvas carries no pictures',
+  check('the canvas never draws the moving picture',
     sB1.spec.inputs.every((x) => !String(x).endsWith('.png')));
-  check('variant B canvas is a half-rate trickle',
+  check('and stays a half-rate trickle even with motion in the studio',
     /mpdecimate=max=6/.test(sB1.spec.filters.join(';')));
   feed.resetSync();
   feed.spawnRenderer(rendererArgs(sB1.spec));
   const argsB = buildSourceArgs({
     srcPath: clipB, offset: 0, profile, selection,
     extractedPath: ass1, duration: 10, overlayPipe: fifo,
-    overlayImages: [logoDesc], cpuImages: true,
+    overlayImages: [logoDesc],
   });
-  check('variant B decodes in software and composites on the CPU',
-    !argsB.includes('-hwaccel')
-    && !argsB[argsB.indexOf('-filter_complex') + 1].includes('overlay_vaapi'));
+  const gB = argsB[argsB.indexOf('-filter_complex') + 1];
+  check('the source full-rates the trickle and blends the motion itself',
+    /\[1:v\]fps=/.test(gB) && /abs\(mod\(/.test(gB)
+    && gB.includes('overlay_vaapi'));
   argsB.splice(argsB.indexOf('-i'), 0, '-re');
   argsB.splice(argsB.indexOf('-progress'), 4);
   argsB[argsB.indexOf('error')] = 'info';
@@ -209,7 +211,7 @@ try {
   console.log('    subtitles swapped away at ~4s — the logo must not notice');
   const resB = await mainBDone;
   main = null;
-  check('variant B encoder survived the swap and exited cleanly',
+  check('act B encoder survived the swap and exited cleanly',
     resB.code === 0, `exit ${resB.code}: ${resB.err.slice(-600)}`);
   // Red-pixel census + centroid straight off the decoded frames.
   const redAt = async (at) => {
