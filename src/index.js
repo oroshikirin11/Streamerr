@@ -12,7 +12,7 @@ import {
   existsSync, createReadStream, readdirSync, mkdirSync, statSync, writeFileSync, unlinkSync,
   readFileSync, rmSync,
 } from 'fs';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { timingSafeEqual } from 'crypto';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -322,6 +322,13 @@ function refreshLibrary() {
   library = makeLibrary(config, library);
   // New media, or the setting just changed: look again.
   stillSweeper?.start();
+}
+
+/** Exit code of a short synchronous command, -1 on spawn failure. */
+function spawnSyncSafe(cmd, args) {
+  try {
+    return spawnSync(cmd, args, { stdio: 'ignore', timeout: 8000 }).status ?? -1;
+  } catch { return -1; }
 }
 
 const clients = new Set();
@@ -1930,6 +1937,33 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     }
   }
 
+  /**
+   * Codec guard rails, BEFORE anything spawns: a foreseeable bad choice
+   * deserves a sentence, not a -22 from ffmpeg. AV1 cannot travel over
+   * RTMP (enhanced-flv av01 has no deployed receivers here; the contract
+   * says SRT/matroska), and a vaapi box without the chosen codec's
+   * encode entrypoint fails a 1-frame probe in ~300ms.
+   */
+  const codec = config.encoder.codec ?? 'h264';
+  if (codec === 'av1'
+      && publishDestinations().some((d) => d.protocol.startsWith('rtmp'))) {
+    return res.status(400).json({
+      error: 'AV1 cannot travel over RTMP — switch those destinations to SRT, or pick H.264/HEVC',
+    });
+  }
+  if (codec !== 'h264') {
+    const enc = { hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[codec];
+    const dev = config.encoder.device ?? '/dev/dri/renderD128';
+    const probe = spawnSyncSafe('ffmpeg', ['-v', 'error',
+      '-init_hw_device', `vaapi=va:${dev}`, '-f', 'lavfi',
+      '-i', 'color=c=black:s=320x180:r=24', '-frames:v', '1',
+      '-vf', 'format=nv12,hwupload', '-c:v', enc, '-f', 'null', '-']);
+    if (probe !== 0 && config.encoder.backend !== 'x264') {
+      return res.status(400).json({
+        error: `This box has no hardware ${codec.toUpperCase()} encoder — pick H.264, or switch the encoder backend to software`,
+      });
+    }
+  }
   ensureDirs();
   const sel = await selectBackend({
     backend: config.encoder.backend,
