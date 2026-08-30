@@ -1095,7 +1095,9 @@ export class PipelinePlayout extends EventEmitter {
             { duration: dur });
           return undefined;
         }
-        return this._ovFeed.swap(rendererArgs(spec.spec)).then(() => {
+        const swapArgs = rendererArgs(spec.spec);
+        this.emit('log', `[swap:overlay] ffmpeg ${this._redact(swapArgs.join(' '))}\n`);
+        return this._ovFeed.swap(swapArgs).then(() => {
           const ahead = Math.max(0, (this.position ?? 0) - (this.aired ?? 0));
           this.emit('log', '[overlay] applied live — no restart, reaches air '
             + `in ~${ahead.toFixed(1)}s as the buffer plays out\n`);
@@ -2324,7 +2326,11 @@ export class PipelinePlayout extends EventEmitter {
             log: (m) => this.emit('log', m),
           });
           this._ovFeed.resetSync({ width: rSpec.width, height: rSpec.height });
-          this._ovFeed.spawnRenderer(rendererArgs(rSpec.spec));
+          const rArgs = rendererArgs(rSpec.spec);
+          // The renderer spawns as visibly as the source: an entire hunt ran
+          // blind on which files and filters production actually used.
+          this.emit('log', `[spawn:overlay] ffmpeg ${this._redact(rArgs.join(' '))}\n`);
+          this._ovFeed.spawnRenderer(rArgs);
           pipePath = this._ovFeed.path;
           this._pipedClip = true;
           this._pipeClipOffset = offset;
