@@ -230,7 +230,14 @@ export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
         ...(inner === 'flv' ? ['bsfs/a=aac_adtstoasc'] : []),
         'attempt_recovery=1', 'recover_any_error=1', 'max_recovery_attempts=0',
         'restart_with_keyframe=1', 'recovery_wait_time=2',
-        'drop_pkts_on_overflow=1', 'queue_size=240', 'onfail=ignore'];
+        /**
+         * queue_size counts PACKETS, and this stream carries ~71/s
+         * (24 video + ~47 aac) — 240 was ~3.4s, and any receiver
+         * hiccup longer than that shed packets, seen as stutter on
+         * the theater page that the primary's viewers never got.
+         * 1200 ≈ 17s ≈ the bank depth; ~25MB at 12Mbps, cheap.
+         */
+        'drop_pkts_on_overflow=1', 'queue_size=1200', 'onfail=ignore'];
     return `[${opts.join(':')}${primary ? '' : innerOpts}]${teeEscape(targetUrl(protocol, creds))}`;
   });
   // tee needs the streams named explicitly; it maps nothing by default.
