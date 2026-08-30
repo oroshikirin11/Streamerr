@@ -1267,6 +1267,15 @@ export class PipelinePlayout extends EventEmitter {
   // ── publisher ────────────────────────────────────────────────────────
 
   _spawnPublisher() {
+    /**
+     * BEFORE the byte counter resets: a replacement publisher must start
+     * reading at an ACCESS POINT. The previous one may have consumed the
+     * bank's head into its dead stdin before its output ever connected —
+     * measured live at a refused reconnect: the retry began at headerless
+     * mid-GOP bytes, its probe flooded "PPS id out of range", gave up on
+     * codec parameters, and the receiver entered mid-GOP with artifacts.
+     */
+    this._bankTrimHeadToAccessPoint();
     // Bytes actually handed to this publisher. The mpegts stream is a
     // sequence of 188-byte packets, but the bank stores pipe reads, which
     // land on arbitrary byte boundaries — this counter is what lets a
@@ -1801,6 +1810,76 @@ export class PipelinePlayout extends EventEmitter {
     }
     this._bankBytes -= dropBytes;
     return dropBytes / perSecond;
+  }
+
+  /**
+   * Drop the bank's HEAD forward to the first video access point — TS RAI
+   * (or NUT syncpoint) — so a freshly spawned publisher begins at bytes a
+   * demuxer can actually enter. The tail trims cut for splices; this is
+   * the mirror image, for (re)spawned readers. No-op when the head is
+   * already an access point, which a fresh source's start always is.
+   */
+  _bankTrimHeadToAccessPoint() {
+    if (!this._bank?.length) return 0;
+    const whole = Buffer.concat(this._bank.map((c) => c.data));
+    let cut = -1;
+    if (this._fmt === 'nut') {
+      cut = whole.indexOf(NUT_SYNC);
+      // Headers precede the first syncpoint on a fresh stream — keep them.
+      if (cut <= 0 || this._published === 0) cut = -1;
+    } else {
+      // Cut at the PAT that precedes the first keyframe, not at the
+      // keyframe itself: without PAT/PMT the demuxer cannot map the pids
+      // and skips forward to the next repeat — landing mid-GOP again.
+      // resend_headers re-emits PAT/PMT ahead of every keyframe, so one
+      // is always right there.
+      let lastPat = -1;
+      for (let o = 0; o + 188 <= whole.length; o += 188) {
+        if (whole[o] !== 0x47) continue;
+        const pusi = (whole[o + 1] & 0x40) !== 0;
+        const pid = ((whole[o + 1] & 0x1f) << 8) | whole[o + 2];
+        if (pid === 0) lastPat = o;
+        const hasAf = (whole[o + 3] & 0x20) !== 0;
+        const rai = hasAf && whole[o + 4] > 0 && (whole[o + 5] & 0x40) !== 0;
+        if (pusi && rai && pid === 0x100) {
+          cut = lastPat !== -1 && lastPat < o ? lastPat : o;
+          break;
+        }
+      }
+    }
+    if (cut <= 0) {
+      if (this._published > 0 && whole.length > 0) {
+        /**
+         * No keyframe anywhere in the retained window — nothing in it is
+         * enterable (measured: a 27MB window of 10s-GOP HEVC had none,
+         * and the publisher that read it entered mid-GOP soup). Drop it
+         * all: a respawned source is usually PAUSED right behind the full
+         * bank with its fresh stream head — PAT/PMT, parameter sets, an
+         * IRAP — stuck in the pipe, which is the best first byte a
+         * publisher can get. Costs the cushion once, at a moment the
+         * viewer is already rebuffering.
+         */
+        this.emit('log', `[bank] no access point in the retained `
+          + `${(whole.length / 1024 / 1024).toFixed(1)}MB — dropping it; `
+          + `the stream re-enters at the next clean head\n`);
+        this._bank = [];
+        this._bankBytes = 0;
+        return whole.length;
+      }
+      return 0;
+    }
+    let drop = cut;
+    const dropped = drop;
+    while (drop > 0 && this._bank?.length) {
+      const head = this._bank[0];
+      if (head.data.length <= drop) { drop -= head.data.length; this._bank.shift(); } else {
+        head.data = head.data.subarray(drop); drop = 0;
+      }
+    }
+    this._bankBytes -= dropped;
+    this.emit('log', `[bank] head trimmed ${(dropped / 1024 / 1024).toFixed(1)}MB `
+      + `forward to the next keyframe for the fresh publisher\n`);
+    return dropped;
   }
 
   _bankFlush() {
