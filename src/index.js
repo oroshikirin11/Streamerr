@@ -433,8 +433,9 @@ function sgArtPrepare(imageSrc) {
         c.on('close', (code) => { clearTimeout(t); code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`)); });
         c.on('error', reject);
       });
-      const buf = readFileSync(out);
-      rmSync(out, { force: true });
+      const { readFile, rm } = await import('fs/promises');
+      const buf = await readFile(out);
+      rm(out, { force: true }).catch(() => {});
       if (buf.length > 1024 * 1024) return null;
       const { createHash } = await import('crypto');
       return {
