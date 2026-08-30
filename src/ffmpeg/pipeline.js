@@ -1069,27 +1069,6 @@ export class PipelinePlayout extends EventEmitter {
         const cached = this._cachedSubs(item.srcPath);
         const overlayFile = this._overlayFile(item, 0);
         const overlayImages = this._overlayImages(item, shift);
-        /**
-         * MOVING pictures live in the SOURCE graph (blended at full rate
-         * from the trickle — the inline shape, the only one that holds
-         * the bank), so changing one cannot be a renderer swap: the graph
-         * itself must change. A bouncing text caption appearing forces
-         * the clip inline for the same reason. The cushion-kept respawn
-         * makes either invisible on air; subtitles and still pictures
-         * below still swap the renderer live.
-         */
-        const animNow = (this.profile?.overlay ?? []).some(
-          (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
-        );
-        const movingSigNow = JSON.stringify((this.profile?.overlay ?? [])
-          .filter((i) => i?.type === 'image' && i?.enabled !== false
-            && (i?.motion === 'bounce' || i?.animated)));
-        if (animNow || movingSigNow !== (this._pipeMovingSig ?? '[]')) {
-          const gop = this._bankTrimToAccessPoint();
-          this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
-            { duration: dur });
-          return undefined;
-        }
         const spec = buildRendererSpec({
           profile: this.profile,
           selection: this.selection,
@@ -2411,13 +2390,7 @@ export class PipelinePlayout extends EventEmitter {
             width: rSpec.width, height: rSpec.height,
             rate: rSpec.rate, fps: rSpec.fps,
           };
-          // The moving pictures this source's graph bakes in (and whether
-          // a bouncing text caption forced it inline). setOverlay compares
-          // against these: a change to EITHER is a graph change, which is
-          // a cushion-kept respawn, not a renderer swap.
-          this._pipeMovingSig = JSON.stringify((this.profile?.overlay ?? [])
-            .filter((i) => i?.type === 'image' && i?.enabled !== false
-              && (i?.motion === 'bounce' || i?.animated)));
+
         } catch (err) {
           this.emit('warn', 'overlay pipe unavailable — applying overlays '
             + `will restart the source: ${err.message}`);
@@ -3868,16 +3841,7 @@ export function planOverlayPipe({
 }) {
   if (!profile?.overlayPipe || profile.backend !== 'vaapi' || !profile.gpuFull) return null;
   if (sub?.needsComplex) return null;
-  /**
-   * A bouncing text caption is drawn by libass, so it can only exist ON
-   * the canvas — and a per-frame canvas means full-rate transport, which
-   * is the one thing this pipe measurably cannot afford (0.55x against
-   * the inline graph's 1.05x on the N100; the transport machinery, not
-   * the composite, is the cost). Those clips take the inline path whole.
-   * Moving PICTURES stay eligible: the source blends them itself from a
-   * trickle canvas, exactly like the inline graph does.
-   */
-  if (overlayAnimated) return null;
+
   // The pipe input must be BOUNDED or the main process cannot exit — see
   // pipeInputArgs. No known duration, no bound, no pipe.
   if (!(duration > 0)) return null;
@@ -3904,21 +3868,7 @@ export function planOverlayPipe({
     || (profile.overlay ?? []).some((i) => i?.enabled !== false);
   if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);
-  /**
-   * Any MOVING or animated picture routes the clip inline whole. This is
-   * the measured verdict, on identical content (seek-controlled A/B over
-   * the same 90s of a hard stretch): bare 0.93x, the inline canvas with
-   * the bounce drawn on it 0.95x — effectively free — and every piped
-   * shape tried for motion 0.55-0.60x, whatever moved the pixels (canvas
-   * transport, CPU composite, fps-dup blending; three architectures, one
-   * loser: feeding motion through the pipe). In-process canvas
-   * generation is what wins. Applies that add, change or remove a moving
-   * picture take the cushion-kept respawn; every clip without motion
-   * keeps the pipe and its live swaps.
-   */
-  if ((overlayImages ?? []).some((i) => i?.animated || isMoving(i))) {
-    return null;
-  }
+
   if (sub?.filter) {
     // Same conditions the inline GPU canvas demands, for the same reasons.
     if (!profile.gpuSubs) return null;
@@ -3977,18 +3927,16 @@ export function buildRendererSpec({
   if (!plan) return null;
   const { rect, wide } = plan;
   /**
-   * Only STILL pictures ride the canvas, composited after the thin — so
-   * they cost one small blend per HEARTBEAT, not per frame, and the band
-   * economy survives them. Moving and animated pictures never come here:
-   * the source blends those itself at full rate from this trickle, the
-   * way the inline graph always did. The canvas therefore never has a
-   * full-rate mode at all — measured on the N100, full-rate transport is
-   * what the pipe cannot afford (0.55x vs the inline 1.05x), and it was
-   * also the only condition the green corruption ever needed.
+   * The canvas draws EVERYTHING again — stills after the thin (one blend
+   * per heartbeat), moving and animated pictures at full chain rate.
+   * The shm transport made full-rate affordable: appends are page-cache
+   * memcpys with no lockstep, the renderer is consumption-paced by
+   * SIGSTOP, and swaps stamp from the written head. Zero restarts in
+   * live mode is the contract; this is where it is honoured.
    */
-  const imgList = (overlayImages ?? []).filter((i) => i?.path)
-    .filter((i) => !(i?.animated || isMoving(i)));
-  if (overlayAnimated) return null;
+  const imgList = (overlayImages ?? []).filter((i) => i?.path);
+  const stillImgs = imgList.filter((i) => !(i?.animated || isMoving(i)));
+  const movingImgs = imgList.filter((i) => i?.animated || isMoving(i));
   // Bound the generated base or the renderer never exits on its own; +5 so
   // it always outlives the clip rather than starving the composite's tail.
   const cap = duration != null && duration > 0
@@ -4008,6 +3956,8 @@ export function buildRendererSpec({
    */
   const band = subBand && sub.filter && !wide && !plan.rect.bars
     && subBand.rect.w === rect.w && subBand.rect.h === rect.h
+    && !overlayAnimated
+    && !(overlayImages ?? []).some((i) => i?.path && (i?.animated || isMoving(i)))
     ? subBand : null;
   const baseH = band ? band.height : rect.h;
   /**
@@ -4042,7 +3992,8 @@ export function buildRendererSpec({
    * behaviour. {readrate, beat, fullRate, hwFrames}.
    */
   const tune = profile.pipeTuning ?? {};
-  const chainRate = (tune.fullRate ? plan.rate : halfRate(plan.rate)) || plan.rate;
+  const perFrame = Boolean(overlayAnimated) || movingImgs.length > 0;
+  const chainRate = (tune.fullRate || perFrame ? plan.rate : halfRate(plan.rate)) || plan.rate;
   const beat = Number(tune.beat) > 0 ? Number(tune.beat) : 6;
   const readrate = Number(tune.readrate) > 0 ? String(tune.readrate) : '2.5';
   const inputs = ['-f', 'lavfi', '-readrate', readrate, ...cap, '-i',
@@ -4062,9 +4013,20 @@ export function buildRendererSpec({
     ? `[0:v]setpts=PTS+${sh}/TB,${band ? band.filter : sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS+${rebase}/TB,format=rgba`
     : `[0:v]setpts=PTS+${rebase}/TB`;
-  const imgs = canvasImageChain(imgList, {
-    width: rect.w, firstInput: 1, inLabel: 'sub', outLabel: 'cv', phase: shift,
+  const movers = canvasImageChain(movingImgs, {
+    width: rect.w, firstInput: 1, inLabel: 'sub0', outLabel: 'mv', phase: shift,
   });
+  const stillsRaw = canvasImageChain(stillImgs, {
+    width: rect.w, firstInput: 1 + movingImgs.length,
+    inLabel: 'sub', outLabel: 'cv', phase: shift,
+  });
+  // Two chains mint img0/ov0 labels independently; keep the stills' unique.
+  const imgs = {
+    ...stillsRaw,
+    filters: stillsRaw.filters.map((f) => f
+      .replace(/\[img(\d+)\]/g, '[simg$1]')
+      .replace(/\[ov(\d+)\]/g, '[sov$1]')),
+  };
   const pad = wide
     ? `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`
     : band
@@ -4109,11 +4071,22 @@ export function buildRendererSpec({
    * pops on the next heartbeat, at most half a second late, the same slop
    * the band always accepted for cue boundaries.
    */
-  const filters = imgs.filters.length
-    ? [`${head}${thin}${pad}[sub]`, ...imgs.filters,
-      `[cv]null[out]`]
+  /**
+   * Chain order: subtitles -> MOVING pictures (per frame, before the
+   * thin: their motion makes every frame differ, so mpdecimate passes
+   * the full rate through exactly when motion is live and the trickle
+   * economy returns by itself the moment it is not) -> thin -> pad ->
+   * stills (one blend per surviving frame).
+   */
+  const headOut = movers.filters.length ? '[sub0]' : '[sub]';
+  const preThin = movers.filters.length ? '[mv]' : '[sub]';
+  const filters = imgs.filters.length || movers.filters.length
+    ? [`${head}${headOut}`,
+      ...movers.filters,
+      `${preThin}null${thin}${pad}${imgs.filters.length ? '[sub]' : '[out]'}`,
+      ...(imgs.filters.length ? [...imgs.filters, '[cv]null[out]'] : [])]
     : [`${head}${thin}${pad}[out]`];
-  inputs.push(...imgs.inputs);
+  inputs.push(...movers.inputs, ...imgs.inputs);
   return {
     ...plan,
     band: Boolean(band),

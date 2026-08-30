@@ -179,20 +179,20 @@ try {
     '-t', '10', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', clipB]);
   await run(['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=120x120',
     '-frames:v', '1', logo]);
-  const stillDesc = { path: logo, size: 0.12, x: 0.3, y: 0.35, opacity: 1 };
-  check('a MOVING picture refuses the pipe entirely',
-    !buildSourceArgs({
+  const stillDesc = { path: logo, size: 0.12, x: 0.3, y: 0.35, opacity: 1, motion: 'bounce', speed: 0.2 };
+  check('a MOVING picture rides the pipe — zero restarts is the contract',
+    buildSourceArgs({
       srcPath: clipB, offset: 0, profile, selection,
       extractedPath: ass1, duration: 10, overlayPipe: fifo,
-      overlayImages: [{ ...stillDesc, motion: 'bounce', speed: 0.2 }],
+      overlayImages: [stillDesc],
     }).includes(fifo));
   const specB = (path, shift) => buildRendererSpec({
     profile, selection, srcPath: clipB, shift, clipOffset: 0, duration: 10,
     extractedPath: path, overlayImages: [stillDesc],
   });
   const sB1 = specB(ass1, 0);
-  check('the still rides the canvas', sB1.spec.inputs.includes(logo));
-  check('on a half-rate trickle', /mpdecimate=max=6/.test(sB1.spec.filters.join(';')));
+  check('the mover rides the canvas', sB1.spec.inputs.includes(logo));
+  check('per frame, ahead of the thin', /abs\(mod\(/.test(sB1.spec.filters.join(';')));
   feed.resetSync();
   feed.spawnRenderer(rendererArgs(sB1.spec));
   const argsB = buildSourceArgs({
@@ -200,7 +200,7 @@ try {
     extractedPath: ass1, duration: 10, overlayPipe: fifo,
     overlayImages: [stillDesc],
   });
-  check('the still-picture clip keeps the pipe', argsB.includes(fifo));
+  check('the bounce clip keeps the pipe', argsB.includes(fifo));
   argsB.splice(argsB.indexOf('-i'), 0, '-re');
   argsB.splice(argsB.indexOf('-progress'), 4);
   argsB[argsB.indexOf('error')] = 'info';
@@ -216,7 +216,7 @@ try {
   });
   await sleep(4000);
   await feed.swap(rendererArgs(specB(ass2, Math.max(4.0, feed.headPts())).spec));
-  console.log('    subtitles swapped away at ~4s — the still must not notice');
+  console.log('    subtitles swapped away at ~4s — the bounce must not notice');
   const resB = await mainBDone;
   clearInterval(paceB);
   main = null;
@@ -238,10 +238,10 @@ try {
   };
   const rEarly = await redAt(2);
   const rLate = await redAt(8);
-  check(`still on air early (${rEarly.count} red px)`, rEarly.count > 2000);
-  check(`still STILL on air after the subtitle swap (${rLate.count} red px)`, rLate.count > 2000);
+  check(`mover on air early (${rEarly.count} red px)`, rEarly.count > 2000);
+  check(`mover still on air after the subtitle swap (${rLate.count} red px)`, rLate.count > 2000);
   const dist = Math.hypot(rEarly.x - rLate.x, rEarly.y - rLate.y);
-  check(`and it did not move (${dist.toFixed(0)}px drift)`, dist < 20);
+  check(`and it BOUNCES through the pipe (${dist.toFixed(0)}px moved)`, dist > 60);
   const lumB = async (at) => {
     const raw = join(dir, 'pxB2.raw');
     await run(['-y', '-v', 'error', '-ss', String(at), '-i', outB,

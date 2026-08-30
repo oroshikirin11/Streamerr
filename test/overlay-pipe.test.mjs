@@ -145,7 +145,7 @@ check('base cap shrinks with the shift',
     < Number(at(0).spec.inputs[at(0).spec.inputs.indexOf('-t') + 1]), true);
 check('no shift means clip start', at(0).spec.filters[0].includes('PTS+0.000/TB'), true);
 
-console.log('\nmotion goes inline, stills ride the trickle — the measured split');
+console.log('\nzero restarts: EVERYTHING rides the pipe in live mode');
 {
   const base = cases['subtitled 16:9, gpu canvas'];
   const img = { path: '/app/overlays/logo.png', size: 0.15, motion: 'bounce', speed: 0.06 };
@@ -155,38 +155,40 @@ console.log('\nmotion goes inline, stills ride the trickle — the measured spli
     profile: { ...base.profile, overlayPipe: true },
     overlayPipe: '/tmp/x.fifo',
   };
-  // A moving picture routes the whole clip inline: seek-controlled A/B on
-  // identical content measured the inline bounce at bare speed and every
-  // piped shape for motion a third slower.
   const movingArgs = buildSourceArgs({ ...piped, overlayImages: [img, still] });
-  check('a moving picture takes the clip off the pipe',
-    movingArgs.includes('/tmp/x.fifo'), false);
-  check('and the inline canvas draws the bounce per frame',
-    /abs\(mod\(/.test(movingArgs.join(' ')), true);
-  // Stills alone stay piped, composited after the thin.
-  const stillArgs = buildSourceArgs({ ...piped, overlayImages: [still] });
-  check('stills alone keep the pipe', stillArgs.includes('/tmp/x.fifo'), true);
+  check('a moving picture KEEPS the pipe — no inline detour left',
+    movingArgs.includes('/tmp/x.fifo'), true);
+  check('and the source graph carries no baked motion',
+    /abs\(mod\(/.test(movingArgs.join(' ')), false);
   const spec = buildRendererSpec({
+    profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
+    shift: 0, duration: piped.duration,
+    extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
+    overlayImages: [img, still],
+  });
+  const chain = spec.spec.filters.join(';');
+  check('the canvas draws the mover per frame, BEFORE the thin',
+    chain.indexOf('abs(mod(') !== -1
+    && chain.indexOf('abs(mod(') < chain.indexOf('mpdecimate'), true);
+  check('and the still after it — one blend per surviving frame',
+    chain.indexOf('mpdecimate') < chain.indexOf('[simg0]'), true);
+  check('motion runs the chain at full rate',
+    spec.spec.inputs.join(' ').includes('r=24000/1001'), true);
+  const stillOnly = buildRendererSpec({
     profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
     shift: 0, duration: piped.duration,
     extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
     overlayImages: [still],
   });
-  const chain = spec.spec.filters.join(';');
-  check('the canvas draws the still',
-    spec.spec.inputs.filter((x) => String(x).endsWith('.png')).join(','),
-    '/app/overlays/badge.png');
-  check('AFTER the thin — one blend per heartbeat',
-    chain.indexOf('mpdecimate') !== -1
-    && chain.indexOf('mpdecimate') < chain.indexOf('[img0]overlay'), true);
-  check('the canvas has no full-rate mode', /mpdecimate=max=6/.test(chain), true);
-  check('bouncing text sends the clip inline too',
+  check('stills alone keep the half-rate trickle',
+    stillOnly.spec.inputs.join(' ').includes('r=24000/2002'), true);
+  check('bouncing text rides the pipe too',
     buildRendererSpec({
       profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
       shift: 0, duration: piped.duration,
       extractedPath: piped.extractedPath ?? null,
       overlayAnimated: true,
-    }), null);
+    }) !== null, true);
 }
 
 console.log('\nperformance interior — the regression that hit the N100');
@@ -255,7 +257,8 @@ console.log('\nperformance interior — the regression that hit the N100');
     overlayImages: [{ path: '/o/logo.png', x: 0.1, y: 0.1, size: 0.2,
       opacity: 1, enabled: true, motion: 'bounce', speed: 0.1 }],
   });
-  check('motion at spawn refuses the pipe entirely', moving, null);
+  check('motion at spawn rides the pipe at full chain rate',
+    moving !== null && moving.spec.inputs.join(' ').includes('r=24000/1001'), true);
 }
 
 console.log('\nthe feed — an unbroken NUT byte stream across renderers');
