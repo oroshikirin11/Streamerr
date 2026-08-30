@@ -1084,8 +1084,8 @@ export class PipelinePlayout extends EventEmitter {
           .filter((i) => i?.type === 'image' && i?.enabled !== false
             && (i?.motion === 'bounce' || i?.animated)));
         if (animNow || movingSigNow !== (this._pipeMovingSig ?? '[]')) {
-          this._bankTrimToPacket();
-          this._play(item, Math.max(this.aired ?? 0, this.position),
+          const gop = this._bankTrimToAccessPoint();
+          this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
             { duration: dur });
           return undefined;
         }
@@ -1111,8 +1111,8 @@ export class PipelinePlayout extends EventEmitter {
         if (!spec) {
           // Eligibility changed underneath (a demotion mid-clip). The
           // classic restart still works; use it rather than not applying.
-          this._bankTrimToPacket();
-          this._play(item, Math.max(this.aired ?? 0, this.position),
+          const gop = this._bankTrimToAccessPoint();
+          this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
             { duration: dur });
           return undefined;
         }
@@ -1159,15 +1159,15 @@ export class PipelinePlayout extends EventEmitter {
        * the publisher has nothing to send while the encoder catches up.
        */
       const rewound = this._bankTrimTo(this.applySeconds ?? this.bufferSeconds);
-      const dropped = this._bankTrimToPacket();
+      const gop = this._bankTrimToAccessPoint();
       // Never behind what has already gone out: those bytes are spent.
-      const resume = Math.max(this.aired ?? 0, this.position - rewound);
+      const resume = Math.max(this.aired ?? 0, this.position - rewound - gop);
       const ahead = Math.max(0, resume - (this.aired ?? resume));
       this.emit('log', `[overlay] applied — on air in ~${ahead.toFixed(1)}s `
         + (rewound > 0.05
-          ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${rewound.toFixed(1)}s re-encoded)`
-          : '(cushion kept)')
-        + `${dropped ? `, ${dropped}B partial packet trimmed` : ''}\n`);
+          ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
+          : `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`)
+        + '\n');
       this._play(item, resume, { duration: dur });
     }), 'applying overlays');
     return true;
@@ -1629,6 +1629,50 @@ export class PipelinePlayout extends EventEmitter {
     }
     this._bankBytes -= dropped;
     return dropped;
+  }
+
+  /**
+   * Trim the bank back to the last VIDEO random-access point, so the
+   * splice junction lands on a complete GOP instead of mid-frame.
+   *
+   * _bankTrimToPacket makes the tail packet-aligned, but a packet
+   * boundary is not a frame boundary: the junction truncated whatever
+   * frame was in flight, and the decoder aired it as a single black
+   * flash — reported by the operator at one-frame precision. Walking
+   * back to the last packet with payload_unit_start + the adaptation
+   * field's random_access_indicator on the video pid (0x100, ffmpeg's
+   * first-stream default) ends the kept bank right before an IDR; the
+   * replacement source re-encodes from there and opens with its own
+   * fresh IDR, so the decoder never sees a partial frame. Costs up to
+   * one GOP (~2s) of re-encode, which the cushion absorbs.
+   *
+   * Returns seconds dropped, so callers rewind the resume position.
+   */
+  _bankTrimToAccessPoint() {
+    this._bankTrimToPacket();
+    if (!this._bank?.length) return 0;
+    const whole = Buffer.concat(this._bank.map((c) => c.data));
+    let cut = -1;
+    for (let o = 0; o + 188 <= whole.length; o += 188) {
+      if (whole[o] !== 0x47) continue;
+      const pusi = (whole[o + 1] & 0x40) !== 0;
+      const pid = ((whole[o + 1] & 0x1f) << 8) | whole[o + 2];
+      const hasAf = (whole[o + 3] & 0x20) !== 0;
+      const rai = hasAf && whole[o + 4] > 0 && (whole[o + 5] & 0x40) !== 0;
+      if (pusi && rai && pid === 0x100) cut = o;
+    }
+    if (cut <= 0) return 0;
+    const dropBytes = whole.length - cut;
+    const perSecond = this._kbps * 125;
+    let excess = dropBytes;
+    while (excess > 0 && this._bank?.length) {
+      const last = this._bank[this._bank.length - 1];
+      if (last.data.length <= excess) { excess -= last.data.length; this._bank.pop(); } else {
+        last.data = last.data.subarray(0, last.data.length - excess); excess = 0;
+      }
+    }
+    this._bankBytes -= dropBytes;
+    return dropBytes / perSecond;
   }
 
   _bankFlush() {
