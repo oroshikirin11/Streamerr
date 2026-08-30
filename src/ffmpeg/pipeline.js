@@ -3918,7 +3918,7 @@ export function buildRendererSpec({
     || imgList.some((i) => i?.animated || isMoving(i));
   const chainRate = (!perFrame && halfRate(plan.rate)) || plan.rate;
   const beat = perFrame ? 12 : 6;
-  const inputs = ['-f', 'lavfi', '-readrate', '1.2', ...cap, '-i',
+  const inputs = ['-f', 'lavfi', '-readrate', '1.1', ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
    * Timestamps are the continuation clock now, and they are CLIP-relative:

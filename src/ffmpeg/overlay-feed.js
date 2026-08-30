@@ -33,6 +33,7 @@
  */
 
 import { spawn, spawnSync } from 'child_process';
+import { setPriority } from 'os';
 import { closeSync, openSync, rmSync, statSync } from 'fs';
 import { Socket } from 'net';
 
@@ -89,6 +90,10 @@ export class OverlayFeed {
     if (!this.active) throw new Error('overlay feed is not active');
     if (this._renderer) throw new Error('a renderer is already running');
     const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Latency-tolerant by design — the bank absorbs its hiccups — so its
+    // readrate bursts must never preempt an encoder thread on a saturated
+    // four-core box. Scheduling cannot corrupt pixels.
+    try { setPriority(child.pid, 10); } catch { /* best effort */ }
     const sock = this._sock;
     let tail = '';
     child.stderr.on('data', (d) => {
