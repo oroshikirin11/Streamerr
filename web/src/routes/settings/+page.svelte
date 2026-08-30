@@ -465,6 +465,7 @@
           tonemap: cfg.encoder.tonemap || 'auto',
           frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
+          overlayPipe: cfg.encoder.overlayPipe !== false,
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
       }
@@ -1025,6 +1026,18 @@
     <p class="muted small">
       Depends on machine and file: a large win for 10-bit HEVC on a weak CPU, a
       loss for 8-bit H.264 on a strong one. Measure it.
+    </p>
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" bind:checked={cfg.encoder.overlayPipe} style="width:auto" />
+      Live overlay compositor
+    </label>
+    <p class="muted small">
+      On: Studio changes reach the stream without restarting the encoder
+      (subtitle and overlay changes apply live). Off: the classic engine
+      from before the compositor &mdash; every Studio change restarts the
+      source behind the buffer. Takes effect from the next episode or the
+      next broadcast.
     </p>
 
     <div class="g3" style="margin-top:6px">
