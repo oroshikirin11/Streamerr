@@ -3867,8 +3867,31 @@ export function buildRendererSpec({
     && subBand.rect.w === rect.w && subBand.rect.h === rect.h
     && !imgList.length ? subBand : null;
   const baseH = band ? band.height : rect.h;
-  const inputs = ['-f', 'lavfi', ...cap, '-i',
-    `color=c=black@0.0:s=${rect.w}x${baseH}:r=${plan.rate},format=rgba`];
+  /**
+   * Two renderer-side economies, reapplied on the clean base after the
+   * operator's bisection isolated the green-ghost regression to the batch
+   * of commits that first carried them. Both are innocent by construction —
+   * they change WHICH frames the chain renders, never their pixels — but
+   * each returns as its own commit so a live test can convict or acquit it
+   * individually.
+   *
+   * -readrate 1.2: the unpaced renderer strip-mined a full E-core
+   * rendering canvas hours ahead of air (measured on the N100: 98.7% CPU,
+   * node at 64% ferrying frames nobody needed, encoder starving at 0.69x).
+   * The run-ahead cache reader caps sources at 1.05x, so 1.2 loses nothing.
+   *
+   * Half cadence when nothing moves: a static canvas rendered 36 frames a
+   * second at 1.5x pacing to keep about two. Half rate is the same 83ms
+   * cue-boundary slop the inline band always accepted. Anything moving
+   * renders at the full effective rate, decided fresh at every swap — the
+   * cadence is renderer-internal, never pipe format.
+   */
+  const perFrame = Boolean(overlayAnimated)
+    || imgList.some((i) => i?.animated || isMoving(i));
+  const chainRate = (!perFrame && halfRate(plan.rate)) || plan.rate;
+  const beat = perFrame ? 12 : 6;
+  const inputs = ['-f', 'lavfi', '-readrate', '1.2', ...cap, '-i',
+    `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
    * Timestamps are the continuation clock now, and they are CLIP-relative:
    * the main graph's video starts at zero after its -ss, and NUT carries
@@ -3906,7 +3929,11 @@ export function buildRendererSpec({
    * encode loop where there is none — the old in-graph measurement that
    * rejected mpdecimate does not apply here.
    */
-  const thin = ',mpdecimate=max=12';
+  // The heartbeat tracks the cadence so framesync's pairing queue stays at
+  // half a second of media either way. mpdecimate stays on the moving chain
+  // too — it thins nothing there, but its removal is one of the bisection
+  // suspects and it does not return until a live test acquits it.
+  const thin = `,mpdecimate=max=${beat}`;
   const filters = imgs.filters.length
     ? [`${head}[sub]`, ...imgs.filters, `[cv]null${pad}${thin}[out]`]
     : [`${head}${pad}${thin}[out]`];
