@@ -17,6 +17,9 @@ const profile = {
   backend: 'vaapi', device: '/dev/dri/renderD128', gpuFull: true, gpuSubs: true,
   overlayPipe: true, width: 1280, height: 720, fps: 30, fpsMode: 'auto',
   videoBitrate: '4000k', audioBitrate: '160k', gopSeconds: 2,
+  // Something to draw: a bare clip takes the classic fast path now, so the
+  // smoke gives the engine a configured caption to justify the pipe.
+  overlay: [{ type: 'text', text: 'SMOKE', x: 0.1, y: 0.1, size: 0.05, enabled: true }],
 };
 const selection = {
   video: { width: 640, height: 360, codec: 'h264', frameRate: '24000/1001', sar: '1:1' },

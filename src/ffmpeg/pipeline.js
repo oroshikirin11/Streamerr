@@ -3787,6 +3787,28 @@ export function planOverlayPipe({
   // The pipe input must be BOUNDED or the main process cannot exit — see
   // pipeInputArgs. No known duration, no bound, no pipe.
   if (!(duration > 0)) return null;
+  /**
+   * Nothing to draw, no pipe — the composite pass is never free.
+   *
+   * Measured on the N100: Backrooms (4K HDR, no subtitles, no overlays)
+   * ran 1.02x on the plain fast path and 0.78x with the pipe attached,
+   * with the canvas at two heartbeat frames a second. The whole gap is
+   * ONE extra full-frame VPP pass on an iGPU already saturated by decode,
+   * scale, tonemap and encode, and no fixed graph can skip a pass
+   * conditionally. A clip with nothing to composite therefore takes the
+   * EXACT pre-pipe graph — for bare playback this is not "as fast as the
+   * old setup", it IS the old setup.
+   *
+   * The first overlay on such a clip goes out through the classic
+   * cushion-kept respawn — invisible to viewers, the bank covers it — and
+   * from then on the pipe is armed and every apply is a free swap.
+   * Configured-but-hidden overlays count as something to draw, so the
+   * show/hide toggle stays free.
+   */
+  const anythingToDraw = Boolean(sub?.filter)
+    || (overlayImages ?? []).length > 0
+    || (profile.overlay ?? []).some((i) => i?.enabled !== false);
+  if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);
   if (sub?.filter) {
     // Same conditions the inline GPU canvas demands, for the same reasons.

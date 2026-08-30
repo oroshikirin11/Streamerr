@@ -132,8 +132,16 @@ export class OverlayFeed {
     if (!this.active) throw new Error('overlay feed is not active');
     const old = this._renderer;
     if (old) {
-      try { old.child.kill('SIGKILL'); } catch { /* already gone */ }
-      await old.done;                       // padding happens in its close
+      // TERM first so ffmpeg can finish its packet and exit at a frame
+      // boundary; KILL only if it is wedged (blocked mid-write in a full
+      // fifo). A clean cut costs nothing and a torn one costs the reader a
+      // resync through garbage.
+      try { old.child.kill('SIGTERM'); } catch { /* already gone */ }
+      const grace = setTimeout(() => {
+        try { old.child.kill('SIGKILL'); } catch { /* already gone */ }
+      }, 400);
+      await old.done;
+      clearTimeout(grace);
     }
     this.spawnRenderer(args);
   }

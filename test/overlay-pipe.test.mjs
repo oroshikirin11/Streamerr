@@ -51,8 +51,21 @@ const planFor = (params, extra = {}) => planOverlayPipe({
 console.log('\neligibility — every no must route somewhere that works');
 check('subtitled 16:9 is eligible',
   planFor(cases['subtitled 16:9, gpu canvas']) !== null, true);
-check('subtitle-less 16:9 is eligible (that is the feature)',
-  planFor(cases['no subtitles, still picture on gpu']) !== null, true);
+// A truly bare clip now takes the exact pre-pipe fast path — the composite
+// pass measured 0.24x on a 4K title compositing nothing.
+check('subtitle-less clip WITH a picture is eligible',
+  planOverlayPipe({
+    profile: { ...cases['no subtitles, still picture on gpu'].profile, overlayPipe: true },
+    selection: cases['no subtitles, still picture on gpu'].selection,
+    sub: subOf(cases['no subtitles, still picture on gpu']),
+    duration: cases['no subtitles, still picture on gpu'].duration,
+    overlayImages: cases['no subtitles, still picture on gpu'].overlayImages,
+  }) !== null, true);
+check('a clip with NOTHING to draw is refused — no free composite',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] }), null);
+check('configured-but-hidden overlays still pipe (show/hide stays free)',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
+    { overlay: [{ type: 'image', file: 'x.png', enabled: true }] }) !== null, true);
 check('probed pillarbox with subtitles is eligible',
   planFor(cases['subtitled pillarbox, pad-overlay']) !== null, true);
 check('pillarbox WITHOUT subtitles is refused — barsGraph is unprobed',
