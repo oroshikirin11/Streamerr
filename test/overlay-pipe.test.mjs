@@ -131,6 +131,58 @@ check('base cap shrinks with the shift',
     < Number(at(0).spec.inputs[at(0).spec.inputs.indexOf('-t') + 1]), true);
 check('no shift means clip start', at(0).spec.filters[0].includes('PTS+0.000/TB'), true);
 
+console.log('\nperformance interior — the regression that hit the N100');
+/**
+ * A subtitle-only clip must not pay for capabilities it is not using: the
+ * pipe's FORMAT stays full-rect (a later picture must fit anywhere without
+ * a restart), but the rate halves when nothing moves and the rasterise
+ * happens at band height when a band applies. Full-rect at full rate is
+ * what took Mr. Robot on the N100 from 1.03x to 0.62x.
+ */
+{
+  const mr = cases['subtitled 16:9, gpu canvas'];
+  const band = { rect: { w: 1920, h: 1080 }, height: 420, y: 660,
+    filter: "subtitles=filename='/cache/band.ass'" };
+  const prof = { ...mr.profile, overlayPipe: true };
+  const quiet = buildRendererSpec({
+    profile: prof, selection: mr.selection, srcPath: mr.srcPath,
+    shift: 0, duration: mr.duration, extractedPath: mr.extractedPath,
+    subBand: band,
+  });
+  check('no motion -> the pipe runs at HALF rate', quiet.rate, '24000/2002');
+  check('band applies -> rasterise at band height',
+    quiet.spec.inputs.join(' ').includes('s=1920x420'), true);
+  check('band interior pads into the full-rect format',
+    quiet.spec.filters.join(';').includes('pad=1920:1080:0:660'), true);
+  check('but the pipe FORMAT stays full-rect',
+    `${quiet.width}x${quiet.height}`, '1920x1080');
+
+  // An apply that adds a picture: format pinned, interior re-planned.
+  const pin = { rect: quiet.rect, eff: quiet.eff, wide: quiet.wide,
+    width: quiet.width, height: quiet.height, rate: quiet.rate, fps: quiet.fps };
+  const withPic = buildRendererSpec({
+    profile: prof, selection: mr.selection, srcPath: mr.srcPath,
+    shift: 120, duration: mr.duration, extractedPath: mr.extractedPath,
+    subBand: band,
+    overlayImages: [{ path: '/o/logo.png', x: 0.1, y: 0.1, size: 0.2, opacity: 1, enabled: true }],
+    pin,
+  });
+  check('apply holds the pinned format',
+    `${withPic.width}x${withPic.height}@${withPic.rate}`, '1920x1080@24000/2002');
+  check('the band yields to the picture inside the renderer', withPic.band, false);
+  check('the picture lands on the full canvas',
+    /overlay/.test(withPic.spec.filters.join(';')), true);
+
+  // Motion present at spawn plans full rate.
+  const moving = buildRendererSpec({
+    profile: prof, selection: mr.selection, srcPath: mr.srcPath,
+    shift: 0, duration: mr.duration, extractedPath: mr.extractedPath,
+    overlayImages: [{ path: '/o/logo.png', x: 0.1, y: 0.1, size: 0.2,
+      opacity: 1, enabled: true, motion: 'bounce', speed: 0.1 }],
+  });
+  check('motion at spawn -> full rate', moving.rate, '24000/1001');
+}
+
 console.log('\nthe feed — continuous frame-aligned bytes across renderers');
 const fifo = join(tmpdir(), `jsr-feed-test-${process.pid}.fifo`);
 const feed = new OverlayFeed({ path: fifo, log: (m) => console.log('   ', m.trim()) });

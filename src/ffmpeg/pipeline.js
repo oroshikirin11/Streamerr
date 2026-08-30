@@ -1059,6 +1059,22 @@ export class PipelinePlayout extends EventEmitter {
         const shift = this._pipeClipOffset
           + this._ovFeed.frames / (this._pipeFps || 24);
         const cached = this._cachedSubs(item.srcPath);
+        const overlayFile = this._overlayFile(item, 0);
+        const overlayImages = this._overlayImages(item, shift);
+        const nowAnimated = (this.profile?.overlay ?? []).some(
+          (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
+        ) || overlayImages.some((i) => i?.animated || isMoving(i));
+        /**
+         * The pin's rate cannot change, so motion added to a half-rate pipe
+         * runs stepped until the next clip plans full rate. Said out loud,
+         * because a silently janky bounce reads as a bug.
+         */
+        if (nowAnimated && this._pipePin
+            && String(this._pipePin.rate) !== String(this._pipePin.eff?.rate ?? '')) {
+          this.emit('log', '[overlay] note: motion added mid-clip runs at half '
+            + 'frame rate until the next episode — the running encoder\'s '
+            + 'canvas rate is fixed\n');
+        }
         const spec = buildRendererSpec({
           profile: this.profile,
           selection: this.selection,
@@ -1067,8 +1083,15 @@ export class PipelinePlayout extends EventEmitter {
           duration: dur,
           extractedPath: cached?.path ?? null,
           fontsDir: cached?.fontsDir ?? null,
-          overlayPath: this._overlayFile(item, 0),
-          overlayImages: this._overlayImages(item, shift),
+          overlayPath: overlayFile,
+          overlayImages,
+          subBand: this._subtitleBand(
+            this.selection?.subtitle?.external
+              ? this.selection.subtitle.path ?? null
+              : cached?.path ?? null,
+            { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
+          ),
+          pin: this._pipePin ?? null,
         });
         if (!spec) {
           // Eligibility changed underneath (a demotion mid-clip). The
@@ -2272,6 +2295,19 @@ export class PipelinePlayout extends EventEmitter {
      */
     this._pipedClip = false;
     let pipePath = null;
+    // Computed once and passed to BOTH the renderer and buildSourceArgs, so
+    // the band analysis and the rate decision cannot diverge between them.
+    const pipeAnimated = (this.profile?.overlay ?? []).some(
+      (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
+    );
+    const pipeBand = this.profile?.overlayPipe && this.cacheDir
+      ? this._subtitleBand(
+        this.selection?.subtitle?.external
+          ? this.selection.subtitle.path ?? null
+          : cached?.path ?? null,
+        { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
+      )
+      : null;
     if (this.profile?.overlayPipe && this.cacheDir) {
       const rSpec = buildRendererSpec({
         profile: this.profile,
@@ -2283,6 +2319,8 @@ export class PipelinePlayout extends EventEmitter {
         fontsDir: cached?.fontsDir ?? null,
         overlayPath: overlayFile,
         overlayImages,
+        subBand: pipeBand,
+        overlayAnimated: pipeAnimated,
       });
       if (rSpec) {
         try {
@@ -2296,6 +2334,16 @@ export class PipelinePlayout extends EventEmitter {
           this._pipedClip = true;
           this._pipeClipOffset = offset;
           this._pipeFps = rSpec.fps;
+          /**
+           * The pipe format, frozen for this source's life. Swaps rebuild
+           * the renderer's interior against it — geometry and rate can
+           * never follow an Apply, only the content can.
+           */
+          this._pipePin = {
+            rect: rSpec.rect, eff: rSpec.eff, wide: rSpec.wide,
+            width: rSpec.width, height: rSpec.height,
+            rate: rSpec.rate, fps: rSpec.fps,
+          };
         } catch (err) {
           this.emit('warn', 'overlay pipe unavailable — applying overlays '
             + `will restart the source: ${err.message}`);
@@ -2585,15 +2633,26 @@ export class PipelinePlayout extends EventEmitter {
 
     // The surface libass actually rasterises, which is the number the band
     // exists to shrink — stated so it is obvious whether there is anything
-    // left to win there.
+    // left to win there. In pipe mode the truth comes from the PIN: an
+    // earlier version of this report described the inline decision while
+    // the pipe ran a full-height full-rate canvas, and the lie sent the
+    // reader hunting in the wrong place.
     try {
       const rect = contentRect(v, this.profile);
+      if (this._pipedClip && this._pipePin) {
+        const pin = this._pipePin;
+        const half = String(pin.rate) !== String(pin.eff?.rate ?? pin.rate);
+        out.push(`overlay pipe ${pin.width}x${pin.height} RGBA at `
+          + `${half ? 'half' : 'FULL'} frame rate — transferred and uploaded `
+          + 'every canvas frame, composited onto every video frame');
+      } else {
       const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
       const halfRate = !all.some((i) => i?.motion === 'bounce'
         || /\.gif$/i.test(i?.file ?? ''));
       if (sub && !sub.bitmap) {
         out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
           + `, uploaded and blended every frame`);
+      }
       }
       if (rect.bars) out.push('output is pillarboxed — bars cost encode time too');
     } catch { /* diagnosis must never throw on the warning path */ }
@@ -3717,7 +3776,10 @@ const item = (self) => self.current?.item?.title ?? 'clip';
  *  - bitmap subtitles need the video frames themselves and cannot move into
  *    a renderer that has no access to them.
  */
-export function planOverlayPipe({ profile, selection, sub, duration = null }) {
+export function planOverlayPipe({
+  profile, selection, sub, duration = null,
+  overlayImages = [], overlayAnimated = false,
+}) {
   if (!profile?.overlayPipe || profile.backend !== 'vaapi' || !profile.gpuFull) return null;
   if (sub?.needsComplex) return null;
   // The pipe input must be BOUNDED or the main process cannot exit — see
@@ -3739,11 +3801,25 @@ export function planOverlayPipe({ profile, selection, sub, duration = null }) {
   const wide = rect.bars && profile.barsGraph === 'wide-canvas';
   const width = wide ? profile.width : rect.w;
   const height = wide ? profile.height : rect.h;
-  const rs = String(eff.rate);
+  /**
+   * The pipe's RATE is part of its format and cannot change mid-source, so
+   * it is chosen from what is on the canvas AT SPAWN, exactly as the inline
+   * path chooses: half rate unless something moves. An Apply that adds
+   * motion to a half-rate pipe keeps piping — the motion is stepped at half
+   * rate until the next clip plans full — because a restart is precisely
+   * what this feature exists to never do. Measured cost of full rate where
+   * half would do: it is what put Mr. Robot on the N100 from 1.03x to
+   * under realtime.
+   */
+  const imgList = (overlayImages ?? []).filter((i) => i?.path);
+  const perFrame = Boolean(overlayAnimated)
+    || imgList.some((i) => i?.animated || isMoving(i));
+  const rate = (!perFrame && halfRate(eff.rate)) || eff.rate;
+  const rs = String(rate);
   const fps = rs.includes('/')
     ? Number(rs.split('/')[0]) / Number(rs.split('/')[1])
     : Number(rs);
-  return { rect, eff, wide, width, height, rate: eff.rate, fps };
+  return { rect, eff, wide, width, height, rate, fps };
 }
 
 /**
@@ -3760,13 +3836,23 @@ export function planOverlayPipe({ profile, selection, sub, duration = null }) {
 export function buildRendererSpec({
   profile, selection, srcPath, shift = 0, duration = null,
   extractedPath = null, fontsDir = null, overlayPath = null,
-  overlayImages = [],
+  overlayImages = [], subBand = null, overlayAnimated = false, pin = null,
 }) {
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
-  const plan = planOverlayPipe({ profile, selection, sub, duration });
+  /**
+   * `pin` is the pipe format fixed when the SOURCE spawned. A swap must
+   * reproduce it exactly whatever the overlays now are — the reader's
+   * format cannot change — so geometry and rate come from the pin, and only
+   * the renderer's INTERIOR follows the new overlay state. That interior
+   * freedom is what keeps applies cheap: the band can come and go per swap,
+   * pictures can appear, and the pipe never notices.
+   */
+  const plan = pin ?? planOverlayPipe({
+    profile, selection, sub, duration, overlayImages, overlayAnimated,
+  });
   if (!plan) return null;
-  const { rect, eff, wide } = plan;
+  const { rect, wide } = plan;
   const imgList = (overlayImages ?? []).filter((i) => i?.path);
   // Bound the generated base or the renderer never exits on its own; +5 so
   // it always outlives the clip rather than starving the composite's tail.
@@ -3774,19 +3860,37 @@ export function buildRendererSpec({
     ? ['-t', (Math.max(1, duration - shift) + 5).toFixed(3)]
     : [];
   const sh = Number(shift).toFixed(3);
+  /**
+   * The band, restored — inside the renderer.
+   *
+   * Rasterising a 1080-row canvas where a 420-row band carries every
+   * subtitle is what took Mr. Robot on the N100 from 1.03x to 0.62x. The
+   * pipe's FORMAT stays full-rect (a later picture must be placeable
+   * anywhere without a restart), but the expensive part — libass and the
+   * canvas filters — runs at band height and a pad lifts the result into
+   * the full frame. Same conditions as the inline band, minus the
+   * picture clause: pictures always put the canvas back to full height.
+   */
+  const band = subBand && sub.filter && !wide && !plan.rect.bars
+    && subBand.rect.w === rect.w && subBand.rect.h === rect.h
+    && !imgList.length ? subBand : null;
+  const baseH = band ? band.height : rect.h;
   const inputs = ['-f', 'lavfi', ...cap, '-i',
-    `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`];
+    `color=c=black@0.0:s=${rect.w}x${baseH}:r=${plan.rate},format=rgba`];
   // The same head the inline canvas builds, with the base at input 0
   // instead of 1 — the renderer is its own process and numbers from zero.
   const head = sub.filter
-    ? `[0:v]setpts=PTS+${sh}/TB,${sub.filter}:alpha=1,setpts=PTS-STARTPTS,format=rgba`
+    ? `[0:v]setpts=PTS+${sh}/TB,${band ? band.filter : sub.filter}:alpha=1,`
+      + 'setpts=PTS-STARTPTS,format=rgba'
     : '[0:v]null';
   const imgs = canvasImageChain(imgList, {
     width: rect.w, firstInput: 1, inLabel: 'sub', outLabel: 'cv', phase: shift,
   });
   const pad = wide
     ? `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`
-    : '';
+    : band
+      ? `,pad=${rect.w}:${rect.h}:0:${band.y}:color=black@0.0`
+      : '';
   // No trailing format=rgba: the subtitle head ends on one, the image
   // chain guarantees one, and the bare-transparent base IS one. pad of an
   // rgba frame stays rgba.
@@ -3796,6 +3900,7 @@ export function buildRendererSpec({
   inputs.push(...imgs.inputs);
   return {
     ...plan,
+    band: Boolean(band),
     spec: {
       inputs, filters, out: 'out',
       width: plan.width, height: plan.height, rate: plan.rate,
@@ -3869,7 +3974,10 @@ export function buildSourceArgs({
   // geometry; the engine calls the same function to size the pipe, so the
   // two ends cannot disagree.
   const pipePlan = overlayPipe
-    ? planOverlayPipe({ profile, selection, sub, duration })
+    ? planOverlayPipe({
+      profile, selection, sub, duration,
+      overlayImages: imgList, overlayAnimated,
+    })
     : null;
   const audioIdx = selection?.audio?.typeIndex ?? 0;
   // Source-rate matching applies to every path, not just the GPU one —
