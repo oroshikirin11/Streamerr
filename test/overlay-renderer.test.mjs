@@ -50,8 +50,10 @@ check('a bounded consumer carries -t before the pipe',
 
 console.log('\nthe renderer command');
 const args = rendererArgs(spec);
-check('emits rawvideo-in-NUT to stdout', args.slice(-6),
-  ['-an', '-c:v', 'rawvideo', '-f', 'nut', 'pipe:1']);
+check('emits rawvideo-in-NUT to stdout, reporting its head on stderr',
+  args.slice(-10),
+  ['-an', '-progress', 'pipe:2', '-stats_period', '0.5',
+    '-c:v', 'rawvideo', '-f', 'nut', 'pipe:1']);
 check('maps the spec output label', args[args.indexOf('-map') + 1], '[out]');
 check('carries the spec inputs', args.includes('color=c=red:s=1920x1038:r=24,format=rgba'), true);
 // -re would pace the canvas at 1x and throttle a cushion being built ahead.

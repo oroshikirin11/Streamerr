@@ -1064,7 +1064,8 @@ export class PipelinePlayout extends EventEmitter {
          * within half a second. The old byte-counting clock died with the
          * rawvideo pipe.
          */
-        const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0);
+        const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0,
+          this._ovFeed?.headPts?.() ?? 0);
         const cached = this._cachedSubs(item.srcPath);
         const overlayFile = this._overlayFile(item, 0);
         const overlayImages = this._overlayImages(item, shift);
@@ -3336,6 +3337,9 @@ export class PipelinePlayout extends EventEmitter {
         if (this.current?.duration) {
           this.position = Math.min(this.position, this.current.duration);
         }
+        // Consumption-paced canvas: hold the renderer's lead near the
+        // encode head so an Apply's continuation point is always close.
+        this._ovFeed?.pace?.(this.position);
       }
 
       const wall = Date.now();

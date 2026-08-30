@@ -47,6 +47,8 @@ export class OverlayFeed {
      */
     this._fd = openSync(this.path, 'a');
     this._punched = 0;
+    this._headPts = 0;
+    this._stopped = false;
     this._reaper = setInterval(() => {
       try {
         const size = statSync(this.path).size;
@@ -89,6 +91,28 @@ export class OverlayFeed {
    * the old renderer drains into a buffer, and only provably whole frame
    * groups from that buffer reach the fifo.
    */
+  /** The written canvas head in clip seconds — where a successor must
+   *  continue from, since the append file preserves run-ahead. */
+  headPts() { return this._headPts ?? 0; }
+
+  /**
+   * Consumption-paced flow control. The append file has no backpressure,
+   * so left alone a renderer runs (readrate x wall) ahead and an Apply's
+   * continuation point drifts minutes out on long clips. The engine
+   * feeds the encode position here; past a 2s lead the renderer is
+   * SIGSTOPped (zero CPU, file stops growing), under 1s it resumes.
+   * Swaps and teardown always CONT first so TERM can be handled.
+   */
+  pace(positionSecs) {
+    const child = this._renderer?.child;
+    if (!child || !Number.isFinite(positionSecs)) return;
+    const lead = (this._headPts ?? 0) - positionSecs;
+    try {
+      if (lead > 2 && !this._stopped) { child.kill('SIGSTOP'); this._stopped = true; }
+      else if (lead < 1 && this._stopped) { child.kill('SIGCONT'); this._stopped = false; }
+    } catch { /* gone */ }
+  }
+
   static SYNC = Buffer.from('4e4be4adeeca4569', 'hex');
 
   spawnRenderer(args) {
@@ -104,7 +128,14 @@ export class OverlayFeed {
     try { setPriority(child.pid, 10); } catch { /* best effort */ }
     let tail = '';
     child.stderr.on('data', (d) => {
-      tail = (tail + d.toString()).slice(-2000);
+      tail = (tail + d.toString()).slice(-4000);
+      // -progress on stderr: the renderer's OUTPUT head in clip time.
+      // out_time_ms is microseconds despite the name (ffmpeg quirk).
+      const ms = tail.lastIndexOf('out_time_ms=');
+      if (ms !== -1) {
+        const v = parseInt(tail.slice(ms + 12), 10);
+        if (Number.isFinite(v)) this._headPts = v / 1e6;
+      }
     });
     const done = new Promise((resolve) => {
       child.on('close', (code) => {
@@ -142,6 +173,7 @@ export class OverlayFeed {
        * the close handler cuts the buffered tail at the last syncpoint so
        * a torn packet can never reach the reader.
        */
+      if (this._stopped) { try { old.child.kill('SIGCONT'); } catch { /* gone */ } this._stopped = false; }
       try { old.child.kill('SIGTERM'); } catch { /* already gone */ }
       const grace = setTimeout(() => {
         this.log('[overlay-pipe] renderer ignored TERM for 5s — KILLed\n');
@@ -155,6 +187,7 @@ export class OverlayFeed {
 
   _teardown() {
     if (this._renderer) {
+      if (this._stopped) { try { this._renderer.child.kill('SIGCONT'); } catch { /* gone */ } this._stopped = false; }
       try { this._renderer.child.kill('SIGKILL'); } catch { /* gone */ }
       this._renderer = null;
     }

@@ -106,6 +106,10 @@ try {
   check('main graph reads the fifo', args.includes(fifo));
 
   console.log('\nrunning: 10s clip, overlay removed at t=4s by replacing the renderer');
+  // The engine paces the feed from its encode position; -re makes wall
+  // time since start the equivalent here.
+  const tA = Date.now();
+  const paceA = setInterval(() => feed.pace((Date.now() - tA) / 1000), 300);
   const mainDone = new Promise((resolve) => {
     main = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
@@ -118,12 +122,15 @@ try {
     await sleep(4000);
     // The continuation clock is TIME now (the engine uses the encode head);
     // with -re pacing, wall time since start ≈ media time.
-    const shift = 4.0;
+    // The append file preserves the old renderer's run-ahead, so the
+    // successor must stamp from the WRITTEN head, not wall position.
+    const shift = Math.max(4.0, feed.headPts());
     await feed.swap(rendererArgs(specFor(ass2, shift).spec));
     console.log(`    swapped at ~${shift.toFixed(1)}s media — encoder untouched`);
   }
 
   const res = await mainDone;
+  clearInterval(paceA);
   main = null;
   check('ONE encoder process survived the swap and exited cleanly',
     res.code === 0, `exit ${res.code}: ${res.err.slice(-600)}`);
@@ -198,6 +205,8 @@ try {
   argsB.splice(argsB.indexOf('-progress'), 4);
   argsB[argsB.indexOf('error')] = 'info';
   argsB.splice(argsB.lastIndexOf('-f'), 3, '-y', outB);
+  const tB = Date.now();
+  const paceB = setInterval(() => feed.pace((Date.now() - tB) / 1000), 300);
   const mainBDone = new Promise((resolve) => {
     main = spawn('ffmpeg', argsB, { stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
@@ -206,9 +215,10 @@ try {
     main.on('close', (code) => { clearTimeout(t); resolve({ code, err }); });
   });
   await sleep(4000);
-  await feed.swap(rendererArgs(specB(ass2, 4.0).spec));
+  await feed.swap(rendererArgs(specB(ass2, Math.max(4.0, feed.headPts())).spec));
   console.log('    subtitles swapped away at ~4s — the still must not notice');
   const resB = await mainBDone;
+  clearInterval(paceB);
   main = null;
   check('act B encoder survived the swap and exited cleanly',
     resB.code === 0, `exit ${resB.code}: ${resB.err.slice(-600)}`);

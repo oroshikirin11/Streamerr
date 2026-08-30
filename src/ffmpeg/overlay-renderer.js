@@ -92,6 +92,10 @@ export function rendererArgs(spec) {
      *  - the stream is self-describing, so the geometry-mismatch class of
      *    bugs (headerless rawvideo shears silently) cannot exist.
      */
+    // The renderer reports its own output head on stderr; the feed reads
+    // it so a swap can stamp the successor from the true WRITTEN head —
+    // the append file preserves run-ahead the fifo used to absorb.
+    '-progress', 'pipe:2', '-stats_period', '0.5',
     '-c:v', 'rawvideo', '-f', 'nut',
     'pipe:1',
   ];
