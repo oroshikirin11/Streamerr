@@ -25,6 +25,9 @@ export const SECRET_FIELDS = ['key', 'passphrase', 'streamId'];
  * means switching back is free, and an operator who wants to overwrite one
  * simply types over it.
  */
+/** A display nickname: trimmed, bounded, never load-bearing. */
+export const destName = (v) => String(v ?? '').trim().slice(0, 40);
+
 export function publishDefaults() {
   return {
     protocol: 'rtmp',
@@ -134,11 +137,11 @@ export function redactUrl(protocol, creds = {}) {
 export function destinations(publish) {
   const p = publish ?? publishDefaults();
   const protocol = PROTOCOLS.includes(p.protocol) ? p.protocol : 'rtmp';
-  const out = [{ protocol, creds: p[protocol] ?? {}, primary: true }];
+  const out = [{ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name) }];
   for (const e of p.extras ?? []) {
     if (!e || e.enabled === false) continue;
     if (!PROTOCOLS.includes(e.protocol)) continue;
-    out.push({ protocol: e.protocol, creds: e, primary: false, id: e.id });
+    out.push({ protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name) });
   }
   return out;
 }
@@ -256,6 +259,7 @@ export function redactPublish(publish) {
   };
   return {
     protocol: pub.protocol,
+    name: destName(pub.name),
     rtmp: mask('rtmp', pub.rtmp),
     rtmps: mask('rtmps', pub.rtmps),
     srt: mask('srt', pub.srt),

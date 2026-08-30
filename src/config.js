@@ -435,7 +435,7 @@ export function publishDestinations(cfg = config) {
 /** One line per destination, secrets replaced, for logs and the console. */
 export function publishTargetsRedacted(cfg = config) {
   try {
-    return publishDestinations(cfg).map((d) => `${d.protocol}: ${redactUrl(d.protocol, d.creds)}`);
+    return publishDestinations(cfg).map((d) => `${d.name ? `${d.name} — ` : ''}${d.protocol}: ${redactUrl(d.protocol, d.creds)}`);
   } catch {
     return ['(unconfigured)'];
   }

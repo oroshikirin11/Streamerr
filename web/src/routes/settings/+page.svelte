@@ -637,6 +637,10 @@
     {/if}
     <p class="muted small">Secrets are never sent back to the browser.</p>
 
+    <label>Nickname <span class="muted small">optional — how this destination appears in logs and the on-air badge</span></label>
+    <input bind:value={cfg.publish.name} spellcheck="false" maxlength="40"
+           placeholder="e.g. Owncast VPS" />
+
     <!-- Fan-out. One encode, several destinations: the box cannot afford a
          second encoder, and it does not need one. -->
     <h4 class="sub">Also send to</h4>
@@ -651,6 +655,8 @@
           </label>
           <button type="button" class="danger" onclick={() => removeExtra(ex.id)}>Remove</button>
         </div>
+        <input bind:value={ex.name} spellcheck="false" maxlength="40"
+               placeholder="nickname (optional) — e.g. Cinema receiver" />
         <input bind:value={ex.url} spellcheck="false" placeholder={`${ex.protocol}://…`} />
         {#if ex.protocol === 'srt'}
           <input type="password" bind:value={ex.streamId}
