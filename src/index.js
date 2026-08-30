@@ -10,7 +10,9 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import {
   existsSync, createReadStream, readdirSync, mkdirSync, statSync, writeFileSync, unlinkSync,
+  readFileSync, rmSync,
 } from 'fs';
+import { spawn } from 'child_process';
 import { timingSafeEqual } from 'crypto';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -395,8 +397,68 @@ const sgSplit = (it) => (it?.series
   ? { title: it.series, subtitle: it.title }
   : { title: it?.title });
 
+/**
+ * Posters for the theater tray and lobby. One ffmpeg still-image pass
+ * downscales any source — a local poster.jpg or Jellyfin's image URL —
+ * to a 300x450 jpeg (~30KB, far under the receiver's 1MiB cap); the id
+ * is a content hash so viewers cache it immutable. Prepared once per
+ * distinct source and pushed once per receiver session; the pushed-set
+ * clears on reconnect because the receiver's cache is in-memory.
+ */
+const sgArtCache = new Map(); // image source -> Promise<{id,type,data}|null>
+const sgArtPushed = new Set();
+function sgArtPrepare(imageSrc) {
+  if (!imageSrc) return Promise.resolve(null);
+  if (!sgArtCache.has(imageSrc)) {
+    sgArtCache.set(imageSrc, (async () => {
+      let src = imageSrc;
+      if (src.startsWith('/api/library/image/')) {
+        const id = decodeURIComponent(src.split('/').pop().split('?')[0]);
+        src = library.imagePath?.(id) ?? null;
+        if (!src) return null;
+        if (!isRemote(src) && !existsSync(src)) return null;
+        if (isVideoFile(src)) {
+          // artless media resolves to the video file; a sweeper still is
+          // fine as a poster, but never decode video on this path.
+          src = cachedFrame(src, config.paths?.cache);
+          if (!src) return null;
+        }
+      }
+      const out = join(config.paths.cache, `sg-art-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
+      await new Promise((resolve, reject) => {
+        const c = spawn('ffmpeg', ['-y', '-v', 'error', '-i', src,
+          '-vf', 'scale=300:450:force_original_aspect_ratio=increase,crop=300:450',
+          '-frames:v', '1', '-q:v', '5', out], { stdio: 'ignore' });
+        const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 10000);
+        c.on('close', (code) => { clearTimeout(t); code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`)); });
+        c.on('error', reject);
+      });
+      const buf = readFileSync(out);
+      rmSync(out, { force: true });
+      if (buf.length > 1024 * 1024) return null;
+      const { createHash } = await import('crypto');
+      return {
+        id: createHash('sha1').update(buf).digest('hex').slice(0, 16),
+        type: 'image/jpeg',
+        data: buf.toString('base64'),
+      };
+    })().catch(() => null));
+  }
+  return sgArtCache.get(imageSrc);
+}
+async function sgArtId(it) {
+  if (!it?.image || !sgActive()) return undefined;
+  const art = await sgArtPrepare(it.image).catch(() => null);
+  if (!art) return undefined;
+  if (!sgArtPushed.has(art.id)) {
+    sgArtPushed.add(art.id);
+    sgPost('/api/integrations/metadata/artwork', art);
+  }
+  return art.id;
+}
+
 let sgAnnounced = null;
-function sgNowPlaying({ announce = false } = {}) {
+async function sgNowPlaying({ announce = false } = {}) {
   if (!sgActive()) return;
   const snap = engine?.snapshot?.();
   const it = snap?.playing;
@@ -407,30 +469,40 @@ function sgNowPlaying({ announce = false } = {}) {
   const fresh = key !== sgAnnounced;
   if (announce) sgAnnounced = key;
   const next = snap.queue?.[0];
+  // Artwork lands before the push that references it; any failure just
+  // means a push without a poster. Never on the engine's stack.
+  const [artworkId, nextArt] = await Promise.all([
+    sgArtId(it), next ? sgArtId(next) : undefined,
+  ]).catch(() => [undefined, undefined]);
   sgPost('/api/integrations/metadata/nowplaying', {
     ...head,
+    ...(artworkId ? { artworkId } : {}),
     position: snap.position ?? undefined,
     duration: it.duration ?? undefined,
-    ...(next ? { upNext: sgSplit(next) } : {}),
+    paused: snap.status === 'paused',
+    ...(next ? { upNext: { ...sgSplit(next), ...(nextArt ? { artworkId: nextArt } : {}) } } : {}),
     announce: Boolean(announce && fresh),
     channel: 'main',
   });
 }
 
-function sgSchedule() {
+async function sgSchedule() {
   if (!sgActive()) return;
   const snap = engine?.snapshot?.();
-  const items = [];
+  const raw = [];
   // A countdown card on air IS the next showing.
   if (snap?.playing?.countdown && snap?.queue?.[0]?.at) {
-    items.push({ ...sgSplit(snap.queue[0]),
-      startsAt: new Date(snap.queue[0].at * 1000).toISOString() });
+    raw.push({ q: snap.queue[0], at: snap.queue[0].at });
   }
   for (const q of snap?.queue ?? []) {
-    if (q.startAt) {
-      items.push({ ...sgSplit(q), startsAt: new Date(q.startAt * 1000).toISOString() });
-    }
+    if (q.startAt) raw.push({ q, at: q.startAt });
   }
+  const items = await Promise.all(raw.map(async ({ q, at }) => {
+    const artworkId = await sgArtId(q);
+    return { ...sgSplit(q),
+      ...(artworkId ? { artworkId } : {}),
+      startsAt: new Date(at * 1000).toISOString() };
+  })).catch(() => []);
   // The receiver replaces its whole (in-memory) list on every push, so an
   // empty list is meaningful too: it clears a cancelled schedule.
   sgPost('/api/integrations/metadata/schedule', { items });
@@ -534,8 +606,9 @@ function wirePreview(e) {
   // the counter here, every later rejoin computes its packet boundary from
   // the previous session's total and starts mid-packet.
   e.on('publisher-restart', () => {
-    // The receiver's schedule/metadata live in memory — a reconnect is the
-    // moment to restate them.
+    // The receiver's schedule/metadata/artwork live in memory — a
+    // reconnect is the moment to restate all three.
+    sgArtPushed.clear();
     sgSchedule(); sgNowPlaying();
     if (tsBytes === 0) return;
     tsBytes = 0;
