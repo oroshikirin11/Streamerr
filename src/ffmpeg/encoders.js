@@ -46,6 +46,26 @@ export function normalizeBitrate(value, fallback = '4500k') {
   return `${Math.round(n)}k`;
 }
 
+/**
+ * The bitrate the selected codec actually needs.
+ *
+ * `videoBitrate` is the H.264 anchor — the number the operator tuned and
+ * must never lose to a codec switch. HEVC reaches the same quality at
+ * roughly 2/3 of it and AV1 at roughly half, so those codecs derive their
+ * rate from the anchor unless an explicit `hevcBitrate`/`av1Bitrate`
+ * override is set. Fewer bits is also cheaper to encode — this is half of
+ * the N100's HEVC performance answer, not just a bandwidth saving.
+ */
+export function codecBitrate(enc = {}) {
+  const codec = enc.codec ?? 'h264';
+  const anchor = normalizeBitrate(enc.videoBitrate, '4500k');
+  if (codec === 'h264') return anchor;
+  const override = enc[`${codec}Bitrate`];
+  if (override != null && override !== '') return normalizeBitrate(override, anchor);
+  const scale = codec === 'hevc' ? 2 / 3 : 1 / 2;
+  return `${Math.round(parseFloat(anchor) * scale)}k`;
+}
+
 const bufsize = (rate) => {
   // Two seconds of video at the target rate. Accepts "4500k" or a raw number.
   const m = String(rate).match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/);
@@ -76,6 +96,14 @@ export const BACKENDS = {
        * codec the operator sees the probe fail rather than a demotion.
        */
       '-c:v', { h264: 'h264_vaapi', hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[p.codec ?? 'h264'] ?? 'h264_vaapi',
+      /**
+       * VDENC for HEVC where the driver has it (probed at start, never
+       * assumed): -low_power routes encode through the fixed-function
+       * media block instead of the EUs — on an N100 that is the
+       * difference between HEVC costing more than H.264 and costing
+       * less. H.264 is left alone: that path is tuned and working.
+       */
+      ...(p.lowPower && p.codec === 'hevc' ? ['-low_power', '1'] : []),
       '-rc_mode', 'CBR',
       '-b:v', p.videoBitrate,
       '-maxrate', p.videoBitrate,

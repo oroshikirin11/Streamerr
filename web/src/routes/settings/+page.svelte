@@ -116,6 +116,19 @@
     return out;
   }
   const savedHint = (k) => (publishSaved[k] ? 'saved — type to replace' : null);
+  // The codec decides the carrier: H.264 rides the protocol chosen below,
+  // anything newer needs SRT — the server routes the primary to its SRT
+  // slot automatically. These helpers let the card say what will happen.
+  const codecLabel = () => ({ hevc: 'H.265', av1: 'AV1' }[cfg.encoder.codec] ?? 'H.264');
+  const codecKey = () => `${cfg.encoder.codec}Bitrate`;
+  const derivedBitrate = () => {
+    const n = parseFloat(cfg.encoder.videoBitrate) || 4500;
+    return `${Math.round(n * (cfg.encoder.codec === 'hevc' ? 2 / 3 : 1 / 2))}k`;
+  };
+  const effProto = () => ((cfg.encoder.codec || 'h264') !== 'h264' ? 'srt' : cfg.publish.protocol);
+  const sitOuts = () => (cfg.publish.extras ?? [])
+    .filter((e) => e.enabled !== false && e.protocol !== 'srt')
+    .map((e) => e.name || e.protocol);
   function addExtra() {
     cfg.publish.extras = [...(cfg.publish.extras ?? []),
       { id: uid(), enabled: true, protocol: 'rtmp', url: '', key: '',
@@ -494,7 +507,17 @@
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
       }
-      if (section === 'publish') patch.publish = maskPublish(cfg.publish);
+      if (section === 'publish') {
+        patch.publish = maskPublish(cfg.publish);
+        // The codec choice lives on this card now; it rides along so one
+        // Save keeps connection and codec consistent. The server merges
+        // per-key, so the encoder card's other fields are untouched.
+        patch.encoder = {
+          codec: cfg.encoder.codec || 'h264',
+          hevcBitrate: cfg.encoder.hevcBitrate ?? '',
+          av1Bitrate: cfg.encoder.av1Bitrate ?? '',
+        };
+      }
       // Two cards write to the same block; the server merges, so each sends
       // only the keys it owns and neither can clobber the other's.
       if (section === 'buffer') patch.buffer = { seconds: cfg.buffer.seconds };
@@ -600,6 +623,34 @@
   <section class="card">
     <h3>Broadcast</h3>
 
+    <!-- The codec is part of the connection — it decides which protocol
+         can carry the stream — so it lives here and the protocol follows
+         it. The server mirrors this: destinations() routes a non-H.264
+         primary to the SRT slot on its own. -->
+    <label>Codec</label>
+    <select bind:value={cfg.encoder.codec}>
+      <option value="h264">H.264 — plays everywhere (default)</option>
+      <option value="hevc">H.265/HEVC — same quality at ~2/3 the bitrate; Apple + hw-decode Chromium</option>
+      <option value="av1">AV1 — best compression; Chromium/Firefox</option>
+    </select>
+    {#if (cfg.encoder.codec || 'h264') !== 'h264'}
+      <p class="muted small">
+        {codecLabel()} travels over SRT, so the stream uses the SRT slot below
+        automatically. Your RTMP setup is kept and comes back with H.264.
+        {#if !cfg.publish.srt?.url}
+          <strong>No SRT server is configured yet — fill the slot or the
+          stream will refuse to start.</strong>
+        {/if}
+        {#if sitOuts().length}
+          Sitting out: {sitOuts().join(', ')} — RTMP cannot carry
+          {codecLabel()}; they rejoin on H.264.
+        {/if}
+      </p>
+      <label>Bitrate for {codecLabel()} <span class="muted small">optional</span></label>
+      <input bind:value={cfg.encoder[codecKey()]} spellcheck="false"
+             placeholder={`auto — ${derivedBitrate()}, derived from the ${cfg.encoder.videoBitrate} H.264 rate`} />
+    {/if}
+
     <!-- Credentials live in a slot per protocol, so switching here never
          discards the other set. Switch back and the fields are as they
          were; overwrite by typing over them. -->
@@ -613,7 +664,7 @@
                 onclick={() => { cfg.publish.protocol = pr.id; }}>
           <strong>{pr.label}</strong>
           {#if cfg.publish[pr.id]?.url}
-            <span class="tag">{cfg.publish.protocol === pr.id ? 'in use' : 'saved'}</span>
+            <span class="tag">{effProto() === pr.id ? 'in use' : 'saved'}</span>
           {/if}
         </button>
       {/each}
@@ -1124,16 +1175,10 @@
     </p>
     {/if}
 
-    <label>Output codec</label>
-    <select bind:value={cfg.encoder.codec}>
-      <option value="h264">H.264 — plays everywhere (default)</option>
-      <option value="hevc">H.265/HEVC — ~35% less bitrate; Apple + hw-decode Chromium only</option>
-      <option value="av1">AV1 — best compression; Chromium/Firefox; needs SRT to the receiver</option>
-    </select>
     <p class="muted small">
-      Run "Test encoders" after changing this — hardware support varies
-      (this box may fall back to a software encoder or refuse). AV1 cannot
-      travel over RTMP or MPEG-TS; use an SRT destination.
+      The output codec is chosen with the connection, in the Broadcast card
+      — it decides which protocol carries the stream. Run "Test encoders"
+      after changing it there; hardware support varies.
     </p>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">

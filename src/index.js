@@ -33,7 +33,7 @@ import {
   vaapiTonemapPresent, cpuTonemapAvailable,
   pickPillarboxGraph,
 } from './ffmpeg/probe.js';
-import { normalizeBitrate, BACKENDS } from './ffmpeg/encoders.js';
+import { normalizeBitrate, codecBitrate, BACKENDS } from './ffmpeg/encoders.js';
 import { renderNodes } from './ffmpeg/gpuinfo.js';
 import { LANGUAGES } from './ffmpeg/tracks.js';
 import { StillSweeper } from './library/stillsweep.js';
@@ -1244,6 +1244,13 @@ app.put('/api/config', (req, res) => {
   if (patch.encoder?.audioBitrate !== undefined) {
     patch.encoder.audioBitrate = normalizeBitrate(patch.encoder.audioBitrate, '160k');
   }
+  // Per-codec overrides: empty means "derive from the H.264 anchor"
+  // (hevc 2/3, av1 1/2 — see codecBitrate), so empty stays empty.
+  for (const k of ['hevcBitrate', 'av1Bitrate']) {
+    if (patch.encoder?.[k] !== undefined && patch.encoder[k] !== '') {
+      patch.encoder[k] = normalizeBitrate(patch.encoder[k], '');
+    }
+  }
 
   // Numbers must BE numbers. These are interpolated straight into ffmpeg
   // filtergraphs ("scale=W:H", "color=s=WxH"), and a filtergraph is a
@@ -1962,18 +1969,31 @@ app.post('/api/stream/start', wrap(async (req, res) => {
       dpush('warn', `skipping destination '${d.name || d.protocol}' — ${d.protocol} cannot carry ${codec.toUpperCase()}; it rejoins on H.264`);
     }
   }
+  let lowPower = false;
   if (codec !== 'h264') {
     const enc = { hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[codec];
     const dev = config.encoder.device ?? '/dev/dri/renderD128';
-    const probe = spawnSyncSafe('ffmpeg', ['-v', 'error',
+    const probeArgs = (lp) => ['-v', 'error',
       '-init_hw_device', `vaapi=va:${dev}`, '-f', 'lavfi',
       '-i', 'color=c=black:s=320x180:r=24', '-frames:v', '1',
-      '-vf', 'format=nv12,hwupload', '-c:v', enc, '-f', 'null', '-']);
+      '-vf', 'format=nv12,hwupload', '-c:v', enc,
+      ...(lp ? ['-low_power', '1'] : []), '-f', 'null', '-'];
+    // HEVC tries VDENC first (-low_power: the fixed-function media block,
+    // far cheaper than EU encode — the N100's HEVC cost complaint). Probed
+    // by doing, never assumed: drivers without it fail the 1-frame probe
+    // and the normal path is probed next.
+    let probe = -1;
+    if (codec === 'hevc') {
+      probe = spawnSyncSafe('ffmpeg', probeArgs(true));
+      if (probe === 0) lowPower = true;
+    }
+    if (probe !== 0) probe = spawnSyncSafe('ffmpeg', probeArgs(false));
     if (probe !== 0 && config.encoder.backend !== 'x264') {
       return res.status(400).json({
         error: `This box has no hardware ${codec.toUpperCase()} encoder — pick H.264, or switch the encoder backend to software`,
       });
     }
+    if (lowPower) dpush('info', 'HEVC encode: VDENC (low_power) available — using the fixed-function encoder');
   }
   ensureDirs();
   const sel = await selectBackend({
@@ -1985,6 +2005,10 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   const profile = {
     ...config.encoder, backend: sel.backend,
     overlay: visibleOverlay(),
+    // The H.264 anchor bitrate never changes; other codecs derive their
+    // cheaper rate from it (or an explicit hevcBitrate/av1Bitrate override).
+    videoBitrate: codecBitrate(config.encoder),
+    lowPower,
   };
 
   // Resolve every item up front so a bad path fails before we go on air.

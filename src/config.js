@@ -80,6 +80,10 @@ const DEFAULTS = {
     fpsMode: 'auto',
     codec: 'h264',
     videoBitrate: '4500k',
+    // Optional per-codec overrides; empty derives from the H.264 anchor
+    // (hevc 2/3, av1 1/2 — codecBitrate in encoders.js).
+    hevcBitrate: '',
+    av1Bitrate: '',
     audioBitrate: '160k',
     gopSeconds: 2,
     /**
