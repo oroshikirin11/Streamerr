@@ -131,6 +131,9 @@
   let jellyfinKey = $state('');
 
   let owncastResult = $state(null);
+  let sgToken = $state('');
+  let sgTokenStored = $state(false);
+  let sgTest = $state(null);
   let libResult = $state(null);
   let encoders = $state(null);
   let pathmap = $state(null);
@@ -304,6 +307,7 @@
         ? String(cfg.buffer.seconds) : 'custom';
       keyStored = cfg.owncast.streamKey === '__SET__';
       tokenStored = cfg.owncast.accessToken === '__SET__';
+      sgTokenStored = cfg.streamingestarr?.accessToken === '__SET__';
       accessToken = '';
       streamKey = '';
       jellyfinKey = '';
@@ -445,6 +449,13 @@
     error = ''; saved = '';
     try {
       const patch = {};
+      if (section === 'streamingestarr') {
+        patch.streamingestarr = {
+          url: cfg.streamingestarr?.url ?? '',
+          enabled: cfg.streamingestarr?.enabled !== false,
+          ...(sgToken ? { accessToken: sgToken } : {}),
+        };
+      }
       if (section === 'owncast') {
         patch.owncast = {
           rtmpUrl: cfg.owncast.rtmpUrl,
@@ -804,6 +815,77 @@
         {owncastResult.ok
           ? `Accepted — ${owncastResult.seconds}s pushed in ${(owncastResult.ms / 1000).toFixed(0)}s`
           : owncastResult.error}
+      </div>
+    {/if}
+  </section>
+
+  <!-- Streamingestarr -->
+  <section class="card">
+    <h3>Streamingestarr</h3>
+    <p class="muted small">
+      Our own receiver. Beyond the video, it takes structured
+      now&#8209;playing, up&#8209;next and schedule metadata &mdash; the
+      theater page shows real titles with a live progress ring instead of a
+      stream title. Works alongside the Owncast integration.
+    </p>
+
+    <label style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" style="width:auto"
+             checked={cfg.streamingestarr?.enabled !== false}
+             onchange={(e) => { cfg.streamingestarr = { ...(cfg.streamingestarr ?? {}), enabled: e.target.checked }; }} />
+      Push metadata to a Streamingestarr receiver
+    </label>
+
+    {#if cfg.streamingestarr?.enabled !== false}
+      <label>Receiver address</label>
+      <input spellcheck="false" placeholder="http://192.168.1.10:8080"
+             value={cfg.streamingestarr?.url ?? ''}
+             oninput={(e) => { cfg.streamingestarr = { ...(cfg.streamingestarr ?? {}), url: e.target.value }; }} />
+
+      <label>Access token</label>
+      <input type="password" bind:value={sgToken}
+             placeholder={sgTokenStored ? 'leave blank to keep the saved token' : 'receiver admin → access tokens (system-messages scope)'} />
+      <p class="muted small">
+        Create it in the receiver's admin with the system-messages scope.
+        {#if sgTokenStored && !sgToken}A token is saved.{/if}
+      </p>
+
+      {#if !cfg.streamingestarr?.url || (!sgTokenStored && !sgToken)}
+        {@const missing = [
+          !cfg.streamingestarr?.url && 'address',
+          !sgTokenStored && !sgToken && 'token',
+        ].filter(Boolean)}
+        <p class="warnline">
+          Not active yet &mdash; the {missing.join(' and ')}
+          {missing.length > 1 ? 'are' : 'is'} still empty, so nothing is sent.
+        </p>
+      {/if}
+    {/if}
+
+    <div class="actions">
+      <button class="primary" onclick={() => save('streamingestarr')}>Save</button>
+      <button onclick={async () => {
+        sgTest = null;
+        try {
+          sgTest = await api.post('/api/check/streamingestarr', {
+            url: cfg.streamingestarr?.url ?? '',
+            ...(sgToken ? { accessToken: sgToken } : {}),
+          });
+        } catch (err) { sgTest = { ok: false, error: err.message }; }
+      }} disabled={!!testing}>Test</button>
+      {#if saved === 'streamingestarr'}<span class="ok small">Saved</span>{/if}
+    </div>
+    {#if sgTest}
+      <div class="result" class:bad={!sgTest.ok}>
+        {#if sgTest.ok}
+          {@const c = sgTest.caps}
+          Connected &mdash; apiVersion {c.apiVersion}.
+          Ingest: RTMP :{c.ingest?.rtmpPort}{c.ingest?.srtEnabled ? `, SRT :${c.ingest?.srtPort} (${(c.ingest?.srtContainers ?? []).join(', ')})` : ''}.
+          Segments: {c.segmentFormat}.
+          Metadata: {[c.metadata?.nowPlaying && 'now playing', c.metadata?.schedule && 'schedule'].filter(Boolean).join(' + ')}.
+        {:else}
+          {sgTest.error}
+        {/if}
       </div>
     {/if}
   </section>

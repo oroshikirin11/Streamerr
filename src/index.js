@@ -359,6 +359,83 @@ function syncOwncastTitle() {
   });
 }
 
+// ── Streamingestarr metadata ───────────────────────────────────────────
+//
+// Structured now-playing/up-next/schedule pushes to our own receiver —
+// the un-flattened version of the Owncast title sync, riding the SAME
+// engine events (never a second clip-change source). Fire-and-forget
+// with short timeouts: a dead receiver is a log line, never a stall.
+
+const sgActive = () => {
+  const sg = config.streamingestarr ?? {};
+  return sg.enabled !== false && sg.url && sg.accessToken ? sg : null;
+};
+
+function sgPost(path, body) {
+  const sg = sgActive();
+  if (!sg) return;
+  fetch(`${String(sg.url).replace(/\/+$/, '')}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${sg.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(4000),
+  }).then((r) => {
+    if (!r.ok) dpush('warn', `Streamingestarr ${path}: HTTP ${r.status}`);
+  }).catch((err) => {
+    dpush('warn', `Streamingestarr ${path} failed: ${err.cause?.message ?? err.message}`);
+  });
+}
+
+/** series/episode un-flattened: title = the show or film, subtitle = the
+ *  episode line. A movie has no series and no subtitle. */
+const sgSplit = (it) => (it?.series
+  ? { title: it.series, subtitle: it.title }
+  : { title: it?.title });
+
+let sgAnnounced = null;
+function sgNowPlaying({ announce = false } = {}) {
+  if (!sgActive()) return;
+  const snap = engine?.snapshot?.();
+  const it = snap?.playing;
+  if (!it?.title || it.countdown) return;
+  const head = sgSplit(it);
+  const key = `${head.title}\u0000${head.subtitle ?? ''}`;
+  // announce only once per clip, however many events fire around a start
+  const fresh = key !== sgAnnounced;
+  if (announce) sgAnnounced = key;
+  const next = snap.queue?.[0];
+  sgPost('/api/integrations/metadata/nowplaying', {
+    ...head,
+    position: snap.position ?? undefined,
+    duration: it.duration ?? undefined,
+    ...(next ? { upNext: sgSplit(next) } : {}),
+    announce: Boolean(announce && fresh),
+    channel: 'main',
+  });
+}
+
+function sgSchedule() {
+  if (!sgActive()) return;
+  const snap = engine?.snapshot?.();
+  const items = [];
+  // A countdown card on air IS the next showing.
+  if (snap?.playing?.countdown && snap?.queue?.[0]?.at) {
+    items.push({ ...sgSplit(snap.queue[0]),
+      startsAt: new Date(snap.queue[0].at * 1000).toISOString() });
+  }
+  for (const q of snap?.queue ?? []) {
+    if (q.startAt) {
+      items.push({ ...sgSplit(q), startsAt: new Date(q.startAt * 1000).toISOString() });
+    }
+  }
+  // The receiver replaces its whole (in-memory) list on every push, so an
+  // empty list is meaningful too: it clears a cancelled schedule.
+  sgPost('/api/integrations/metadata/schedule', { items });
+}
+
 /** Whether panels should offer the floating preview window at all. */
 const previewEnabled = () => config.preview?.enabled !== false;
 
@@ -457,6 +534,9 @@ function wirePreview(e) {
   // the counter here, every later rejoin computes its packet boundary from
   // the previous session's total and starts mid-packet.
   e.on('publisher-restart', () => {
+    // The receiver's schedule/metadata live in memory — a reconnect is the
+    // moment to restate them.
+    sgSchedule(); sgNowPlaying();
     if (tsBytes === 0) return;
     tsBytes = 0;
     for (const ws of previewSockets) {
@@ -519,10 +599,16 @@ function buildEngine({ profile, selection }) {
 
   wirePreview(e);
 
-  e.on('status', () => { broadcast('stream', streamStatus()); syncOwncastTitle(); });
-  e.on('nowplaying', () => { broadcast('stream', streamStatus()); syncOwncastTitle(); });
-  e.on('queue', () => broadcast('stream', streamStatus()));
-  e.on('seeked', () => broadcast('stream', streamStatus()));
+  e.on('status', () => {
+    broadcast('stream', streamStatus()); syncOwncastTitle();
+    sgNowPlaying(); sgSchedule();
+  });
+  e.on('nowplaying', () => {
+    broadcast('stream', streamStatus()); syncOwncastTitle();
+    sgNowPlaying({ announce: true }); sgSchedule();
+  });
+  e.on('queue', () => { broadcast('stream', streamStatus()); sgNowPlaying(); sgSchedule(); });
+  e.on('seeked', () => { broadcast('stream', streamStatus()); sgNowPlaying(); });
   e.on('selection', () => broadcast('stream', streamStatus()));
   e.on('progress', (b) => {
     // The cache bands ride the half-second progress tick. They used to
@@ -698,6 +784,10 @@ function redactedConfig() {
       ...config.owncast,
       streamKey: config.owncast.streamKey ? '__SET__' : '',
       accessToken: config.owncast.accessToken ? '__SET__' : '',
+    },
+    streamingestarr: {
+      ...config.streamingestarr,
+      accessToken: config.streamingestarr?.accessToken ? '__SET__' : '',
     },
     // Same sentinel treatment per protocol and per extra destination: a
     // stream key, SRT stream id or passphrase is never sent to a browser,
@@ -933,7 +1023,8 @@ app.put('/api/config', (req, res) => {
   delete patch.auth;
   // A field the UI didn't touch comes back as the placeholder; drop it so the
   // stored secret survives instead of being overwritten with a sentinel.
-  for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken']]) {
+  for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken'],
+    ['streamingestarr', 'accessToken']]) {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
   }
   if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, publishConfig());
@@ -1281,6 +1372,40 @@ app.post('/api/check/owncast-title', async (req, res) => {
     res.json({ ok: true, value });
   } catch (err) {
     res.json({ ok: false, error: `Could not reach ${apiUrl}: ${err.cause?.message ?? err.message}` });
+  }
+});
+
+/**
+ * Proves the Streamingestarr link end to end: capabilities discovery with
+ * the same auth the live pushes use. Green here = metadata will land.
+ */
+app.post('/api/check/streamingestarr', async (req, res) => {
+  const url = String(req.body?.url ?? config.streamingestarr?.url ?? '').replace(/\/+$/, '');
+  const token = req.body?.accessToken && req.body.accessToken !== '__SET__'
+    ? req.body.accessToken
+    : config.streamingestarr?.accessToken;
+  if (!url) return res.status(400).json({ ok: false, error: 'Receiver address is required' });
+  if (!token) return res.status(400).json({ ok: false, error: 'Access token is required' });
+  try {
+    const r = await fetch(`${url}/api/integrations/capabilities`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) {
+      return res.json({
+        ok: false,
+        error: r.status === 401
+          ? 'The receiver rejected the token (HTTP 401) — create one with the system-messages scope'
+          : `The receiver answered HTTP ${r.status}`,
+      });
+    }
+    const caps = await r.json();
+    if (caps?.service !== 'streamingestarr') {
+      return res.json({ ok: false, error: 'That address answers, but it is not a Streamingestarr receiver' });
+    }
+    res.json({ ok: true, caps });
+  } catch (err) {
+    res.json({ ok: false, error: `Could not reach ${url}: ${err.cause?.message ?? err.message}` });
   }
 });
 
@@ -1720,6 +1845,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // A fresh broadcast starts from the configured preferences, not from
   // whatever was switched to during the last one.
   trackIntent = {};
+  sgAnnounced = null;
   engine = buildEngine({ profile, selection });
   // Not awaited: going live can legitimately take minutes when the first
   // clip's subtitles must be extracted (one full read of the file), and an

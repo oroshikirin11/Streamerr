@@ -29,6 +29,16 @@ const DEFAULTS = {
    * switching between them never discards the other set — see publish.js.
    */
   publish: publishDefaults(),
+  /**
+   * Streamingestarr — our own receiver (the Owncast replacement). Same
+   * integrations mechanism, plus structured now-playing/schedule metadata.
+   * Coexists with the Owncast block: both can be active at once.
+   */
+  streamingestarr: {
+    url: '',
+    accessToken: '',
+    enabled: true,
+  },
   owncast: {
     rtmpUrl: '',
     streamKey: '',
