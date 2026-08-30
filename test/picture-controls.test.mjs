@@ -107,6 +107,35 @@ check('SDR hevc-native + hdr OFF -> passthrough unaffected', (() => {
   return s[s.indexOf('-c:v') + 1] === 'copy';
 })());
 
+// ── CPU-path tone mapping (the closed gap) ───────────────────────────
+check('cpu fallthrough + HDR -> tone-mapped after scale, before pad', (() => {
+  const s = joined(base(hdr, {}, { gpuFull: false, gpuSubs: false, tonemap: 'cpu' }));
+  const t = s.indexOf('tonemap=');
+  return t !== -1 && s.indexOf('scale=') < t && t < s.indexOf(',pad=')
+    && s.includes('format=yuv420p');
+})());
+check('cpu subtitle burn + HDR -> subs land on SDR (tonemap before burn)', (() => {
+  const s = joined(base(hdr, {
+    selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: textSub },
+    extractedPath: '/cache/x.ass',
+  }, { gpuFull: false, gpuSubs: false, tonemap: 'cpu' }));
+  const t = s.indexOf('tonemap=');
+  return t !== -1 && t < s.indexOf('subtitles=');
+})());
+check('cpu fallthrough + HDR + tonemap none -> untouched (operator said so)',
+  !joined(base(hdr, {}, { gpuFull: false, gpuSubs: false, tonemap: 'none' }))
+    .includes('tonemap='));
+check('cpu fallthrough + SDR -> no tone map',
+  !joined(base(sdr, {}, { gpuFull: false, gpuSubs: false, tonemap: 'cpu' }))
+    .includes('tonemap='));
+check('chunked + HDR -> tone-mapped with the chosen curve',
+  buildChunkArgs({
+    srcPath: '/m.mkv', start: 0, dur: 20, out: '/tmp/c.ts',
+    profile: { ...profile, gpuFull: false, tonemap: 'cpu', tonemapCurve: 'reinhard' },
+    selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: textSub },
+    extractedPath: '/cache/x.ass',
+  }).join(' ').includes('tonemap=reinhard'));
+
 // ── tone-map curve ───────────────────────────────────────────────────
 const rect = contentRect(hdr, profile);
 check('cpu engine takes the chosen curve',

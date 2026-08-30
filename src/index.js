@@ -1263,7 +1263,7 @@ app.put('/api/config', (req, res) => {
   // on the way in so no client can persist a value that means something
   // 1000x different from what was intended.
   if (patch.encoder?.videoBitrate !== undefined) {
-    patch.encoder.videoBitrate = normalizeBitrate(patch.encoder.videoBitrate, '4500k');
+    patch.encoder.videoBitrate = normalizeBitrate(patch.encoder.videoBitrate, '6000k');
   }
   if (patch.encoder?.audioBitrate !== undefined) {
     patch.encoder.audioBitrate = normalizeBitrate(patch.encoder.audioBitrate, '160k');

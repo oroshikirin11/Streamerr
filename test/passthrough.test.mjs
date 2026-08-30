@@ -80,5 +80,16 @@ check('hevc-native under codec=h264 -> transcode (h264 path untouched)',
     ...base, profile: { ...profile, codec: 'h264' },
   })));
 
+// Bitrate ceiling: copy ships the FILE's rate, so remux-dense files encode.
+check('file at 3x the rate still passes through', isCopy(buildSourceArgs({
+  ...base, srcKbps: 24000,
+})));
+check('remux-dense file (54 Mbps vs 8000k) -> transcode', !isCopy(buildSourceArgs({
+  ...base, srcKbps: 54000,
+})));
+check('unknown rate -> passthrough (benefit of the doubt)', isCopy(buildSourceArgs({
+  ...base, srcKbps: null,
+})));
+
 console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');
 process.exit(failures ? 1 : 0);

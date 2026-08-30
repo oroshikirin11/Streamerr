@@ -79,7 +79,7 @@ const DEFAULTS = {
     // 'fixed' always outputs exactly `fps`.
     fpsMode: 'auto',
     codec: 'h264',
-    videoBitrate: '4500k',
+    videoBitrate: '6000k',
     // Optional per-codec overrides; empty derives from the H.264 anchor
     // (hevc 2/3, av1 1/2 — codecBitrate in encoders.js).
     hevcBitrate: '',
@@ -266,7 +266,7 @@ for (const key of Object.keys(config.paths)) {
 export function normalizeStoredBitrates(normalize) {
   const before = [config.encoder?.videoBitrate, config.encoder?.audioBitrate];
   if (config.encoder?.videoBitrate !== undefined) {
-    config.encoder.videoBitrate = normalize(config.encoder.videoBitrate, '4500k');
+    config.encoder.videoBitrate = normalize(config.encoder.videoBitrate, '6000k');
   }
   if (config.encoder?.audioBitrate !== undefined) {
     config.encoder.audioBitrate = normalize(config.encoder.audioBitrate, '160k');

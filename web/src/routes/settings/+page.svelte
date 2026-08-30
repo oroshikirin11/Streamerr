@@ -193,7 +193,7 @@
   // Which dropdown entry is showing. 'custom' reveals the original free field.
   let fpsSel = $state('30');
   let gopSel = $state('2');
-  let vbrSel = $state('4500k');
+  let vbrSel = $state('6000k');
   let abrSel = $state('160k');
   let scanSel = $state('12');
   let devSel = $state('/dev/dri/renderD128');
@@ -296,7 +296,11 @@
     const w = +cfg?.encoder?.width || 1920;
     const h = +cfg?.encoder?.height || 1080;
     const f = +cfg?.encoder?.fps || 30;
-    return Math.round((w * h * f * 0.07) / 1000 / 500) * 500;
+    // Anchored to measurement, not vibes: CRF-20 transparency at 1080p
+    // needs 2.1-4.3 Mbps on real library files, so ~6 Mbps carries margin
+    // and anything above buys nothing — the picture is bounded by the
+    // source. The factor scales that anchor with resolution and rate.
+    return Math.round((w * h * f * 0.096) / 1000 / 500) * 500;
   });
 
   function syncPresetFromCfg() {
@@ -1069,10 +1073,11 @@
     {/if}
 
     <p class="muted small">
-      About {recommendedVbr.toLocaleString()} kbps suits
-      {cfg.encoder.width}&times;{cfg.encoder.height} at {cfg.encoder.fps}fps.
-      Above your upload speed, viewers stutter. Auto keeps each file&rsquo;s rate
-      up to the cap.
+      About {recommendedVbr.toLocaleString()} kbps is visually transparent at
+      {cfg.encoder.width}&times;{cfg.encoder.height} {cfg.encoder.fps}fps —
+      measured against real files, the picture is bounded by the source above
+      that, so more bits buy upload, not quality. Above your upload speed,
+      viewers stutter.
     </p>
     <p class="muted small">
       Must divide Owncast&rsquo;s segment length. Two seconds is its recommendation;

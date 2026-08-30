@@ -1305,10 +1305,21 @@ export class PipelinePlayout extends EventEmitter {
     // once rather than 20s in, and that must not depend on the epoch
     // being large.
     let lastStat = -Infinity;
+    // Carry the unterminated tail of each read into the next. ffmpeg
+    // splits messages across writes, and filtering per-chunk left the
+    // FRAGMENTS of a suppressed line in the console — a bare
+    // "[vost#0:0/copy @ ...]" here, an orphaned "changing to N" there
+    // (operator-reported from a live N100 log).
+    let lineTail = '';
     p.stderr.on('data', (d) => {
       const s = this._redact(d.toString());
       stderr += s;
       if (stderr.length > 32_000) stderr = stderr.slice(-16_000);
+      const whole = lineTail + s;
+      const nl = Math.max(whole.lastIndexOf('\n'), whole.lastIndexOf('\r'));
+      const complete = nl === -1 ? '' : whole.slice(0, nl + 1);
+      lineTail = nl === -1 ? whole : whole.slice(nl + 1);
+      if (lineTail.length > 8_000) lineTail = lineTail.slice(-4_000);
       // ffmpeg writes its stats line twice a second, and at that rate it
       // buries every other line in the console. It is also the least
       // informative line here: this is the PUBLISHER, and `-re` pins it to
@@ -1317,7 +1328,7 @@ export class PipelinePlayout extends EventEmitter {
       // and say whose it is, because reading it as the encoder's rate has
       // cost real debugging time.
       const keep = [];
-      for (const raw of s.split(/[\r\n]+/)) {
+      for (const raw of complete.split(/[\r\n]+/)) {
         const line = raw.trim();
         if (!line) continue;
         if (/^frame=.*\bspeed=/.test(line)) {
@@ -2423,8 +2434,18 @@ export class PipelinePlayout extends EventEmitter {
     } else if (this._ovFeed?.active) {
       this._ovFeed.stopSync();
     }
+    // The file's average rate, for the passthrough ceiling and the bank's
+    // re-size below. Null when unstatable (SMB hiccup) or duration-less.
+    let srcKbps = null;
+    try {
+      if (clipDuration > 0) {
+        srcKbps = Math.round((statSync(item.srcPath).size * 8) / clipDuration / 1000);
+      }
+    } catch { /* keep null */ }
+
     const args = buildSourceArgs({
       srcPath: item.srcPath,
+      srcKbps,
       offset,
       // Offset 0: every graph restores the clip's timeline before drawing
       // the ASS, so the file is written in clip time. Shifting it here as
@@ -2492,18 +2513,19 @@ export class PipelinePlayout extends EventEmitter {
     {
       const ci = args.indexOf('-c:v');
       const isCopy = ci !== -1 && args[ci + 1] === 'copy';
-      let kbps = this._kbpsBase;
+      const kbps = isCopy ? Math.max(this._kbpsBase, srcKbps ?? 0) : this._kbpsBase;
       if (isCopy) {
-        try {
-          const dur = clipDuration ?? 0;
-          if (dur > 0) {
-            kbps = Math.max(kbps,
-              Math.round((statSync(item.srcPath).size * 8) / dur / 1000));
-          }
-        } catch { /* unstatable (SMB hiccup) — keep the configured rate */ }
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
           + `bytes ship untouched (~${kbps} kbps); encode cost zero. An Apply `
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
+      } else if (srcKbps != null && this.profile?.codec === 'hevc'
+          && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
+          && srcKbps > 3 * (parseInt(String(this.profile?.videoBitrate), 10) || 6000)) {
+        // The one skip reason worth a sentence: the operator would
+        // otherwise wonder why an obviously eligible file is encoding.
+        this.emit('log', `[passthrough] skipped — this file averages `
+          + `${srcKbps} kbps, over 3x the configured rate; shipping it raw `
+          + `would swamp the upload, so it goes through the encoder.\n`);
       }
       if (kbps !== this._kbps) {
         this._kbps = kbps;
@@ -4165,7 +4187,7 @@ export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
   overlayPath = null, overlayImages = [], overlayLayer = null, subBand = null,
-  overlayAnimated = false, overlayPipe = null,
+  overlayAnimated = false, overlayPipe = null, srcKbps = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -4248,7 +4270,15 @@ export function buildSourceArgs({
       // An HDR file may only ship untouched when the operator asked for
       // HDR output — with it off the promise is SDR, so the clip goes to
       // the tone-mapped transcode instead of quietly leaking PQ on air.
-      && (!selection?.video?.hdr || profile.hdrWanted)) {
+      && (!selection?.video?.hdr || profile.hdrWanted)
+      // The bitrate ceiling: copy ships the FILE's rate, and a 4K remux
+      // averages 54 Mbps against a 52.75 Mbps home upload — passthrough
+      // of that file would saturate the line and stall every viewer.
+      // 3x the configured rate keeps every normal episode eligible and
+      // sends the remuxes to the encoder, which is what the configured
+      // rate was a statement about in the first place.
+      && (srcKbps == null
+        || srcKbps <= 3 * (parseInt(String(profile.videoBitrate), 10) || 6000))) {
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
@@ -4296,6 +4326,17 @@ export function buildSourceArgs({
       && selection?.video?.interlaced === true);
   const gpuDeint = wantDeint ? 'deinterlace_vaapi,' : '';
   const cpuDeint = wantDeint ? 'bwdif,' : '';
+  /**
+   * The CPU chains tone-map now too. They never did — an HDR source that
+   * fell through here (bitmap subs, software backend, a GPU that failed
+   * its probes) went out with PQ pixels in an SDR stream, washed out.
+   * Placed AFTER the scale like the GPU path, so the mapper works at
+   * output size rather than 4K, and BEFORE the subtitle burn so text
+   * lands on SDR. format=yuv420p pins the depth for everything after.
+   */
+  const cpuToneFilter = selection?.video?.hdr
+    && (profile.tonemap ?? 'auto') !== 'none'
+    ? `${cpuTonemap(profile.tonemapCurve)},format=yuv420p` : '';
   /**
    * HDR OUT: keep the 10-bit P010 surface through the scale, no tone map,
    * and let hevc_vaapi derive main10 from the format. Probe-gated in
@@ -4744,14 +4785,15 @@ export function buildSourceArgs({
   // can draw on.
   const preUpload = sub.filter
     ? [
-      `${cpuDeint}scale=${rect.w}:${rect.h},setsar=1`,
+      `${cpuDeint}scale=${rect.w}:${rect.h},setsar=1${cpuToneFilter ? `,${cpuToneFilter}` : ''}`,
       ...(offset > 0 ? [`setpts=PTS+${Number(offset).toFixed(3)}/TB`] : []),
       `${sub.filter}:alpha=0`,
       ...(offset > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
     ]
-    : [cpuDeint + base];
+    // Tone map between scale and pad — same output-size placement.
+    : [cpuDeint + (cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base)];
   const cpuChain = [...preUpload, upload];
 
   // The overlay ASS is written in the CLIP's timeline, and every graph that
@@ -4784,9 +4826,11 @@ export function buildSourceArgs({
       // wrong size. Overlay at native size first; scaling then carries the
       // subtitles along with the picture.
       parts.push(`[0:v:0][${sub.overlayInput}]overlay[s]`);
-      // Deinterlace inside the base: after the bitmap composite, since the
-      // subpicture stream has no fields of its own to preserve.
-      parts.push(`[s]${cpuDeint}${base}${ovPost}[o]`);
+      // Deinterlace and tone-map inside the base: after the bitmap
+      // composite, since the subpicture stream has no fields of its own to
+      // preserve. The subpicture rides through the tone map with the frame
+      // — marginally dimmer text on an HDR title beats PQ leaking out.
+      parts.push(`[s]${cpuDeint}${cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base}${ovPost}[o]`);
     } else {
       parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
     }
@@ -4847,11 +4891,15 @@ export function buildChunkArgs({
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
-  // Same rule as the streaming path: deinterlace before anything scales.
+  // Same rules as the streaming path: deinterlace before anything scales,
+  // tone-map HDR after the scale so chunks match the stream's colours.
   const wantDeint = profile.deinterlace === 'on'
     || ((profile.deinterlace ?? 'auto') === 'auto'
       && selection?.video?.interlaced === true);
   const cpuDeint = wantDeint ? 'bwdif,' : '';
+  const cpuToneFilter = selection?.video?.hdr
+    && (profile.tonemap ?? 'auto') !== 'none'
+    ? `${cpuTonemap(profile.tonemapCurve)},format=yuv420p` : '';
   // Source-rate matching applies to every path, not just the GPU one —
   // duplicating 24fps to 30 is wasted work and judder wherever it happens.
   const effAll = effectiveFps(selection?.video, profile);
@@ -4866,14 +4914,14 @@ export function buildChunkArgs({
   // `start`, so subtitle timestamps must be shifted to match.
   const preUpload = sub.filter
     ? [
-      `${cpuDeint}scale=${rect.w}:${rect.h},setsar=1`,
+      `${cpuDeint}scale=${rect.w}:${rect.h},setsar=1${cpuToneFilter ? `,${cpuToneFilter}` : ''}`,
       ...(start > 0 ? [`setpts=PTS+${Number(start).toFixed(3)}/TB`] : []),
       `${sub.filter}:alpha=0`,
       ...(start > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
     ]
-    : [cpuDeint + base];
+    : [cpuDeint + (cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base)];
   const cpuChain = [...preUpload, upload];
 
   // The overlay's ASS is written in the CLIP's own timeline, so its event
@@ -4906,7 +4954,7 @@ export function buildChunkArgs({
       // wrong size. Overlay at native size first; scaling then carries the
       // subtitles along with the picture.
       parts.push(`[0:v:0][${sub.overlayInput}]overlay[s]`);
-      parts.push(`[s]${base}${ovPost}[o]`);
+      parts.push(`[s]${cpuDeint}${cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base}${ovPost}[o]`);
     } else {
       parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
     }
