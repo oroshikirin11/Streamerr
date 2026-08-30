@@ -170,10 +170,10 @@ export const BACKENDS = {
       '-c:v', 'libsvtav1',
       '-preset', '9',
       '-b:v', p.videoBitrate,
-      '-maxrate', p.videoBitrate,
-      '-bufsize', bufsize(p.videoBitrate),
       '-g', String(Math.round(p.gopSeconds * p.fps)),
-      '-svtav1-params', 'rc=2',
+      // SVT rejects -maxrate outside CRF and allows CBR only with the
+      // low-delay prediction structure — which is what live wants anyway.
+      '-svtav1-params', 'rc=2:pred-struct=1',
     ] : p.codec === 'hevc' ? [
       '-c:v', 'libx265',
       '-preset', 'veryfast',
