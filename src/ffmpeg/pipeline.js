@@ -3903,10 +3903,16 @@ export function buildRendererSpec({
    * each returns as its own commit so a live test can convict or acquit it
    * individually.
    *
-   * -readrate 1.2: the unpaced renderer strip-mined a full E-core
+   * -readrate 2.0: unpaced, the renderer strip-mined a full E-core
    * rendering canvas hours ahead of air (measured on the N100: 98.7% CPU,
-   * node at 64% ferrying frames nobody needed, encoder starving at 0.69x).
-   * The run-ahead cache reader caps sources at 1.05x, so 1.2 loses nothing.
+   * node at 64% ferrying frames nobody needed, encoder starving at 0.69x)
+   * — during static stretches mpdecimate emits no bytes, so backpressure
+   * never binds and only the readrate holds the rasteriser back. But the
+   * cap is also a lid on the SOURCE: framesync cannot advance video past
+   * the canvas timestamps it has received, so the whole encoder is capped
+   * at the renderer's pace. At 1.1 that pinned every cushion rebuild to
+   * ~1.05x observed. 2.0 keeps the runaway bounded while letting the
+   * encoder run at the hardware's real speed when it has surplus.
    *
    * Half cadence when nothing moves: a static canvas rendered 36 frames a
    * second at 1.5x pacing to keep about two. Half rate is the same 83ms
@@ -3918,7 +3924,7 @@ export function buildRendererSpec({
     || imgList.some((i) => i?.animated || isMoving(i));
   const chainRate = (!perFrame && halfRate(plan.rate)) || plan.rate;
   const beat = perFrame ? 12 : 6;
-  const inputs = ['-f', 'lavfi', '-readrate', '1.1', ...cap, '-i',
+  const inputs = ['-f', 'lavfi', '-readrate', '2.0', ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
    * Timestamps are the continuation clock now, and they are CLIP-relative:

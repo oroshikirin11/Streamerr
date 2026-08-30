@@ -162,7 +162,9 @@ export class OverlayFeed {
             }
           }
         }
-        if (code !== 0 && code !== null && this.active) {
+        // A drained renderer died because WE killed it — its 255 is not
+        // news. Only an exit nobody asked for is worth a log line.
+        if (code !== 0 && code !== null && this.active && !draining) {
           this.log(`[overlay-pipe] renderer exited ${code}: ${tail.split('\n').filter(Boolean).slice(-2).join(' | ')}\n`);
         }
         resolve(code);

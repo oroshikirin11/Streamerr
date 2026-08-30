@@ -169,7 +169,7 @@ console.log('\nperformance interior — the regression that hit the N100');
     quiet.spec.inputs.join(' ').includes('r=24000/2002')
       && quiet.spec.filters.join(';').includes('mpdecimate=max=6'), true);
   check('the renderer is paced, not free-running',
-    quiet.spec.inputs.join(' ').includes('-readrate 1.1'), true);
+    quiet.spec.inputs.join(' ').includes('-readrate 2.0'), true);
   check('band applies -> rasterise at band height',
     quiet.spec.inputs.join(' ').includes('s=1920x420'), true);
   check('band interior pads into the full-rect format',
