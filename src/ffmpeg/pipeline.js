@@ -1139,15 +1139,20 @@ export class PipelinePlayout extends EventEmitter {
        * the publisher has nothing to send while the encoder catches up.
        */
       const rewound = this._bankTrimTo(this.applySeconds ?? this.bufferSeconds);
-      const gop = this._bankTrimToAccessPoint();
+      // GOP-aligned splices are a LIVE-mode refinement; legacy mode keeps
+      // the exact f7909cd packet-aligned trim, by operator decree.
+      const gop = this.profile?.overlayPipe ? this._bankTrimToAccessPoint() : 0;
+      const dropped = this.profile?.overlayPipe ? 0 : this._bankTrimToPacket();
       // Never behind what has already gone out: those bytes are spent.
       const resume = Math.max(this.aired ?? 0, this.position - rewound - gop);
       const ahead = Math.max(0, resume - (this.aired ?? resume));
       this.emit('log', `[overlay] applied — on air in ~${ahead.toFixed(1)}s `
         + (rewound > 0.05
           ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
-          : `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`)
-        + '\n');
+          : gop > 0
+            ? `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`
+            : '(cushion kept)')
+        + `${dropped ? `, ${dropped}B partial packet trimmed` : ''}\n`);
       this._play(item, resume, { duration: dur });
     }), 'applying overlays');
     return true;
