@@ -139,8 +139,14 @@ export function tokenFromRequest(req) {
  */
 const SETUP_OPEN = new Set(['/auth/status', '/auth/setup']);
 
-export function requireAuth(getPasswordHash) {
+export function requireAuth(getPasswordHash, isDisabled = () => false) {
   return (req, res, next) => {
+    // "auth": {"disabled": true} in config.json switches the gate off
+    // entirely — for test machines and single-user LANs where the operator
+    // decides the port is trusted. It must be set by hand in the file; the
+    // API can never write it, so a compromised session cannot make itself
+    // permanent by turning the lock off.
+    if (isDisabled()) return next();
     if (validSession(tokenFromRequest(req))) return next();
     // req.path is relative to the mount point ('/api'), so these are
     // /api/auth/status and /api/auth/setup.

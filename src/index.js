@@ -578,7 +578,8 @@ function buildEngine({ profile, selection }) {
 // ── auth ───────────────────────────────────────────────────────────────
 
 const passwordHash = () => config.auth?.passwordHash || null;
-const auth = requireAuth(passwordHash);
+const authDisabled = () => config.auth?.disabled === true;
+const auth = requireAuth(passwordHash, authDisabled);
 
 /** Client address for throttling. Honours X-Forwarded-For only when the
  *  panel is knowingly behind a proxy, so a direct caller cannot spoof its
@@ -602,11 +603,14 @@ function isSecure(req) {
 
 app.get('/api/auth/status', (req, res) => {
   res.json({
-    configured: Boolean(passwordHash()),
+    // With auth disabled by hand in the config, the panel is configured and
+    // authenticated by definition — the SPA goes straight in, no login, no
+    // setup wizard.
+    configured: authDisabled() || Boolean(passwordHash()),
     // Never "authenticated" merely because setup has not run. Claiming it
     // was what let the panel skip its own gate and drop a brand-new install
     // straight into the wizard with no password and no way to notice.
-    authenticated: validSession(tokenFromRequest(req)),
+    authenticated: authDisabled() || validSession(tokenFromRequest(req)),
     onboarded: Boolean(config.onboarded),
   });
 });
@@ -873,6 +877,12 @@ app.get('/api/config', (req, res) => res.json({
 
 app.put('/api/config', (req, res) => {
   const patch = { ...req.body };
+  // The auth block is never writable through the generic config route: the
+  // password hash only changes via the change-password endpoint (which
+  // demands the current password), and auth.disabled only by hand in the
+  // file — a compromised session must not be able to overwrite the lock or
+  // switch it off.
+  delete patch.auth;
   // A field the UI didn't touch comes back as the placeholder; drop it so the
   // stored secret survives instead of being overwritten with a sentinel.
   for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken']]) {
@@ -2002,6 +2012,11 @@ scheduleAutoScan();
 const { port, host } = config.server;
 server.listen(port, host, () => {
   console.log(`jellystreamerr listening on http://${host}:${port}`);
+  if (authDisabled()) {
+    console.warn('  AUTH IS DISABLED ("auth": {"disabled": true} in config.json).');
+    console.warn('  Anyone who can reach this port controls broadcasts and can read');
+    console.warn('  the stream key. Meant for test machines on trusted networks only.');
+  }
   for (const line of publishTargetsRedacted()) console.log(`  target : ${line}`);
   const srcs = config.library?.sources ?? [];
   console.log(`  library: ${srcs.length ? srcs.map((s) => `${s.name} (${s.provider})`).join(', ') : 'none configured'}`);
