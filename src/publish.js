@@ -217,6 +217,17 @@ export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
       ? [`f=${inner}`, 'onfail=ignore',
         ...(inner === 'flv' ? [`flvflags=${flvFlags}`] : [])]
       : ['f=fifo', `fifo_format=${inner}`,
+        /**
+         * ADTS->ASC happens HERE, at the tee, not inside the fifo's flv:
+         * left to the muxer's auto-inserted aac_adtstoasc, a recovery
+         * restarts the muxer but reuses the filter instance already in
+         * its EOF state, and every audio packet after the reconnect fails
+         * ("non-NULL packet sent after an EOF") in a once-a-second
+         * recovery loop — seen live on the first real outage. Converted
+         * before the fifo, the inner flv sees plain ASC and inserts
+         * nothing fragile.
+         */
+        ...(inner === 'flv' ? ['bsfs/a=aac_adtstoasc'] : []),
         'attempt_recovery=1', 'recover_any_error=1', 'max_recovery_attempts=0',
         'restart_with_keyframe=1', 'recovery_wait_time=2',
         'drop_pkts_on_overflow=1', 'queue_size=240', 'onfail=ignore'];
