@@ -13,7 +13,8 @@
  *
  * Run: node test/overlay-pipe.test.mjs
  */
-import { createReadStream, rmSync } from 'fs';
+import { createReadStream, rmSync, writeFileSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -239,14 +240,27 @@ try {
   feed.resetSync();
   const rd = createReadStream(fifo, { highWaterMark: 4096 });
   const collecting = pull(rd, 6000);
-  feed.spawnRenderer(paint('red', 3));
-  await new Promise((r) => { setTimeout(r, 1500); });
+  feed.spawnRenderer(paint('red', 300));   // long-lived: the swap kills it mid-write
+  await new Promise((r) => { setTimeout(r, 1200); });
   await feed.swap(paint('blue', 3));
   const bytes = await collecting;
   rd.destroy();
   const headers = bytes.toString('latin1').split('nut/multimedia container').length - 1;
   check('bytes flowed through the feed', bytes.length > 200, true);
   check('a swap appends a SECOND NUT stream, no EOF between', headers, 2);
+  // THE test the guard exists for: a killed writer's torn tail must never
+  // reach the reader. The joined stream of a mid-write kill and its
+  // successor has to decode with zero damaged packets.
+  writeFileSync(join(tmpdir(), `jsr-guard-${process.pid}.nut`), bytes);
+  const probe = spawnSync('ffprobe', ['-v', 'warning', '-count_frames',
+    '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames',
+    '-of', 'csv=p=0', join(tmpdir(), `jsr-guard-${process.pid}.nut`)],
+  { encoding: 'utf8' });
+  rmSync(join(tmpdir(), `jsr-guard-${process.pid}.nut`), { force: true });
+  check('the joined stream decodes with ZERO damage',
+    !/damaged|invalid|error/i.test(probe.stderr ?? ''), true);
+  check(`whole frames survived the kill (${(probe.stdout ?? '').trim()})`,
+    Number(probe.stdout) >= 3, true);
 } finally {
   feed.stopSync();
   rmSync(fifo, { force: true });
