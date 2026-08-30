@@ -1970,10 +1970,14 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     }
   }
   let lowPower = false;
+  let softwareCodec = false;
   if (codec !== 'h264') {
     const enc = { hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[codec];
     const dev = config.encoder.device ?? '/dev/dri/renderD128';
-    const probeArgs = (lp) => ['-v', 'error',
+    // -xerror matters: without it ffmpeg exits 0 even when the encoder
+    // thread dies with -22 and zero packets come out (measured with
+    // av1_vaapi on RDNA2) — the probe would bless a broken go-live.
+    const probeArgs = (lp) => ['-v', 'error', '-xerror',
       '-init_hw_device', `vaapi=va:${dev}`, '-f', 'lavfi',
       '-i', 'color=c=black:s=320x180:r=24', '-frames:v', '1',
       '-vf', 'format=nv12,hwupload', '-c:v', enc,
@@ -1989,9 +1993,21 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     }
     if (probe !== 0) probe = spawnSyncSafe('ffmpeg', probeArgs(false));
     if (probe !== 0 && config.encoder.backend !== 'x264') {
-      return res.status(400).json({
-        error: `This box has no hardware ${codec.toUpperCase()} encoder — pick H.264, or switch the encoder backend to software`,
-      });
+      // No hardware encoder for this codec — attempt CPU before saying no.
+      // The software encoders are proven paths (BACKENDS.x264 carries
+      // libx265/libsvtav1 with live-tuned parameters); whether this box can
+      // hold realtime is for the speed readout to answer, not a guess here.
+      const sw = { hevc: 'libx265', av1: 'libsvtav1' }[codec];
+      const swProbe = spawnSyncSafe('ffmpeg', ['-v', 'error', '-xerror',
+        '-f', 'lavfi', '-i', 'color=c=black:s=320x180:r=24', '-frames:v', '1',
+        '-c:v', sw, '-f', 'null', '-']);
+      if (swProbe !== 0) {
+        return res.status(400).json({
+          error: `This box has neither a hardware ${codec.toUpperCase()} encoder nor ${sw} in its ffmpeg build — pick H.264`,
+        });
+      }
+      softwareCodec = true;
+      dpush('warn', `no hardware ${codec.toUpperCase()} encoder — encoding in software (${sw}). CPU-heavy: watch the speed readout; if it sinks below 1.0x, H.264 is the way back`);
     }
     if (lowPower) dpush('info', 'HEVC encode: VDENC (low_power) available — using the fixed-function encoder');
   }
@@ -2003,7 +2019,10 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // Studio overlays travel with the encoder profile: buildSourceArgs already
   // receives it, and the overlay is a property of the output, not the clip.
   const profile = {
-    ...config.encoder, backend: sel.backend,
+    // A codec the GPU cannot encode demotes THIS RUN to the software
+    // backend — the stored setting is untouched, so H.264 comes back on
+    // hardware the moment it is selected again.
+    ...config.encoder, backend: softwareCodec ? 'x264' : sel.backend,
     overlay: visibleOverlay(),
     // The H.264 anchor bitrate never changes; other codecs derive their
     // cheaper rate from it (or an explicit hevcBitrate/av1Bitrate override).
