@@ -368,27 +368,40 @@ function syncOwncastTitle() {
 // engine events (never a second clip-change source). Fire-and-forget
 // with short timeouts: a dead receiver is a log line, never a stall.
 
-const sgActive = () => {
+/**
+ * Every active receiver. Two shapes coexist: the original single
+ * url/token pair (kept working untouched) and the receivers list that
+ * replaced it in the UI when the second instance appeared. Metadata
+ * fans out to all of them independently — one dead receiver never
+ * costs another its pushes.
+ */
+function sgReceivers() {
   const sg = config.streamingestarr ?? {};
-  return sg.enabled !== false && sg.url && sg.accessToken ? sg : null;
-};
+  if (sg.enabled === false) return [];
+  const list = Array.isArray(sg.receivers) && sg.receivers.length
+    ? sg.receivers
+    : (sg.url && sg.accessToken ? [{ id: 'legacy', url: sg.url, accessToken: sg.accessToken }] : []);
+  return list.filter((r) => r && r.enabled !== false && r.url && r.accessToken);
+}
+const sgActive = () => (sgReceivers().length ? true : null);
 
 function sgPost(path, body) {
-  const sg = sgActive();
-  if (!sg) return;
-  fetch(`${String(sg.url).replace(/\/+$/, '')}${path}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${sg.accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(4000),
-  }).then((r) => {
-    if (!r.ok) dpush('warn', `Streamingestarr ${path}: HTTP ${r.status}`);
-  }).catch((err) => {
-    dpush('warn', `Streamingestarr ${path} failed: ${err.cause?.message ?? err.message}`);
-  });
+  for (const rc of sgReceivers()) {
+    const label = rc.name || new URL(String(rc.url)).host;
+    fetch(`${String(rc.url).replace(/\/+$/, '')}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${rc.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(4000),
+    }).then((r) => {
+      if (!r.ok) dpush('warn', `Streamingestarr [${label}] ${path}: HTTP ${r.status}`);
+    }).catch((err) => {
+      dpush('warn', `Streamingestarr [${label}] ${path} failed: ${err.cause?.message ?? err.message}`);
+    });
+  }
 }
 
 /** series/episode un-flattened: title = the show or film, subtitle = the
@@ -922,6 +935,9 @@ function redactedConfig() {
     streamingestarr: {
       ...config.streamingestarr,
       accessToken: config.streamingestarr?.accessToken ? '__SET__' : '',
+      receivers: (config.streamingestarr?.receivers ?? []).map((r) => ({
+        ...r, accessToken: r?.accessToken ? '__SET__' : '',
+      })),
     },
     // Same sentinel treatment per protocol and per extra destination: a
     // stream key, SRT stream id or passphrase is never sent to a browser,
@@ -1157,6 +1173,17 @@ app.put('/api/config', (req, res) => {
   delete patch.auth;
   // A field the UI didn't touch comes back as the placeholder; drop it so the
   // stored secret survives instead of being overwritten with a sentinel.
+  if (Array.isArray(patch.streamingestarr?.receivers)) {
+    const stored = new Map((config.streamingestarr?.receivers ?? []).map((r) => [r.id, r]));
+    // the legacy single token can seed the first row a migration creates
+    const legacyTok = config.streamingestarr?.accessToken ?? '';
+    patch.streamingestarr.receivers = patch.streamingestarr.receivers.map((r) => ({
+      ...r,
+      accessToken: r?.accessToken === '__SET__'
+        ? (stored.get(r.id)?.accessToken ?? legacyTok)
+        : (r?.accessToken ?? ''),
+    }));
+  }
   for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken'],
     ['streamingestarr', 'accessToken']]) {
     if (patch[section]?.[field] === '__SET__') delete patch[section][field];
@@ -1515,9 +1542,15 @@ app.post('/api/check/owncast-title', async (req, res) => {
  */
 app.post('/api/check/streamingestarr', async (req, res) => {
   const url = String(req.body?.url ?? config.streamingestarr?.url ?? '').replace(/\/+$/, '');
+  // A row can test with its SAVED token (field left blank): resolve by id,
+  // falling back to the legacy single token, exactly like the pushes do.
+  const stored = req.body?.receiverId
+    ? (config.streamingestarr?.receivers ?? []).find((r) => r.id === req.body.receiverId)?.accessToken
+      ?? config.streamingestarr?.accessToken
+    : config.streamingestarr?.accessToken;
   const token = req.body?.accessToken && req.body.accessToken !== '__SET__'
     ? req.body.accessToken
-    : config.streamingestarr?.accessToken;
+    : stored;
   if (!url) return res.status(400).json({ ok: false, error: 'Receiver address is required' });
   if (!token) return res.status(400).json({ ok: false, error: 'Access token is required' });
   try {

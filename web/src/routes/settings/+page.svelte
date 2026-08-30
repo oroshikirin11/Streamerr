@@ -131,9 +131,8 @@
   let jellyfinKey = $state('');
 
   let owncastResult = $state(null);
-  let sgToken = $state('');
-  let sgTokenStored = $state(false);
-  let sgTest = $state(null);
+  let sgTests = $state({});
+  let sgSaved = $state({});
   let libResult = $state(null);
   let encoders = $state(null);
   let pathmap = $state(null);
@@ -307,7 +306,19 @@
         ? String(cfg.buffer.seconds) : 'custom';
       keyStored = cfg.owncast.streamKey === '__SET__';
       tokenStored = cfg.owncast.accessToken === '__SET__';
-      sgTokenStored = cfg.streamingestarr?.accessToken === '__SET__';
+      // migrate: a legacy single receiver becomes row one of the list
+      if (!(cfg.streamingestarr?.receivers ?? []).length && cfg.streamingestarr?.url) {
+        cfg.streamingestarr.receivers = [{
+          id: 'r' + Math.random().toString(36).slice(2, 8),
+          name: '', url: cfg.streamingestarr.url,
+          accessToken: cfg.streamingestarr.accessToken, enabled: true,
+        }];
+      }
+      const seen = {};
+      for (const r of cfg.streamingestarr?.receivers ?? []) {
+        if (r.accessToken === '__SET__') { seen[r.id] = true; r.accessToken = ''; }
+      }
+      sgSaved = seen;
       accessToken = '';
       streamKey = '';
       jellyfinKey = '';
@@ -451,9 +462,11 @@
       const patch = {};
       if (section === 'streamingestarr') {
         patch.streamingestarr = {
-          url: cfg.streamingestarr?.url ?? '',
           enabled: cfg.streamingestarr?.enabled !== false,
-          ...(sgToken ? { accessToken: sgToken } : {}),
+          receivers: (cfg.streamingestarr?.receivers ?? []).map((r) => ({
+            ...r,
+            accessToken: r.accessToken || (sgSaved[r.id] ? '__SET__' : ''),
+          })),
         };
       }
       if (section === 'owncast') {
@@ -843,57 +856,60 @@
     </label>
 
     {#if cfg.streamingestarr?.enabled !== false}
-      <label>Receiver address</label>
-      <input spellcheck="false" placeholder="http://192.168.1.10:8080"
-             value={cfg.streamingestarr?.url ?? ''}
-             oninput={(e) => { cfg.streamingestarr = { ...(cfg.streamingestarr ?? {}), url: e.target.value }; }} />
-
-      <label>Access token</label>
-      <input type="password" bind:value={sgToken}
-             placeholder={sgTokenStored ? 'leave blank to keep the saved token' : 'receiver admin → access tokens (system-messages scope)'} />
-      <p class="muted small">
-        Create it in the receiver's admin with the system-messages scope.
-        {#if sgTokenStored && !sgToken}A token is saved.{/if}
-      </p>
-
-      {#if !cfg.streamingestarr?.url || (!sgTokenStored && !sgToken)}
-        {@const missing = [
-          !cfg.streamingestarr?.url && 'address',
-          !sgTokenStored && !sgToken && 'token',
-        ].filter(Boolean)}
-        <p class="warnline">
-          Not active yet &mdash; the {missing.join(' and ')}
-          {missing.length > 1 ? 'are' : 'is'} still empty, so nothing is sent.
-        </p>
-      {/if}
+      {#each cfg.streamingestarr?.receivers ?? [] as rc (rc.id)}
+        <div class="extra">
+          <div class="extrahead">
+            <label style="display:flex; align-items:center; gap:8px; margin:0;">
+              <input type="checkbox" bind:checked={rc.enabled} style="width:auto" />
+              <input bind:value={rc.name} spellcheck="false" maxlength="40"
+                     placeholder="nickname — e.g. VPS theater" style="width:auto" />
+            </label>
+            <button type="button" class="danger" onclick={() => {
+              cfg.streamingestarr.receivers = cfg.streamingestarr.receivers.filter((x) => x.id !== rc.id);
+            }}>Remove</button>
+          </div>
+          <input bind:value={rc.url} spellcheck="false" placeholder="https://stream.example.com" />
+          <input type="password" bind:value={rc.accessToken}
+                 placeholder={sgSaved[rc.id] && !rc.accessToken ? 'leave blank to keep the saved token' : 'access token (system-messages scope)'} />
+          <div class="actions" style="margin-top:2px;">
+            <button onclick={async () => {
+              sgTests = { ...sgTests, [rc.id]: null };
+              try {
+                sgTests = { ...sgTests, [rc.id]: await api.post('/api/check/streamingestarr', {
+                  url: rc.url,
+                  ...(rc.accessToken ? { accessToken: rc.accessToken }
+                    : sgSaved[rc.id] ? {} : {}),
+                  ...(rc.accessToken ? {} : { receiverId: rc.id }),
+                }) };
+              } catch (err) { sgTests = { ...sgTests, [rc.id]: { ok: false, error: err.message } }; }
+            }} disabled={!!testing}>Test</button>
+          </div>
+          {#if sgTests[rc.id]}
+            <div class="result" class:bad={!sgTests[rc.id].ok}>
+              {#if sgTests[rc.id].ok}
+                {@const c = sgTests[rc.id].caps}
+                Connected &mdash; apiVersion {c.apiVersion}.
+                Ingest: RTMP :{c.ingest?.rtmpPort}{c.ingest?.srtEnabled ? `, SRT :${c.ingest?.srtPort}` : ''}.
+                Metadata: {[c.metadata?.nowPlaying && 'now playing', c.metadata?.schedule && 'schedule', c.metadata?.artwork && 'artwork'].filter(Boolean).join(' + ')}.
+              {:else}
+                {sgTests[rc.id].error}
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/each}
+      <button type="button" onclick={() => {
+        cfg.streamingestarr.receivers = [...(cfg.streamingestarr?.receivers ?? []), {
+          id: 'r' + Math.random().toString(36).slice(2, 8),
+          name: '', url: '', accessToken: '', enabled: true,
+        }];
+      }}>Add a receiver</button>
     {/if}
 
     <div class="actions">
       <button class="primary" onclick={() => save('streamingestarr')}>Save</button>
-      <button onclick={async () => {
-        sgTest = null;
-        try {
-          sgTest = await api.post('/api/check/streamingestarr', {
-            url: cfg.streamingestarr?.url ?? '',
-            ...(sgToken ? { accessToken: sgToken } : {}),
-          });
-        } catch (err) { sgTest = { ok: false, error: err.message }; }
-      }} disabled={!!testing}>Test</button>
       {#if saved === 'streamingestarr'}<span class="ok small">Saved</span>{/if}
     </div>
-    {#if sgTest}
-      <div class="result" class:bad={!sgTest.ok}>
-        {#if sgTest.ok}
-          {@const c = sgTest.caps}
-          Connected &mdash; apiVersion {c.apiVersion}.
-          Ingest: RTMP :{c.ingest?.rtmpPort}{c.ingest?.srtEnabled ? `, SRT :${c.ingest?.srtPort} (${(c.ingest?.srtContainers ?? []).join(', ')})` : ''}.
-          Segments: {c.segmentFormat}.
-          Metadata: {[c.metadata?.nowPlaying && 'now playing', c.metadata?.schedule && 'schedule'].filter(Boolean).join(' + ')}.
-        {:else}
-          {sgTest.error}
-        {/if}
-      </div>
-    {/if}
   </section>
 
   <!-- Encoder -->
