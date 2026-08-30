@@ -23,8 +23,20 @@ const PROBE_TIMEOUT_MS = 25_000;
  * maps onto; desat=0 keeps the operator from washing saturated highlights,
  * which on animation is the difference between a sunset and a grey smear.
  */
-export const CPU_TONEMAP = 'zscale=t=linear:npl=100,tonemap=hable:desat=0,'
-  + 'zscale=p=bt709:t=bt709:m=bt709:r=tv';
+/**
+ * The curve is a genuine matter of taste, so it is a choice now: hable
+ * holds highlight detail (the long-standing default here), mobius favours
+ * midtone fidelity, reinhard is soft and never clips harshly, clip is the
+ * cheapest and crushes. Applies to the CPU engine only — tonemap_vaapi has
+ * no curve parameter; the driver does what the driver does.
+ */
+export const TONEMAP_CURVES = ['hable', 'mobius', 'reinhard', 'clip'];
+export const cpuTonemap = (curve = 'hable') => {
+  const c = TONEMAP_CURVES.includes(curve) ? curve : 'hable';
+  return `zscale=t=linear:npl=100,tonemap=${c}:desat=0,`
+    + 'zscale=p=bt709:t=bt709:m=bt709:r=tv';
+};
+export const CPU_TONEMAP = cpuTonemap();
 
 /** Minimal profile just large enough to force full encoder initialisation. */
 const probeProfile = (device) => ({
@@ -261,6 +273,22 @@ export async function vaapiTonemapPresent(device = '/dev/dri/renderD128') {
   if (ok) return true;
   // The filter ran and objected to the input, not to itself.
   return /mastering display/i.test(err);
+}
+
+/**
+ * Can this driver encode 10-bit HEVC (main10)? Gates HDR output: keeping
+ * P010 end to end is pointless if the encoder cannot take the surface.
+ * Synthetic and cheap, in the shape of the tone-map probes above.
+ */
+export async function vaapiMain10Present(device = '/dev/dri/renderD128') {
+  const { ok } = await tryRun([
+    '-xerror',
+    '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+    '-f', 'lavfi', '-i', 'color=c=red:s=640x360:r=25,format=yuv420p10le',
+    '-vf', 'format=p010le,hwupload',
+    '-frames:v', '1', '-c:v', 'hevc_vaapi', '-b:v', '1M', '-f', 'null', '-',
+  ]);
+  return ok;
 }
 
 /** Is the software tone map usable as a fallback on this build? */

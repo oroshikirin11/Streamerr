@@ -273,7 +273,7 @@ export function contentRect(video, profile) {
 }
 import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
 import { ChunkScheduler } from './chunker.js';
-import { CPU_TONEMAP } from './probe.js';
+import { cpuTonemap } from './probe.js';
 
 /** Treat a source that dies this fast as broken rather than finished. */
 const SOURCE_FAIL_MS = 2_000;
@@ -3527,7 +3527,7 @@ export class PipelinePlayout extends EventEmitter {
          * not at all. A build without zscale has no third option.
          */
         if (!this._sawBlock && this.current && !this._tonemapGaveUp
-            && /tonemap=hable/.test(this._lastArgs ?? '')) {
+            && /,tonemap=\w+/.test(this._lastArgs ?? '')) {
           this._tonemapGaveUp = true;
           this._demote({ tonemap: 'none' });
           this.emit('warn', (this.profile?.tonemapForced
@@ -4244,7 +4244,11 @@ export function buildSourceArgs({
    */
   if (profile.codec === 'hevc' && selection?.video?.codec === 'hevc'
       && !selection?.subtitle && !sub.filter && !sub.needsComplex
-      && imgList.length === 0 && !overlayAnimated && !pipePlan) {
+      && imgList.length === 0 && !overlayAnimated && !pipePlan
+      // An HDR file may only ship untouched when the operator asked for
+      // HDR output — with it off the promise is SDR, so the clip goes to
+      // the tone-mapped transcode instead of quietly leaking PQ on air.
+      && (!selection?.video?.hdr || profile.hdrWanted)) {
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
@@ -4279,6 +4283,29 @@ export function buildSourceArgs({
    * a subtitle-free clip disappeared with nothing logged.
    */
   const imagesNeedPerFrame = imgList.some((i) => isMoving(i) || i?.animated);
+  /**
+   * Deinterlacing, at last — there was NONE anywhere before this. 'auto'
+   * trusts the probe's field_order (interlaced sources comb without it);
+   * 'on' forces it for the mislabeled-progressive files every DVD-era
+   * library has; 'off' is off. GPU chains use deinterlace_vaapi right
+   * after decode (fields must be intact — deinterlacing scaled frames is
+   * garbage), CPU chains bwdif at the head for the same reason.
+   */
+  const wantDeint = profile.deinterlace === 'on'
+    || ((profile.deinterlace ?? 'auto') === 'auto'
+      && selection?.video?.interlaced === true);
+  const gpuDeint = wantDeint ? 'deinterlace_vaapi,' : '';
+  const cpuDeint = wantDeint ? 'bwdif,' : '';
+  /**
+   * HDR OUT: keep the 10-bit P010 surface through the scale, no tone map,
+   * and let hevc_vaapi derive main10 from the format. Probe-gated in
+   * tuneProfile (hdrOut only set when the driver encodes main10) and
+   * draw-gated here: SDR RGBA — subtitles, studio, even a still logo via
+   * overlay_vaapi — blended into a PQ surface renders searing or dim, so
+   * any drawing keeps the clip on the tone-mapped SDR path it always had.
+   */
+  const hdrPass = Boolean(profile.hdrOut) && Boolean(selection?.video?.hdr)
+    && imgList.length === 0;
   if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame
       // Piped clips always carry the overlay input, so the first overlay of
       // a broadcast lands without a restart. That is the feature.
@@ -4287,12 +4314,15 @@ export function buildSourceArgs({
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     // null, not the scale: a full-frame VPP pass that changes nothing is
     // still a full-frame VPP pass. See scaleIsIdentity.
-    const scalePart = scaleIsIdentity(selection?.video, profile, rect) ? 'null'
-      : scaleAndTonemap(selection?.video, profile, rect, smode);
+    const scalePart = hdrPass
+      ? `scale_vaapi=w=${rect.w}:h=${rect.h}:format=p010${smode}`
+      : scaleIsIdentity(selection?.video, profile, rect) ? 'null'
+        : scaleAndTonemap(selection?.video, profile, rect, smode);
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
-    const vaapiChain = (hwDec ? '' : 'format=nv12,hwupload,') + (rect.bars
-      ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
-      : scalePart);
+    const vaapiChain = (hwDec ? '' : `format=${hdrPass ? 'p010le' : 'nv12'},hwupload,`)
+      + gpuDeint + (rect.bars
+        ? `${scalePart},pad_vaapi=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`
+        : scalePart);
     // No subtitles means no canvas is needed at all: the picture uploads
     // once as a single frame and the GPU composites it straight onto the
     // video. One overlay_vaapi — the same count as the subtitle path the
@@ -4319,6 +4349,14 @@ export function buildSourceArgs({
       '-map', `0:a:${audioIdx}?`,
       ...(gpuImgs.looping ? ['-shortest'] : []),
       ...be.encoderArgs(profEff),
+      // The PQ tags travel in the bitstream; without them a correct 10-bit
+      // encode still displays as washed SDR because no player is told it
+      // is HDR. Mastering-display/CLL side data rides the frames (measured
+      // preserved through a re-encode on this driver).
+      ...(hdrPass ? [
+        '-color_primaries', 'bt2020', '-color_trc', 'smpte2084',
+        '-colorspace', 'bt2020nc',
+      ] : []),
       '-async_depth', '4',
       ...audioArgs(profile),
       '-r', effAll.rate, '-fps_mode', 'cfr',
@@ -4424,6 +4462,9 @@ export function buildSourceArgs({
       }
     }
 
+    // Fields must be intact when the deinterlacer sees them, so it goes
+    // before the scale in whichever shape the driver probe picked.
+    videoChain = gpuDeint + videoChain;
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
     if (pipePlan) {
       /**
@@ -4703,14 +4744,14 @@ export function buildSourceArgs({
   // can draw on.
   const preUpload = sub.filter
     ? [
-      `scale=${rect.w}:${rect.h},setsar=1`,
+      `${cpuDeint}scale=${rect.w}:${rect.h},setsar=1`,
       ...(offset > 0 ? [`setpts=PTS+${Number(offset).toFixed(3)}/TB`] : []),
       `${sub.filter}:alpha=0`,
       ...(offset > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
     ]
-    : [base];
+    : [cpuDeint + base];
   const cpuChain = [...preUpload, upload];
 
   // The overlay ASS is written in the CLIP's timeline, and every graph that
@@ -4743,7 +4784,9 @@ export function buildSourceArgs({
       // wrong size. Overlay at native size first; scaling then carries the
       // subtitles along with the picture.
       parts.push(`[0:v:0][${sub.overlayInput}]overlay[s]`);
-      parts.push(`[s]${base}${ovPost}[o]`);
+      // Deinterlace inside the base: after the bitmap composite, since the
+      // subpicture stream has no fields of its own to preserve.
+      parts.push(`[s]${cpuDeint}${base}${ovPost}[o]`);
     } else {
       parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
     }
@@ -4804,6 +4847,11 @@ export function buildChunkArgs({
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
   const audioIdx = selection?.audio?.typeIndex ?? 0;
+  // Same rule as the streaming path: deinterlace before anything scales.
+  const wantDeint = profile.deinterlace === 'on'
+    || ((profile.deinterlace ?? 'auto') === 'auto'
+      && selection?.video?.interlaced === true);
+  const cpuDeint = wantDeint ? 'bwdif,' : '';
   // Source-rate matching applies to every path, not just the GPU one —
   // duplicating 24fps to 30 is wasted work and judder wherever it happens.
   const effAll = effectiveFps(selection?.video, profile);
@@ -4818,14 +4866,14 @@ export function buildChunkArgs({
   // `start`, so subtitle timestamps must be shifted to match.
   const preUpload = sub.filter
     ? [
-      `scale=${rect.w}:${rect.h},setsar=1`,
+      `${cpuDeint}scale=${rect.w}:${rect.h},setsar=1`,
       ...(start > 0 ? [`setpts=PTS+${Number(start).toFixed(3)}/TB`] : []),
       `${sub.filter}:alpha=0`,
       ...(start > 0 ? ['setpts=PTS-STARTPTS'] : []),
       `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black`,
       `fps=${effAll.rate}`,
     ]
-    : [base];
+    : [cpuDeint + base];
   const cpuChain = [...preUpload, upload];
 
   // The overlay's ASS is written in the CLIP's own timeline, so its event
@@ -5026,7 +5074,7 @@ export function scaleAndTonemap(video, profile, rect, smode) {
     return `${scale}${smode},tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709`;
   }
   if (how === 'cpu') {
-    return `${scale}${smode},hwdownload,format=p010le,${CPU_TONEMAP},format=nv12,hwupload`;
+    return `${scale}${smode},hwdownload,format=p010le,${cpuTonemap(profile?.tonemapCurve)},format=nv12,hwupload`;
   }
   // Nothing on this box can tone map. Washed-out beats dead air, and the
   // operator was told why when the strategy was chosen.

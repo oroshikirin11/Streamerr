@@ -73,7 +73,7 @@ export function probeTracks(path) {
       '-v', 'error',
       '-show_streams',
       '-show_entries',
-      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio,r_frame_rate,color_transfer,pix_fmt,profile:'
+      'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio,r_frame_rate,color_transfer,pix_fmt,profile,field_order:'
       + 'stream_tags=language,title:stream_disposition=default,forced,hearing_impaired',
       '-of', 'json',
       path,
@@ -147,6 +147,11 @@ function groupStreams(streams) {
       // gpuDecodable(). 10-bit H.264 is the common case that cannot.
       entry.pixFmt = s.pix_fmt ?? null;
       entry.profile = s.profile ?? null;
+      // tt/bb/tb/bt = interlaced and combs without a deinterlacer;
+      // progressive/unknown/absent are all treated as progressive, which
+      // is why the deinterlace setting also has a manual 'on' for the
+      // mislabeled files every DVD-era library has.
+      entry.interlaced = ['tt', 'bb', 'tb', 'bt'].includes(s.field_order);
     }
     result[type].push(entry);
   }

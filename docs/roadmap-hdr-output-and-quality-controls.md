@@ -1,5 +1,18 @@
 # Roadmap: a modular quality pipeline
 
+> **Status 2026-08-31:** items 5 and 6 are SHIPPED — `encoder.hdrOutput`
+> (HDR kept end-to-end for HEVC output on a main10-capable driver; clips
+> that must draw still tone-map, HDR-native HEVC files with an empty studio
+> ship via passthrough), `encoder.tonemapCurve` (hable/mobius/reinhard/clip
+> on the CPU engine), and the deinterlacing gap is CLOSED
+> (`encoder.deinterlace` auto/on/off — deinterlace_vaapi on GPU chains,
+> bwdif on CPU chains, field_order probed). All verified live over SRT with
+> PQ/interlaced fixtures; test/picture-controls.test.mjs pins the graphs.
+> Still open from this doc: preset tiers (Part 2), per-flag exposure
+> (Part 1), full-rate subtitle canvas, mode=fast choice, audio 5.1, the
+> CPU fallthrough path still not tone-mapping, AV1 transport (see
+> hevc-followups.md item 5).
+
 Not built. Recorded 2026-08-29 while the measurements are fresh, because most
 of the cost here is re-learning what a driver will and will not do.
 

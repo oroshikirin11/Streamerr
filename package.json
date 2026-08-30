@@ -9,7 +9,7 @@
     "probe": "node src/cli.js probe",
     "normalize": "node src/cli.js normalize",
     "stream": "node src/cli.js stream",
-    "test": "node test/match.test.mjs && node test/paired.test.mjs && node test/tonemap.test.mjs && node test/gpuinfo.test.mjs && node test/overlay-renderer.test.mjs && node test/source-args-golden.test.mjs && node test/passthrough.test.mjs && node test/overlay-pipe.test.mjs && node test/engine-pipe.test.mjs",
+    "test": "node test/match.test.mjs && node test/paired.test.mjs && node test/tonemap.test.mjs && node test/gpuinfo.test.mjs && node test/overlay-renderer.test.mjs && node test/source-args-golden.test.mjs && node test/passthrough.test.mjs && node test/picture-controls.test.mjs && node test/overlay-pipe.test.mjs && node test/engine-pipe.test.mjs",
     "test:e2e": "node test/overlay-pipe.e2e.mjs"
   },
   "engines": {

@@ -30,8 +30,8 @@ import {
 } from './auth.js';
 import {
   probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
-  vaapiTonemapPresent, cpuTonemapAvailable,
-  pickPillarboxGraph,
+  vaapiTonemapPresent, cpuTonemapAvailable, vaapiMain10Present,
+  TONEMAP_CURVES, pickPillarboxGraph,
 } from './ffmpeg/probe.js';
 import { normalizeBitrate, codecBitrate, BACKENDS } from './ffmpeg/encoders.js';
 import { renderNodes } from './ffmpeg/gpuinfo.js';
@@ -206,6 +206,30 @@ async function tuneProfile(profile, selection, srcPath = null) {
   if (selection?.video?.hdr && profile.tonemapForced && !globalThis.__tonemapSaid) {
     globalThis.__tonemapSaid = true;
     console.log(`[hdr] tone mapping set to "${wanted}" in settings — not auto-detected`);
+  }
+
+  /**
+   * HDR OUTPUT: keep HDR sources HDR instead of tone-mapping them down.
+   * Three gates, each honest: the operator asked (hdrOutput), the codec
+   * can carry it (H.264 has no usable 10-bit profile — HDR means HEVC),
+   * and the driver encodes main10 (probed once, believed). What it does
+   * NOT gate here: drawing. That is per-clip — buildSourceArgs demotes any
+   * clip that must draw (subtitles, studio) to the tone-mapped SDR path,
+   * because SDR RGBA blended into a PQ surface looks broken.
+   */
+  profile.hdrOut = false;
+  // Intent, separate from capability: passthrough needs no encoder, so an
+  // HDR-native HEVC file may ship untouched on the operator's say-so even
+  // where the driver could not ENCODE main10.
+  profile.hdrWanted = Boolean(config.encoder?.hdrOutput);
+  if (config.encoder?.hdrOutput && (config.encoder?.codec ?? 'h264') === 'hevc') {
+    globalThis.__main10Cap ??= await vaapiMain10Present(profile.device);
+    profile.hdrOut = Boolean(globalThis.__main10Cap);
+    if (!profile.hdrOut && !globalThis.__main10Said) {
+      globalThis.__main10Said = true;
+      console.log('[hdr] HDR output is on, but this driver cannot encode '
+        + '10-bit HEVC — HDR titles fall back to tone-mapped SDR');
+    }
   }
 
   if (config.encoder.gpuSubs === false) return;
@@ -1279,6 +1303,17 @@ app.put('/api/config', (req, res) => {
     patch.encoder.tonemap = ['auto', 'vaapi', 'cpu', 'none']
       .includes(patch.encoder.tonemap) ? patch.encoder.tonemap : config.encoder.tonemap;
   }
+  if (patch.encoder?.tonemapCurve !== undefined) {
+    patch.encoder.tonemapCurve = TONEMAP_CURVES
+      .includes(patch.encoder.tonemapCurve) ? patch.encoder.tonemapCurve : 'hable';
+  }
+  if (patch.encoder?.deinterlace !== undefined) {
+    patch.encoder.deinterlace = ['auto', 'on', 'off']
+      .includes(patch.encoder.deinterlace) ? patch.encoder.deinterlace : 'auto';
+  }
+  if (patch.encoder?.hdrOutput !== undefined) {
+    patch.encoder.hdrOutput = Boolean(patch.encoder.hdrOutput);
+  }
   if (patch.encoder?.gopSeconds !== undefined) {
     patch.encoder.gopSeconds = clamp(patch.encoder.gopSeconds, 1, 60, config.encoder.gopSeconds);
   }
@@ -1618,11 +1653,15 @@ app.get('/api/options', async (req, res) => {
    * A control that lists impossible choices is worse than no control.
    */
   let tonemapEngines = { vaapi: null, cpu: null };
+  let hdr10 = null;
   try {
     tonemapEngines = {
       vaapi: await vaapiTonemapPresent(config.encoder.device),
       cpu: await cpuTonemapAvailable(),
     };
+    // Gates the HDR-output switch: without main10 encode there is no HDR
+    // to output and the control would be a guaranteed disappointment.
+    hdr10 = await vaapiMain10Present(config.encoder.device);
   } catch {
     // Unknown beats wrong: the UI shows no availability hint rather than
     // claiming something is unsupported because a probe crashed.
@@ -1630,6 +1669,8 @@ app.get('/api/options', async (req, res) => {
   res.json({
     renderNodes: renderNodeInfo,
     tonemapEngines,
+    tonemapCurves: TONEMAP_CURVES,
+    hdr10,
     languages: LANGUAGES.map(({ code, name }) => ({ code, name })),
     renderDevices,
     // Names and labels are static; only whether each one WORKS needs the

@@ -86,6 +86,14 @@ const DEFAULTS = {
     av1Bitrate: '',
     audioBitrate: '160k',
     gopSeconds: 2,
+    // SDR tone-map curve for the CPU engine (the VAAPI filter has none).
+    tonemapCurve: 'hable',
+    // Keep HDR sources HDR (needs codec hevc + a main10-capable driver;
+    // clips that must draw subtitles/studio still tone-map to SDR).
+    hdrOutput: false,
+    // 'auto' deinterlaces when the file says it is interlaced; 'on' forces
+    // it for mislabeled files; 'off' never.
+    deinterlace: 'auto',
     /**
      * How HDR sources are brought down to the SDR stream we broadcast.
      *

@@ -501,6 +501,9 @@
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           codec: cfg.encoder.codec || 'h264',
           tonemap: cfg.encoder.tonemap || 'auto',
+          tonemapCurve: cfg.encoder.tonemapCurve || 'hable',
+          hdrOutput: Boolean(cfg.encoder.hdrOutput),
+          deinterlace: cfg.encoder.deinterlace || 'auto',
           frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
           overlayPipe: cfg.encoder.overlayPipe !== false,
@@ -1133,6 +1136,50 @@
       {:else}
         HDR goes out untouched — fastest, but the colours will look washed out.
       {/if}
+    </p>
+
+    {#if cfg.encoder.tonemap !== 'none'}
+      <label>Tone-map curve</label>
+      <select bind:value={cfg.encoder.tonemapCurve}>
+        <option value="hable">Hable — keeps highlight detail (default)</option>
+        <option value="mobius">Möbius — favours midtones</option>
+        <option value="reinhard">Reinhard — soft, never clips harshly</option>
+        <option value="clip">Clip — cheapest, crushes highlights</option>
+      </select>
+      <p class="muted small">
+        Applies when tone mapping runs on the CPU. The GPU filter has a
+        fixed curve — the driver decides its look.
+      </p>
+    {/if}
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" bind:checked={cfg.encoder.hdrOutput} style="width:auto"
+             disabled={options?.hdr10 === false || (cfg.encoder.codec || 'h264') !== 'hevc'} />
+      HDR output — keep HDR sources HDR
+    </label>
+    <p class="muted small">
+      {#if options?.hdr10 === false}
+        This driver cannot encode 10-bit HEVC, so there is no HDR to output.
+      {:else if (cfg.encoder.codec || 'h264') !== 'hevc'}
+        Needs the H.265 codec (H.264 cannot carry HDR) — pick it in the
+        Broadcast card.
+      {:else}
+        HDR clips go out 10-bit with their colours intact instead of being
+        tone-mapped down. A clip that must draw — subtitles, studio items —
+        still tone-maps to SDR, because SDR text on an HDR frame looks
+        broken. Viewers need an HDR-capable player; browsers mostly are not.
+      {/if}
+    </p>
+
+    <label>Deinterlacing</label>
+    <select bind:value={cfg.encoder.deinterlace}>
+      <option value="auto">Auto — when the file says it is interlaced</option>
+      <option value="on">Always — for mislabeled files that comb</option>
+      <option value="off">Off</option>
+    </select>
+    <p class="muted small">
+      DVD rips and broadcast captures comb without this. Costs one GPU pass
+      (or a CPU filter on the software path) only when it actually runs.
     </p>
 
     <label>Render device</label>
