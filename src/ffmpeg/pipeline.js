@@ -3987,9 +3987,17 @@ export function buildRendererSpec({
    * renders at the full effective rate, decided fresh at every swap — the
    * cadence is renderer-internal, never pipe format.
    */
-  const chainRate = halfRate(plan.rate) || plan.rate;
-  const beat = 6;
-  const inputs = ['-f', 'lavfi', '-readrate', '1.3', ...cap, '-i',
+  /**
+   * encoder.pipeTuning — measurement knobs, PUT-able through the config
+   * API so pipe internals can be A/B'd against the legacy graph live on
+   * the deployment without a rebuild per trial. Absent keys = shipped
+   * behaviour. {readrate, beat, fullRate, hwFrames}.
+   */
+  const tune = profile.pipeTuning ?? {};
+  const chainRate = (tune.fullRate ? plan.rate : halfRate(plan.rate)) || plan.rate;
+  const beat = Number(tune.beat) > 0 ? Number(tune.beat) : 6;
+  const readrate = Number(tune.readrate) > 0 ? String(tune.readrate) : '1.3';
+  const inputs = ['-f', 'lavfi', '-readrate', readrate, ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
    * Timestamps are the continuation clock now, and they are CLIP-relative:
@@ -4326,10 +4334,12 @@ export function buildSourceArgs({
           : []),
         // Deeper than the classic path's 8, for the piped graph only: frames
         // wait in framesync while the VFR canvas is between heartbeats, and
-        // each queued frame pins a decoder surface. THE BISECTION SUSPECT
-        // returning alone — if the ghosts come back with this commit, the
-        // deeper pool's GTT pressure on iHD is convicted.
-        '-extra_hw_frames', '16',
+        // each queued frame pins a decoder surface. Tunable for live A/B —
+        // GTT pressure from the deeper pool is a candidate for the
+        // pipe-vs-legacy gap on iHD.
+        '-extra_hw_frames',
+        String(Number(profile.pipeTuning?.hwFrames) > 0
+          ? profile.pipeTuning.hwFrames : 16),
         ...(offset > 0 ? ['-ss', shift] : []),
         '-i', srcPath,
         ...pipeInputArgs(pipePlan, overlayPipe,
