@@ -93,7 +93,10 @@ export function makeLibrary(cfg, previous = null) {
     const prev = before.get(key);
     // Only carry the token when the source is genuinely the same one; a
     // provider change should not inherit credentials of another shape.
-    const reuse = prev?.provider === src.provider ? prev.lib?.bridgeToken ?? null : null;
+    // `prev &&` matters: with no previous source, undefined === undefined
+    // let a provider-less entry through to `prev.lib` and 500'd every
+    // config save and refresh until the file was hand-repaired.
+    const reuse = prev && prev.provider === src.provider ? prev.lib?.bridgeToken ?? null : null;
     return {
       key,
       name: src.name || src.provider || `Source ${i + 1}`,

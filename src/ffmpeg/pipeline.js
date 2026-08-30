@@ -30,7 +30,7 @@
 
 import { spawn, spawnSync } from 'child_process';
 import { createHash } from 'crypto';
-import { existsSync, readFileSync, renameSync, statfsSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, renameSync, statSync, statfsSync, writeFileSync } from 'fs';
 import { Writable } from 'stream';
 import { availableParallelism, cpus , totalmem } from 'os';
 import { EventEmitter } from 'events';
@@ -445,6 +445,9 @@ export class PipelinePlayout extends EventEmitter {
 
     const kbps = parseInt(String(profile?.videoBitrate ?? '6000'), 10) || 6000;
     this._kbps = kbps;
+    /** The configured rate — passthrough clips re-size per clip and this is
+     *  what an encoded clip returns to. */
+    this._kbpsBase = kbps;
     /**
      * How deep the cushion runs. Configurable, because a title that cannot
      * quite hold realtime survives on cushion depth, while a deeper one also
@@ -1322,6 +1325,13 @@ export class PipelinePlayout extends EventEmitter {
           if (now - lastStat < PUBLISHER_STAT_MS) continue;
           lastStat = now;
           keep.push(`[publisher, paced to 1x] ${line}`);
+        } else if (line.includes('Non-monotonic DTS')) {
+          // The copy path surfaces duplicate/stepped DTS at splices and
+          // resend_headers boundaries that the flv muxer used to swallow
+          // silently; ffmpeg self-corrects by one 90kHz tick every time.
+          // Once-a-second noise on mpegts, not information — dropped here,
+          // the correction itself stays.
+          continue;
         } else {
           keep.push(line);
         }
@@ -2471,6 +2481,36 @@ export class PipelinePlayout extends EventEmitter {
       duration: clipDuration,
       overlayPipe: pipePath,
     });
+
+    /**
+     * Passthrough housekeeping. The bank is byte-budgeted from the encode
+     * bitrate, but a copied clip flows at the FILE's rate — an episode
+     * denser than the configured rate would silently shrink the cushion
+     * below the 15s the operator was promised. Re-size from the file's
+     * measured average for this clip; encoded clips return to the base.
+     */
+    {
+      const ci = args.indexOf('-c:v');
+      const isCopy = ci !== -1 && args[ci + 1] === 'copy';
+      let kbps = this._kbpsBase;
+      if (isCopy) {
+        try {
+          const dur = clipDuration ?? 0;
+          if (dur > 0) {
+            kbps = Math.max(kbps,
+              Math.round((statSync(item.srcPath).size * 8) / dur / 1000));
+          }
+        } catch { /* unstatable (SMB hiccup) — keep the configured rate */ }
+        this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
+          + `bytes ship untouched (~${kbps} kbps); encode cost zero. An Apply `
+          + `or subtitle switch arms a transcode via the usual respawn.\n`);
+      }
+      if (kbps !== this._kbps) {
+        this._kbps = kbps;
+        this._bankMax = Math.min(bankCeiling(this.bufferSeconds),
+          Math.max(BANK_MIN_BYTES, kbps * 125 * this.bufferSeconds));
+      }
+    }
 
     this._spawnSource(args, { kind: 'clip' });
     if (this.queue[0]) {
@@ -4187,6 +4227,37 @@ export function buildSourceArgs({
     })
     : null;
   const audioIdx = selection?.audio?.typeIndex ?? 0;
+
+  /**
+   * PASSTHROUGH: an HEVC-native file under codec=hevc with nothing to draw
+   * — no subtitle burn, empty studio, no pipe — needs no transcode at all.
+   * The video stream ships untouched (-c:v copy): zero encode cost, source
+   * quality bit-exact, HDR included. Audio still conforms to AAC/48k so
+   * clip seams keep the seam discipline the encode path established.
+   *
+   * Boundaries this accepts, deliberately: seeks land on the source's own
+   * keyframes (input -ss with copy cannot cut mid-GOP), the file's native
+   * geometry/fps go out as-is, and the moment anything must be drawn — an
+   * Apply, a subtitle switch — the respawn falls through to a transcode
+   * exactly like any other source restart. Gated to HEVC on purpose:
+   * H.264 is the tuned, working default path and stays untouched.
+   */
+  if (profile.codec === 'hevc' && selection?.video?.codec === 'hevc'
+      && !selection?.subtitle && !sub.filter && !sub.needsComplex
+      && imgList.length === 0 && !overlayAnimated && !pipePlan) {
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
+      '-i', srcPath,
+      '-map', '0:v:0', '-c:v', 'copy',
+      '-map', `0:a:${audioIdx}?`,
+      ...audioArgs(profile),
+      '-output_ts_offset', Number(tsOffset).toFixed(3),
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+      '-f', 'mpegts', 'pipe:1',
+    ];
+  }
   // Source-rate matching applies to every path, not just the GPU one —
   // duplicating 24fps to 30 is wasted work and judder wherever it happens.
   const effAll = effectiveFps(selection?.video, profile);

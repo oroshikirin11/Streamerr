@@ -1969,6 +1969,20 @@ app.post('/api/stream/start', wrap(async (req, res) => {
       dpush('warn', `skipping destination '${d.name || d.protocol}' — ${d.protocol} cannot carry ${codec.toUpperCase()}; it rejoins on H.264`);
     }
   }
+  /**
+   * AV1 cannot leave the building yet, and the reason is the ENGINE, not
+   * the encoder: the bank/splice transport between source and publisher is
+   * MPEG-TS, and ffmpeg's mpegts muxer writes AV1 as opaque private data
+   * its own demuxer reads back as bin_data — measured, deterministically.
+   * The publisher then maps audio only and dies on the matroska header.
+   * Encoding worked all along; the transport needs a rework first, so the
+   * refusal names the real culprit instead of letting go-live die on air.
+   */
+  if (codec === 'av1') {
+    return res.status(400).json({
+      error: 'AV1 encodes fine, but the engine\'s internal splice transport (MPEG-TS) cannot carry AV1 yet — pick H.265 or H.264. Lifting this needs a transport rework, not a bigger encoder.',
+    });
+  }
   let lowPower = false;
   let softwareCodec = false;
   if (codec !== 'h264') {

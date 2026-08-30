@@ -21,7 +21,30 @@
    Saving the card carries codec + overrides; per-key merge keeps the
    encoder card's fields intact.
 
-4. OPEN — PASSTHROUGH when nothing needs encoding. Operator insight: an
+4. DONE — PASSTHROUGH (HEVC): buildSourceArgs grows a copy branch —
+   codec=hevc + HEVC-native file + nothing to draw (no subtitle, empty
+   studio, no pipe) ships the video stream untouched. Verified live over
+   SRT: source process at ~3% CPU, capture decoded pixel-identical to
+   the source (200-frame framemd5), copy->copy clip seams, seek respawns
+   stay copy, an Apply arms the piped transcode via the cushion-kept
+   splice, removal rides the pipe (passthrough resumes at the next
+   clip/seek — a restart just to regain copy would violate live mode).
+   The bank re-sizes per clip from the file's measured bitrate so a
+   dense file cannot silently shrink the 15s cushion. H.264 never takes
+   this path (tuned default stays untouched). test/passthrough.test.mjs
+   pins eligibility both ways.
+
+5. OPEN — AV1 through the engine is blocked by TRANSPORT, not encoders:
+   the source->bank->publisher hop is MPEG-TS, and ffmpeg's mpegts
+   muxer writes AV1 its own demuxer reads back as bin_data (measured).
+   The publisher then maps audio only and dies on the matroska header.
+   Go-live now refuses AV1 with this reason. Lifting it means moving
+   the internal transport (or a TS-compatible AV1 mapping), which
+   collides with the 188-byte splice/GOP-trim machinery — its own
+   work package.
+
+Old text of item 4 for reference:
+4. WAS-OPEN — PASSTHROUGH when nothing needs encoding. Operator insight: an
    HEVC-native file, codec=hevc, empty studio, no subtitles selected,
    identity geometry -> the transcode is pure waste; -c:v copy ships
    the source stream untouched (audio still conforms). Zero encode cost,
