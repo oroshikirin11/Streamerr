@@ -81,11 +81,13 @@ check('hevc-native under codec=h264 -> transcode (h264 path untouched)',
   })));
 
 // Bitrate ceiling: copy ships the FILE's rate, so remux-dense files encode.
-check('file at 3x the rate still passes through', isCopy(buildSourceArgs({
-  ...base, srcKbps: 24000,
-})));
-check('remux-dense file (54 Mbps vs 8000k) -> transcode', !isCopy(buildSourceArgs({
+check('25 Mbps 4K HDR film under the 30000k limit -> passthrough (verified use case)',
+  isCopy(buildSourceArgs({ ...base, srcKbps: 25300 })));
+check('54 Mbps remux over the limit -> transcode', !isCopy(buildSourceArgs({
   ...base, srcKbps: 54000,
+})));
+check('copyLimitKbps override lifts the ceiling', isCopy(buildSourceArgs({
+  ...base, srcKbps: 54000, profile: { ...profile, copyLimitKbps: 60000 },
 })));
 check('unknown rate -> passthrough (benefit of the doubt)', isCopy(buildSourceArgs({
   ...base, srcKbps: null,

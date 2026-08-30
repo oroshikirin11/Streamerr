@@ -2617,12 +2617,15 @@ export class PipelinePlayout extends EventEmitter {
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
       } else if (srcKbps != null && this.profile?.codec === 'hevc'
           && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
-          && srcKbps > 3 * (parseInt(String(this.profile?.videoBitrate), 10) || 6000)) {
+          && srcKbps > (Number(this.profile?.copyLimitKbps) > 0
+            ? Number(this.profile.copyLimitKbps) : 30000)) {
         // The one skip reason worth a sentence: the operator would
         // otherwise wonder why an obviously eligible file is encoding.
         this.emit('log', `[passthrough] skipped — this file averages `
-          + `${srcKbps} kbps, over 3x the configured rate; shipping it raw `
-          + `would swamp the upload, so it goes through the encoder.\n`);
+          + `${srcKbps} kbps, over the ${Number(this.profile?.copyLimitKbps) > 0
+            ? this.profile.copyLimitKbps : 30000} kbps copy limit; shipping it `
+          + `raw would swamp the upload, so it goes through the encoder `
+          + `(encoder.copyLimitKbps raises the limit).\n`);
       }
       if (kbps !== this._kbps) {
         this._kbps = kbps;
@@ -4372,14 +4375,16 @@ export function buildSourceArgs({
       // HDR output — with it off the promise is SDR, so the clip goes to
       // the tone-mapped transcode instead of quietly leaking PQ on air.
       && (!selection?.video?.hdr || profile.hdrWanted)
-      // The bitrate ceiling: copy ships the FILE's rate, and a 4K remux
-      // averages 54 Mbps against a 52.75 Mbps home upload — passthrough
-      // of that file would saturate the line and stall every viewer.
-      // 3x the configured rate keeps every normal episode eligible and
-      // sends the remuxes to the encoder, which is what the configured
-      // rate was a statement about in the first place.
+      // The bitrate ceiling: copy ships the FILE's rate, and a 54 Mbps
+      // remux against a ~53 Mbps home upload would saturate the line and
+      // stall every viewer. ABSOLUTE, not a multiple of the encode rate:
+      // a 25 Mbps 4K HDR film passing through is a verified, wanted case
+      // and must not fall off passthrough because the operator lowered
+      // the 1080p encode anchor. 30000k default; encoder.copyLimitKbps
+      // overrides for a different line.
       && (srcKbps == null
-        || srcKbps <= 3 * (parseInt(String(profile.videoBitrate), 10) || 6000))) {
+        || srcKbps <= (Number(profile.copyLimitKbps) > 0
+          ? Number(profile.copyLimitKbps) : 30000))) {
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),

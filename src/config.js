@@ -94,6 +94,9 @@ const DEFAULTS = {
     // 'auto' deinterlaces when the file says it is interlaced; 'on' forces
     // it for mislabeled files; 'off' never.
     deinterlace: 'auto',
+    // Passthrough ships the FILE's bitrate; above this it transcodes so a
+    // remux cannot saturate the upload. Absolute on purpose — see pipeline.
+    copyLimitKbps: 30000,
     /**
      * How HDR sources are brought down to the SDR stream we broadcast.
      *
