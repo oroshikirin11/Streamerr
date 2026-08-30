@@ -9,14 +9,11 @@
  *    reader never sees EOF between renderers (a fifo EOFs the moment its
  *    LAST writer closes, and eof_action=repeat then freezes the overlay
  *    forever);
- *  - it counts the bytes forwarded, because rawvideo has no timestamps: the
- *    frame COUNT is the only clock both sides share, and the next renderer
- *    must continue from exactly the frame the last one stopped at or every
- *    subtitle drifts by the difference;
- *  - it pads a killed renderer's final partial frame to the frame boundary.
- *    Without that, every later frame is offset by the shortfall and the
- *    reader interprets the stream sheared — no error anywhere, just a
- *    picture made of two misaligned halves.
+ *  - at a swap it guarantees the reader only ever sees whole NUT frame
+ *    groups: the dying renderer drains into a buffer and anything after
+ *    the last syncpoint — the packet a kill may have torn — is dropped at
+ *    the boundary. Steady-state bytes flow untouched; the guard costs
+ *    nothing while a renderer is simply running.
  *
  * The write side is the holder fd wrapped in a net.Socket, which libuv
  * treats as a pipe: writes are non-blocking with real backpressure. This
@@ -80,17 +77,25 @@ export class OverlayFeed {
    */
   /**
    * NUT syncpoint startcode. Every frame group begins with one, and the
-   * guard below only ever forwards COMPLETE syncpoint-delimited chunks.
+   * swap-time guard below uses it to cut a dying renderer's stream at a
+   * frame boundary.
    *
-   * This exists because of a measured failure mode, not caution: when the
-   * encoder falls behind, the renderer blocks mid-write in a full fifo, so
-   * a swap's SIGTERM cannot land between packets and the kill tears one.
-   * The reader then chews misaligned RGBA until it resyncs — on screen as
-   * dotted, colour-separated ghost text (channel phase drift), held for
-   * seconds by the VFR canvas. Every probe of every stage was clean; the
-   * tear only exists live, under load, at a swap. With the guard, a dead
-   * renderer's incomplete tail is discarded at a frame boundary and the
-   * reader is physically unable to see a torn packet.
+   * This exists because of a measured failure mode, not caution: a swap's
+   * kill can land mid-write and tear a NUT packet. The reader then chews
+   * misaligned RGBA until it resyncs — on screen as dotted,
+   * colour-separated ghost text (channel phase drift) or, when the tear
+   * lands in a header, a fatal demux error that silently restarts the
+   * source. Every probe of every stage was clean; the tear only exists
+   * live, at a swap.
+   *
+   * The guard runs ONLY at swap time. An always-on hold (forward nothing
+   * until the NEXT syncpoint proves the frame complete) was measured to
+   * cost 1.02x -> 0.63x on the N100: the idle band's heartbeat arrives
+   * every ~0.5s, so each canvas frame was delivered one beat late and
+   * framesync stalled the encoder for that beat, every beat. In steady
+   * state bytes now flow untouched; at a swap, forwarding pauses first,
+   * the old renderer drains into a buffer, and only provably whole frame
+   * groups from that buffer reach the fifo.
    */
   static SYNC = Buffer.from('4e4be4adeeca4569', 'hex');
 
@@ -107,32 +112,20 @@ export class OverlayFeed {
     try { setPriority(child.pid, 10); } catch { /* best effort */ }
     const sock = this._sock;
     /**
-     * Hold everything from the LATEST syncpoint onward; forward the rest.
-     * Each new syncpoint flushes the chunk before it, so what reaches the
-     * fifo is always whole frames — one canvas frame of extra latency,
-     * absorbed by the bank like every other pipeline delay here.
+     * Steady state: forward immediately, with backpressure. Draining: a
+     * swap is in progress — buffer instead, so the kill's torn tail never
+     * reaches the fifo, and so the renderer is never blocked in write()
+     * when SIGTERM arrives (node keeps its pipe drained), which is what
+     * lets it exit at a packet boundary.
      */
-    let held = Buffer.alloc(0);
+    let draining = false;
+    const tailChunks = [];
     const onData = (d) => {
       if (this._sock !== sock) return;
-      held = held.length ? Buffer.concat([held, d]) : d;
-      // Search from just before the old tail so a startcode split across
-      // chunk boundaries is still found.
-      let last = -1;
-      let from = Math.max(0, held.length - d.length - OverlayFeed.SYNC.length);
-      for (;;) {
-        const i = held.indexOf(OverlayFeed.SYNC, from);
-        if (i === -1) break;
-        last = i;
-        from = i + OverlayFeed.SYNC.length;
-      }
-      if (last > 0) {
-        const out = held.subarray(0, last);
-        held = held.subarray(last);
-        if (!sock.write(out)) {
-          child.stdout.pause();
-          sock.once('drain', () => child.stdout.resume());
-        }
+      if (draining) { tailChunks.push(d); return; }
+      if (!sock.write(d)) {
+        child.stdout.pause();
+        sock.once('drain', () => child.stdout.resume());
       }
     };
     child.stdout.on('data', onData);
@@ -143,12 +136,31 @@ export class OverlayFeed {
     const done = new Promise((resolve) => {
       child.on('close', (code) => {
         if (this._renderer?.child === child) this._renderer = null;
-        // A clean exit's tail is the last frame plus the trailer — valid,
-        // forward it. A killed renderer's tail is the torn packet this
-        // guard exists to stop; drop it at the boundary.
-        if (this._sock === sock && held.length) {
-          if (code === 0) sock.write(held);
-          held = Buffer.alloc(0);
+        if (this._sock === sock && tailChunks.length) {
+          const buf = Buffer.concat(tailChunks);
+          tailChunks.length = 0;
+          if (code === 0) {
+            // Clean exit: whole frames plus the trailer — forward as is.
+            sock.write(buf);
+          } else {
+            // Terminated. Bytes before the FIRST syncpoint complete the
+            // frame group already partly in the fifo; between first and
+            // last are provably whole groups. From the last syncpoint on
+            // is the group the kill may have torn — drop it. A canvas
+            // frame lost at a swap is invisible; a torn one is not.
+            let last = -1;
+            let from = 0;
+            for (;;) {
+              const i = buf.indexOf(OverlayFeed.SYNC, from);
+              if (i === -1) break;
+              last = i;
+              from = i + OverlayFeed.SYNC.length;
+            }
+            if (last > 0) sock.write(buf.subarray(0, last));
+            else if (last === -1 && this.active) {
+              this.log('[overlay-pipe] renderer died mid-frame with no boundary in its tail — the reader may resync through garbage\n');
+            }
+          }
         }
         if (code !== 0 && code !== null && this.active) {
           this.log(`[overlay-pipe] renderer exited ${code}: ${tail.split('\n').filter(Boolean).slice(-2).join(' | ')}\n`);
@@ -157,7 +169,16 @@ export class OverlayFeed {
       });
       child.on('error', () => resolve(-1));
     });
-    this._renderer = { child, done };
+    this._renderer = {
+      child,
+      done,
+      beginDrain: () => {
+        draining = true;
+        // If backpressure paused the pipe, wake it: draining must never
+        // leave the renderer blocked in write() when SIGTERM lands.
+        try { child.stdout.resume(); } catch { /* gone */ }
+      },
+    };
     // The exit promise is internal sequencing (swap awaits it to pad before
     // appending). Callers get nothing to await: a renderer runs until it is
     // replaced, and "done" here would mean "the overlay stopped".
@@ -173,17 +194,19 @@ export class OverlayFeed {
     const old = this._renderer;
     if (old) {
       /**
-       * TERM first, KILL as escalation. A SIGKILLed renderer tears its
-       * current NUT packet mid-write and the demuxer has to resync through
-       * garbage — recoverable, but on iHD a mis-latched parse painted the
-       * canvas as giant green ghosts until the next clean frame. SIGTERM
-       * lets ffmpeg finish the packet and exit at a frame boundary, so the
-       * next renderer's stream begins exactly where the last byte ended.
+       * Drain first, then TERM, KILL as escalation. beginDrain reroutes
+       * the renderer's output into a buffer and keeps its pipe drained, so
+       * SIGTERM never lands on a process blocked in write(): ffmpeg
+       * finishes the packet, writes the trailer, exits 0, and the whole
+       * buffered tail is valid. Only if it hangs does KILL fire — and then
+       * the close handler cuts the buffered tail at the last syncpoint so
+       * a torn packet can never reach the reader.
        */
+      old.beginDrain();
       try { old.child.kill('SIGTERM'); } catch { /* already gone */ }
       const grace = setTimeout(() => {
         try { old.child.kill('SIGKILL'); } catch { /* already gone */ }
-      }, 400);
+      }, 1500);
       await old.done;
       clearTimeout(grace);
     }

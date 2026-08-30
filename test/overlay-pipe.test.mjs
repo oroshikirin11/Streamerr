@@ -239,28 +239,60 @@ const paint = (colour, frames) => rendererArgs({
 try {
   feed.resetSync();
   const rd = createReadStream(fifo, { highWaterMark: 4096 });
-  const collecting = pull(rd, 6000);
-  feed.spawnRenderer(paint('red', 300));   // long-lived: the swap kills it mid-write
+  const collecting = pull(rd, 8000);
+  // -readrate 1 makes the writer genuinely long-lived: it is mid-stream,
+  // pacing in real time, when the swap or the kill lands. Without it,
+  // lavfi renders all 300 tiny frames in milliseconds and every "kill"
+  // hits a writer that already exited — an adversarial test in name only.
+  const paced = (colour, frames) => rendererArgs({
+    width: 4, height: 2, rate: 10, out: 'out',
+    inputs: ['-f', 'lavfi', '-readrate', '1', '-t', (frames / 10).toFixed(1), '-i',
+      `color=c=${colour}:s=4x2:r=10,format=rgba`],
+    filters: ['[0:v]null[out]'],
+  });
+  feed.spawnRenderer(paced('red', 300));
   await new Promise((r) => { setTimeout(r, 1200); });
-  await feed.swap(paint('blue', 3));
+  await feed.swap(paint('blue', 3));          // graceful path: drain, TERM
+  await new Promise((r) => { setTimeout(r, 400); });
+  feed.spawnRenderer(paced('lime', 300));
+  await new Promise((r) => { setTimeout(r, 1200); });
+  const hard = feed._renderer;                // hard path: drain, SIGKILL, no grace
+  hard.beginDrain();
+  hard.child.kill('SIGKILL');
+  await hard.done;
+  feed.spawnRenderer(paint('navy', 2));
+  await new Promise((r) => { setTimeout(r, 800); });
   const bytes = await collecting;
   rd.destroy();
   const headers = bytes.toString('latin1').split('nut/multimedia container').length - 1;
   check('bytes flowed through the feed', bytes.length > 200, true);
-  check('a swap appends a SECOND NUT stream, no EOF between', headers, 2);
-  // THE test the guard exists for: a killed writer's torn tail must never
-  // reach the reader. The joined stream of a mid-write kill and its
-  // successor has to decode with zero damaged packets.
-  writeFileSync(join(tmpdir(), `jsr-guard-${process.pid}.nut`), bytes);
-  const probe = spawnSync('ffprobe', ['-v', 'warning', '-count_frames',
-    '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames',
-    '-of', 'csv=p=0', join(tmpdir(), `jsr-guard-${process.pid}.nut`)],
-  { encoding: 'utf8' });
-  rmSync(join(tmpdir(), `jsr-guard-${process.pid}.nut`), { force: true });
-  check('the joined stream decodes with ZERO damage',
-    !/damaged|invalid|error/i.test(probe.stderr ?? ''), true);
-  check(`whole frames survived the kill (${(probe.stdout ?? '').trim()})`,
-    Number(probe.stdout) >= 3, true);
+  check('four renderers, four NUT streams, no EOF between', headers, 4);
+  // THE test the guard exists for: neither the swap's TERM of a mid-stream
+  // writer nor a zero-grace SIGKILL may leave a torn packet. ffprobe does
+  // not reliably count past a stream join, so each of the four streams is
+  // split out on the NUT file magic and proven clean on its own.
+  const magic = Buffer.from('nut/multimedia container');
+  const cuts = [];
+  for (let i = bytes.indexOf(magic); i !== -1; i = bytes.indexOf(magic, i + 1)) cuts.push(i);
+  const expect = [
+    ['red (TERM mid-stream)', 10], ['blue', 3],
+    ['lime (SIGKILL, zero grace)', 8], ['navy', 2],
+  ];
+  for (let n = 0; n < cuts.length; n += 1) {
+    const seg = bytes.subarray(cuts[n], cuts[n + 1] ?? bytes.length);
+    const f = join(tmpdir(), `jsr-guard-${process.pid}-${n}.nut`);
+    writeFileSync(f, seg);
+    const probe = spawnSync('ffprobe', ['-v', 'warning', '-count_frames',
+      '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames',
+      '-of', 'csv=p=0', f], { encoding: 'utf8' });
+    rmSync(f, { force: true });
+    const [name, atLeast] = expect[n] ?? [`stream ${n}`, 1];
+    check(`${name}: decodes with ZERO damage`,
+      !/damaged|invalid|error/i.test(probe.stderr ?? ''), true);
+    check(`${name}: whole frames only (${(probe.stdout ?? '').trim()})`,
+      Number(probe.stdout) >= atLeast, true);
+  }
+
 } finally {
   feed.stopSync();
   rmSync(fifo, { force: true });
