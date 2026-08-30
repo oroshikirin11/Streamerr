@@ -1945,10 +1945,14 @@ app.post('/api/stream/start', wrap(async (req, res) => {
    * encode entrypoint fails a 1-frame probe in ~300ms.
    */
   const codec = config.encoder.codec ?? 'h264';
-  if (codec === 'av1'
+  if (codec !== 'h264'
       && publishDestinations().some((d) => d.protocol.startsWith('rtmp'))) {
+    // Classic FLV carries neither; we tag enhanced-RTMP correctly but no
+    // deployed receiver here parses it — measured live: HEVC over RTMP
+    // connected and delivered nothing. SRT/mpegts (hevc) and
+    // SRT/matroska (av1) are the transports that work.
     return res.status(400).json({
-      error: 'AV1 cannot travel over RTMP — switch those destinations to SRT, or pick H.264/HEVC',
+      error: `${codec.toUpperCase()} cannot travel over classic RTMP — switch those destinations to SRT, or pick H.264`,
     });
   }
   if (codec !== 'h264') {
