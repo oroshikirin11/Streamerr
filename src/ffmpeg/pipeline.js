@@ -3928,8 +3928,13 @@ export function buildRendererSpec({
    * what the pipe cannot afford (0.55x vs the inline 1.05x), and it was
    * also the only condition the green corruption ever needed.
    */
-  const imgList = (overlayImages ?? []).filter((i) => i?.path)
-    .filter((i) => !(i?.animated || isMoving(i)));
+  const rawList = (overlayImages ?? []).filter((i) => i?.path);
+  const imgList = rawList.filter((i) => !(i?.animated || isMoving(i)));
+  // The source is blending a moving picture from this trickle via fps=
+  // dups, which releases canvas frames in heartbeat-sized bursts. A
+  // faster heartbeat halves the burst; band-height rasterise at full
+  // chain rate costs pennies next to what burstiness costs the encoder.
+  const motionFed = rawList.length > imgList.length;
   if (overlayAnimated) return null;
   // Bound the generated base or the renderer never exits on its own; +5 so
   // it always outlives the clip rather than starving the composite's tail.
@@ -3977,7 +3982,7 @@ export function buildRendererSpec({
    * renders at the full effective rate, decided fresh at every swap — the
    * cadence is renderer-internal, never pipe format.
    */
-  const chainRate = halfRate(plan.rate) || plan.rate;
+  const chainRate = motionFed ? plan.rate : (halfRate(plan.rate) || plan.rate);
   const beat = 6;
   const inputs = ['-f', 'lavfi', '-readrate', '1.3', ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
