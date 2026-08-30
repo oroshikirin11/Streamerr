@@ -331,6 +331,45 @@ export const BANK_SECONDS_MAX = 60;
 export const NUT_SYNC = Buffer.from('4e4be4adeeca4569', 'hex');
 /** NUT file magic; legal only at byte 0, stripped before banking. */
 export const NUT_FILEID = Buffer.from('nut/multimedia container\0', 'latin1');
+
+/**
+ * One TS packet carrying an HEVC end-of-sequence NAL, injected at copy
+ * splices. A CRA arriving mid-stream does NOT reset a decoder — stale
+ * reference buffers and POC collisions smear the picture until an IDR the
+ * file may never contain. EOS_NUT ends the coded video sequence, so the
+ * next IRAP legally begins a new one: the decoder flushes, skips the
+ * leading pictures, and enters clean — the spec's own mechanism for
+ * chained streams, with no session churn. The packet flags a TS
+ * discontinuity so its continuity counter is exempt from checking.
+ */
+export function hevcEosPacket(ptsSeconds = 0) {
+  const pts = Math.max(0, Math.round(ptsSeconds * 90000)) % (2 ** 33);
+  const hi = Math.floor(pts / 2 ** 30);
+  // A PES without a timestamp kills the publisher's muxer ("first pts and
+  // dts value must be set", measured) — the seam's timeline provides one.
+  const p = [
+    0x20 | ((hi & 0x07) << 1) | 1,
+    (pts / 2 ** 22) & 0xff,
+    ((((pts / 2 ** 15) & 0x7f) << 1) | 1) & 0xff,
+    (pts / 2 ** 7) & 0xff,
+    (((pts & 0x7f) << 1) | 1) & 0xff,
+  ].map((v) => Math.floor(v));
+  const pes = Buffer.from([
+    0x00, 0x00, 0x01, 0xe0, 0x00, 0x0e,     // length 14: 3 hdr + 5 pts + 6
+    0x80, 0x80, 0x05,                       // flags: PTS present, len 5
+    ...p,
+    0x00, 0x00, 0x00, 0x01, 0x48, 0x01,     // Annex-B EOS_NUT (type 36)
+  ]);
+  const pkt = Buffer.alloc(188, 0xff);
+  const afLen = 188 - 4 - pes.length - 1;   // adaptation fills the rest
+  pkt[0] = 0x47;
+  pkt[1] = 0x41; pkt[2] = 0x00;             // PUSI, pid 0x100
+  pkt[3] = 0x30;                            // adaptation + payload, CC 0
+  pkt[4] = afLen;
+  pkt[5] = 0x80;                            // discontinuity_indicator
+  pes.copy(pkt, 4 + 1 + afLen);
+  return pkt;
+}
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
 /**
  * A ceiling on the bank, in bytes, derived from the depth actually asked for
@@ -1586,6 +1625,16 @@ export class PipelinePlayout extends EventEmitter {
           try { w.write(pad); this._published += pad.length; } catch { break; }
           this._emitData(pad);
         }
+        // The end-of-sequence announcement between two HEVC sources — see
+        // hevcEosPacket. Injected at the seam so the next stream's CRA
+        // resets every decoder downstream, hardware included.
+        if (this._fmt === 'ts' && this.profile?.codec === 'hevc') {
+          // Stamped at the new stream's own timeline: within a breath of
+          // the surrounding packets, so no rebase machinery reacts to it.
+          const eos = hevcEosPacket(c.tl ?? 0);
+          try { w.write(eos); this._published += eos.length; } catch { break; }
+          this._emitData(eos);
+        }
       }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
@@ -2806,27 +2855,15 @@ export class PipelinePlayout extends EventEmitter {
           }
           this._copyAlignFor = { req: offset, landing: landing ?? offset };
           /**
-           * A copy->copy splice starts the new stream on a CRA, and a CRA
-           * mid-stream does NOT reset a decoder: hardware decoders (Chrome
-           * MSE behind the receiver) keep their stale reference buffer,
-           * POCs collide, and the picture smears until an IDR the file may
-           * never contain — operator-verified: the panel preview (software
-           * decode, concealing) was clean while viewers saw garbage. So a
-           * mid-clip copy respawn reconnects the session: the receiver
-           * re-inits and its decoder starts from scratch, which an IDR-led
-           * transcode respawn gets for free and copy cannot fake. Viewers
-           * see one rebuffer at the seek — honest, and bounded.
+           * No reconnect. That was tried — a copy->copy splice starting on
+           * a CRA does not reset decoders, so the session was recycled to
+           * force one — and the real receiver held its dying session and
+           * refused every knock for 30+ seconds, ending broadcasts. The
+           * decoder reset now travels IN-BAND instead: the drain injects
+           * an end-of-sequence NAL at every HEVC seam (hevcEosPacket), so
+           * the new stream's CRA legally begins a fresh coded sequence and
+           * every decoder — hardware included — flushes and enters clean.
            */
-          if (this.publisher && !this._reshaping
-              && this._reshapedFor !== offset) {
-            this._reshapedFor = offset;
-            this.emit('warn', 'seek on a passthrough clip — reconnecting so '
-              + 'viewers’ decoders restart clean (copy cannot open with an IDR)');
-            this._reshape(item, offset, dur, {
-              width: this.profile.width, height: this.profile.height,
-            });
-            return;
-          }
           this._play(item, offset, { duration: dur });
         })(), 'aligning the copy seek');
         return;

@@ -38,6 +38,24 @@
 > reconnect window now knocks again every 3s at the ORIGINAL offset
 > instead of tripping the hard-fail heuristic. Verified: seek -> one
 > reshape cycle, lands on target, repeatable, broadcast never dies.
+>
+> **Round 3 — the actual ending (loopback experiment, operator was right
+> that it was not the network):** reconnect-on-seek was WRONG twice over.
+> The real receiver holds its dying session and refused every knock for
+> 30s+ (broadcast death), and — measured on the receiver's own segments —
+> every fresh session's FIRST segment enters mid-GOP at the receiver (RPS/
+> POC errors; its transmuxer misses the stream head), so each reconnect
+> painted garbage exactly when viewers were watching. That is why HDR-on
+> (passthrough, reconnecting seeks) artifacted while HDR-off (transcode,
+> no reconnect) was clean. Fix: NO reconnect — the decoder reset travels
+> in-band as an injected end-of-sequence NAL at every HEVC seam
+> (hevcEosPacket: hand-built 188-byte TS packet, PES stamped with the
+> seam's timeline pts — a pts-less PES kills the muxer, measured). The
+> next stream's CRA then legally begins a new coded sequence and every
+> decoder flushes. Verified through the local receiver: two seeks, one
+> session, sender running, ZERO decode errors in every post-seek segment.
+> Remaining (receiver-side, Streamingestarr): session-start segment 0
+> enters mid-GOP — cosmetic for true starts, gone from seeks entirely.
 
 Copy everything below the line into the agent working on Jellystreamerr.
 
