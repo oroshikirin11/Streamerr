@@ -4232,7 +4232,12 @@ export function buildSourceArgs({
         ...(hwDec
           ? ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va']
           : []),
-        '-extra_hw_frames', '8',
+        // Deeper than the classic path's 8, for the piped graph only: frames
+        // wait in framesync while the VFR canvas is between heartbeats, and
+        // each queued frame pins a decoder surface. THE BISECTION SUSPECT
+        // returning alone — if the ghosts come back with this commit, the
+        // deeper pool's GTT pressure on iHD is convicted.
+        '-extra_hw_frames', '16',
         ...(offset > 0 ? ['-ss', shift] : []),
         '-i', srcPath,
         ...pipeInputArgs(pipePlan, overlayPipe,
