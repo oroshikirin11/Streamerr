@@ -140,14 +140,17 @@ export class OverlayFeed {
           const buf = Buffer.concat(tailChunks);
           tailChunks.length = 0;
           if (code === 0) {
-            // Clean exit: whole frames plus the trailer — forward as is.
+            // Ran to its own end: whole frames plus the trailer.
             sock.write(buf);
           } else {
-            // Terminated. Bytes before the FIRST syncpoint complete the
-            // frame group already partly in the fifo; between first and
-            // last are provably whole groups. From the last syncpoint on
-            // is the group the kill may have torn — drop it. A canvas
-            // frame lost at a swap is invisible; a torn one is not.
+            // Terminated at a swap (or killed). The tail is USUALLY whole
+            // — a TERM'd ffmpeg finishes its packet — but it is stamped
+            // with timestamps that can reach past the swap point, and VFR
+            // holds the newest frame: forwarding it would keep the dead
+            // renderer's canvas on air after its replacement started
+            // (measured: the e2e's removed overlay lingered). Cutting at
+            // the last syncpoint costs one invisible canvas frame and
+            // keeps both the byte stream and the timeline clean.
             let last = -1;
             let from = 0;
             for (;;) {
@@ -171,7 +174,7 @@ export class OverlayFeed {
       });
       child.on('error', () => resolve(-1));
     });
-    this._renderer = {
+    const rec = {
       child,
       done,
       beginDrain: () => {
@@ -181,6 +184,7 @@ export class OverlayFeed {
         try { child.stdout.resume(); } catch { /* gone */ }
       },
     };
+    this._renderer = rec;
     // The exit promise is internal sequencing (swap awaits it to pad before
     // appending). Callers get nothing to await: a renderer runs until it is
     // replaced, and "done" here would mean "the overlay stopped".
