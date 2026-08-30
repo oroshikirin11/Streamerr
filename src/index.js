@@ -459,6 +459,25 @@ async function sgArtId(it) {
 
 let sgAnnounced = null;
 let sgRestateTimer = null;
+let sgOnAirKey = null;
+/**
+ * The invariant, enforced at one choke point: ANYTHING that changes what
+ * is on air emits a push. Event coverage proved unreliable — a direct
+ * library switch reached air without any of the wired events firing a
+ * push — so instead of trusting paths to announce themselves, this
+ * watches the on-air identity itself and runs from every engine event,
+ * including the half-second progress tick. A clip change can therefore
+ * outrun it by at most one tick.
+ */
+function sgSync() {
+  if (!sgActive()) return;
+  const it = engine?.snapshot?.()?.playing;
+  const key = it?.title && !it.countdown
+    ? `${it.id ?? ''}\u0000${it.series ?? ''}\u0000${it.title}` : null;
+  if (key === sgOnAirKey) return;
+  sgOnAirKey = key;
+  if (key) { sgNowPlaying({ announce: true }); sgSchedule(); }
+}
 async function sgNowPlaying({ announce = false } = {}) {
   if (!sgActive()) return;
   const snap = engine?.snapshot?.();
@@ -675,16 +694,17 @@ function buildEngine({ profile, selection }) {
 
   e.on('status', () => {
     broadcast('stream', streamStatus()); syncOwncastTitle();
-    sgNowPlaying(); sgSchedule();
+    sgSync(); sgNowPlaying(); sgSchedule();
   });
   e.on('nowplaying', () => {
     broadcast('stream', streamStatus()); syncOwncastTitle();
-    sgNowPlaying({ announce: true }); sgSchedule();
+    sgSync();
   });
-  e.on('queue', () => { broadcast('stream', streamStatus()); sgNowPlaying(); sgSchedule(); });
-  e.on('seeked', () => { broadcast('stream', streamStatus()); sgNowPlaying(); });
-  e.on('selection', () => broadcast('stream', streamStatus()));
+  e.on('queue', () => { broadcast('stream', streamStatus()); sgSync(); sgNowPlaying(); sgSchedule(); });
+  e.on('seeked', () => { broadcast('stream', streamStatus()); sgSync(); sgNowPlaying(); });
+  e.on('selection', () => { broadcast('stream', streamStatus()); sgSync(); sgNowPlaying(); });
   e.on('progress', (b) => {
+    sgSync();
     // The cache bands ride the half-second progress tick. They used to
     // travel only on rare status events, so the panel's bar froze at
     // whatever the cache looked like seconds after go-live — an engine
@@ -1936,6 +1956,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // whatever was switched to during the last one.
   trackIntent = {};
   sgAnnounced = null;
+  sgOnAirKey = null;
   engine = buildEngine({ profile, selection });
   // Not awaited: going live can legitimately take minutes when the first
   // clip's subtitles must be extracted (one full read of the file), and an
