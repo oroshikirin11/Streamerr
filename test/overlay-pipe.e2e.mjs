@@ -158,15 +158,13 @@ try {
   // (a static canvas keeps 19 frames of 240).
 
   /**
-   * Act B: motion in the source, subtitles on the trickle. The source
-   * full-rates the sparse canvas with fps dups and blends the bouncing
-   * logo itself with per-frame expressions — the inline shape that holds
-   * the bank — while the pipe stays a trickle. A gray clip so the red
-   * logo is the only red on screen: its presence, its MOTION, and a
-   * mid-run subtitle swap (which must not touch the logo) are all
-   * checked on the decoded output.
+   * Act B: a STILL picture rides the trickle and survives a live
+   * subtitle swap. Motion is asserted to refuse the pipe entirely (the
+   * seek-controlled A/B measured inline-canvas motion at bare speed and
+   * every piped motion shape a third slower — those clips go inline).
+   * A gray clip so the red logo is the only red on screen.
    */
-  console.log('\nact B: source-blended motion + trickle subtitles, swap mid-run');
+  console.log('\nact B: still picture on the trickle, live subtitle swap');
   const clipB = join(dir, 'gray.mp4');
   const logo = join(dir, 'logo.png');
   const outB = join(dir, 'outB.mkv');
@@ -174,27 +172,28 @@ try {
     '-t', '10', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', clipB]);
   await run(['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=120x120',
     '-frames:v', '1', logo]);
-  const logoDesc = { path: logo, size: 0.12, motion: 'bounce', speed: 0.2, opacity: 1 };
+  const stillDesc = { path: logo, size: 0.12, x: 0.3, y: 0.35, opacity: 1 };
+  check('a MOVING picture refuses the pipe entirely',
+    !buildSourceArgs({
+      srcPath: clipB, offset: 0, profile, selection,
+      extractedPath: ass1, duration: 10, overlayPipe: fifo,
+      overlayImages: [{ ...stillDesc, motion: 'bounce', speed: 0.2 }],
+    }).includes(fifo));
   const specB = (path, shift) => buildRendererSpec({
     profile, selection, srcPath: clipB, shift, clipOffset: 0, duration: 10,
-    extractedPath: path, overlayImages: [logoDesc],
+    extractedPath: path, overlayImages: [stillDesc],
   });
   const sB1 = specB(ass1, 0);
-  check('the canvas never draws the moving picture',
-    sB1.spec.inputs.every((x) => !String(x).endsWith('.png')));
-  check('and stays a half-rate trickle even with motion in the studio',
-    /mpdecimate=max=6/.test(sB1.spec.filters.join(';')));
+  check('the still rides the canvas', sB1.spec.inputs.includes(logo));
+  check('on a half-rate trickle', /mpdecimate=max=6/.test(sB1.spec.filters.join(';')));
   feed.resetSync();
   feed.spawnRenderer(rendererArgs(sB1.spec));
   const argsB = buildSourceArgs({
     srcPath: clipB, offset: 0, profile, selection,
     extractedPath: ass1, duration: 10, overlayPipe: fifo,
-    overlayImages: [logoDesc],
+    overlayImages: [stillDesc],
   });
-  const gB = argsB[argsB.indexOf('-filter_complex') + 1];
-  check('the source full-rates the trickle and blends the motion itself',
-    /\[1:v\]fps=/.test(gB) && /abs\(mod\(/.test(gB)
-    && gB.includes('overlay_vaapi'));
+  check('the still-picture clip keeps the pipe', argsB.includes(fifo));
   argsB.splice(argsB.indexOf('-i'), 0, '-re');
   argsB.splice(argsB.indexOf('-progress'), 4);
   argsB[argsB.indexOf('error')] = 'info';
@@ -208,12 +207,11 @@ try {
   });
   await sleep(4000);
   await feed.swap(rendererArgs(specB(ass2, 4.0).spec));
-  console.log('    subtitles swapped away at ~4s — the logo must not notice');
+  console.log('    subtitles swapped away at ~4s — the still must not notice');
   const resB = await mainBDone;
   main = null;
   check('act B encoder survived the swap and exited cleanly',
     resB.code === 0, `exit ${resB.code}: ${resB.err.slice(-600)}`);
-  // Red-pixel census + centroid straight off the decoded frames.
   const redAt = async (at) => {
     const raw = join(dir, 'pxB.raw');
     await run(['-y', '-v', 'error', '-ss', String(at), '-i', outB,
@@ -230,10 +228,10 @@ try {
   };
   const rEarly = await redAt(2);
   const rLate = await redAt(8);
-  check(`logo on air early (${rEarly.count} red px)`, rEarly.count > 2000);
-  check(`logo STILL on air after the subtitle swap (${rLate.count} red px)`, rLate.count > 2000);
+  check(`still on air early (${rEarly.count} red px)`, rEarly.count > 2000);
+  check(`still STILL on air after the subtitle swap (${rLate.count} red px)`, rLate.count > 2000);
   const dist = Math.hypot(rEarly.x - rLate.x, rEarly.y - rLate.y);
-  check(`logo genuinely bounces (moved ${dist.toFixed(0)}px)`, dist > 60);
+  check(`and it did not move (${dist.toFixed(0)}px drift)`, dist < 20);
   const lumB = async (at) => {
     const raw = join(dir, 'pxB2.raw');
     await run(['-y', '-v', 'error', '-ss', String(at), '-i', outB,
@@ -243,7 +241,7 @@ try {
   };
   const sEarly = await lumB(2);
   const sLate = await lumB(8);
-  check(`subtitles from the trickle canvas visible early (centre ${sEarly})`, sEarly > 120);
+  check(`subtitles from the trickle visible early (centre ${sEarly})`, sEarly > 120);
   check(`and gone after the swap (centre ${sLate})`, sLate < sEarly - 40);
 } finally {
   try { main?.kill('SIGKILL'); } catch { /* gone */ }

@@ -145,7 +145,7 @@ check('base cap shrinks with the shift',
     < Number(at(0).spec.inputs[at(0).spec.inputs.indexOf('-t') + 1]), true);
 check('no shift means clip start', at(0).spec.filters[0].includes('PTS+0.000/TB'), true);
 
-console.log('\nmotion in the source, stills on the trickle — the split that holds the bank');
+console.log('\nmotion goes inline, stills ride the trickle — the measured split');
 {
   const base = cases['subtitled 16:9, gpu canvas'];
   const img = { path: '/app/overlays/logo.png', size: 0.15, motion: 'bounce', speed: 0.06 };
@@ -154,33 +154,33 @@ console.log('\nmotion in the source, stills on the trickle — the split that ho
     ...base,
     profile: { ...base.profile, overlayPipe: true },
     overlayPipe: '/tmp/x.fifo',
-    overlayImages: [img, still],
   };
-  const args = buildSourceArgs(piped);
-  const g = args[args.indexOf('-filter_complex') + 1];
-  check('the source full-rates the trickle with frame dups', /\[1:v\]fps=/.test(g), true);
-  check('and blends the MOVING picture itself, per-frame expressions intact',
-    /abs\(mod\(/.test(g), true);
-  check('the GPU composite survives — one overlay_vaapi as always',
-    g.includes('overlay_vaapi'), true);
-  check('only the moving picture is a source input',
-    args.filter((x) => String(x).endsWith('.png')).length, 1);
+  // A moving picture routes the whole clip inline: seek-controlled A/B on
+  // identical content measured the inline bounce at bare speed and every
+  // piped shape for motion a third slower.
+  const movingArgs = buildSourceArgs({ ...piped, overlayImages: [img, still] });
+  check('a moving picture takes the clip off the pipe',
+    movingArgs.includes('/tmp/x.fifo'), false);
+  check('and the inline canvas draws the bounce per frame',
+    /abs\(mod\(/.test(movingArgs.join(' ')), true);
+  // Stills alone stay piped, composited after the thin.
+  const stillArgs = buildSourceArgs({ ...piped, overlayImages: [still] });
+  check('stills alone keep the pipe', stillArgs.includes('/tmp/x.fifo'), true);
   const spec = buildRendererSpec({
     profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
     shift: 0, duration: piped.duration,
     extractedPath: piped.extractedPath ?? null, fontsDir: piped.fontsDir ?? null,
-    overlayImages: [img, still],
+    overlayImages: [still],
   });
-  check('the canvas draws the STILL picture and never the moving one',
+  const chain = spec.spec.filters.join(';');
+  check('the canvas draws the still',
     spec.spec.inputs.filter((x) => String(x).endsWith('.png')).join(','),
     '/app/overlays/badge.png');
-  const chain = spec.spec.filters.join(';');
-  check('the still composites AFTER the thin — one blend per heartbeat',
+  check('AFTER the thin — one blend per heartbeat',
     chain.indexOf('mpdecimate') !== -1
     && chain.indexOf('mpdecimate') < chain.indexOf('[img0]overlay'), true);
-  check('the canvas has no full-rate mode left', /mpdecimate=max=6/.test(chain), true);
-  // A bouncing TEXT caption is libass-drawn: the whole clip goes inline.
-  check('bouncing text sends the clip inline',
+  check('the canvas has no full-rate mode', /mpdecimate=max=6/.test(chain), true);
+  check('bouncing text sends the clip inline too',
     buildRendererSpec({
       profile: piped.profile, selection: piped.selection, srcPath: piped.srcPath,
       shift: 0, duration: piped.duration,
@@ -248,15 +248,14 @@ console.log('\nperformance interior — the regression that hit the N100');
   check('the picture still lands on the canvas',
     /overlay/.test(withPic.spec.filters.join(';')), true);
 
-  // Motion present at spawn plans full rate.
+  // Motion at spawn routes the clip inline — the pipe has no motion mode.
   const moving = buildRendererSpec({
     profile: prof, selection: mr.selection, srcPath: mr.srcPath,
     shift: 0, duration: mr.duration, extractedPath: mr.extractedPath,
     overlayImages: [{ path: '/o/logo.png', x: 0.1, y: 0.1, size: 0.2,
       opacity: 1, enabled: true, motion: 'bounce', speed: 0.1 }],
   });
-  check('motion needs no special rate — VFR passes its frames through',
-    moving.rate, '24000/1001');
+  check('motion at spawn refuses the pipe entirely', moving, null);
 }
 
 console.log('\nthe feed — an unbroken NUT byte stream across renderers');

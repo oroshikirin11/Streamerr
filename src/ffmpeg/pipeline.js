@@ -3856,9 +3856,19 @@ export function planOverlayPipe({
     || (profile.overlay ?? []).some((i) => i?.enabled !== false);
   if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);
-  // A pillarboxed clip with a MOVING picture goes inline whole: the
-  // bars shapes own input 2, and the canvas no longer draws motion.
-  if (rect.bars && (overlayImages ?? []).some((i) => i?.animated || isMoving(i))) {
+  /**
+   * Any MOVING or animated picture routes the clip inline whole. This is
+   * the measured verdict, on identical content (seek-controlled A/B over
+   * the same 90s of a hard stretch): bare 0.93x, the inline canvas with
+   * the bounce drawn on it 0.95x — effectively free — and every piped
+   * shape tried for motion 0.55-0.60x, whatever moved the pixels (canvas
+   * transport, CPU composite, fps-dup blending; three architectures, one
+   * loser: feeding motion through the pipe). In-process canvas
+   * generation is what wins. Applies that add, change or remove a moving
+   * picture take the cushion-kept respawn; every clip without motion
+   * keeps the pipe and its live swaps.
+   */
+  if ((overlayImages ?? []).some((i) => i?.animated || isMoving(i))) {
     return null;
   }
   if (sub?.filter) {
@@ -3928,13 +3938,8 @@ export function buildRendererSpec({
    * what the pipe cannot afford (0.55x vs the inline 1.05x), and it was
    * also the only condition the green corruption ever needed.
    */
-  const rawList = (overlayImages ?? []).filter((i) => i?.path);
-  const imgList = rawList.filter((i) => !(i?.animated || isMoving(i)));
-  // The source is blending a moving picture from this trickle via fps=
-  // dups, which releases canvas frames in heartbeat-sized bursts. A
-  // faster heartbeat halves the burst; band-height rasterise at full
-  // chain rate costs pennies next to what burstiness costs the encoder.
-  const motionFed = rawList.length > imgList.length;
+  const imgList = (overlayImages ?? []).filter((i) => i?.path)
+    .filter((i) => !(i?.animated || isMoving(i)));
   if (overlayAnimated) return null;
   // Bound the generated base or the renderer never exits on its own; +5 so
   // it always outlives the clip rather than starving the composite's tail.
@@ -3982,7 +3987,7 @@ export function buildRendererSpec({
    * renders at the full effective rate, decided fresh at every swap — the
    * cadence is renderer-internal, never pipe format.
    */
-  const chainRate = motionFed ? plan.rate : (halfRate(plan.rate) || plan.rate);
+  const chainRate = halfRate(plan.rate) || plan.rate;
   const beat = 6;
   const inputs = ['-f', 'lavfi', '-readrate', '1.3', ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
@@ -4310,29 +4315,7 @@ export function buildSourceArgs({
        * overlays is baked into this command. Changing them means replacing
        * the renderer; this process never hears about it.
        */
-      /**
-       * Moving and animated pictures are blended HERE, from the trickle:
-       * fps= duplicates the sparse canvas up to full rate (frame refs, no
-       * pixel work), the classic per-frame position expressions place the
-       * picture, and ONE upload feeds the composite — the exact shape the
-       * inline graph sustains at 1.05x on the N100. The pipe itself stays
-       * a trickle whatever moves: full-rate transport was measured at
-       * 0.55x and is the one cost this design cannot pay. Subtitles and
-       * still pictures keep their live renderer swaps; changing a MOVING
-       * picture changes this graph and takes the cushion-kept respawn.
-       */
-      const movingImgs = imgList.filter((i) => i?.animated || isMoving(i));
-      const moving = movingImgs.length
-        ? imageOverlayChain(movingImgs, {
-          width: profile.width, firstInput: 2, inLabel: 'fr', outLabel: 'cv',
-          phase: offset,
-        })
-        : null;
-      const canvasChain = moving
-        ? `[1:v]fps=${eff.rate}[fr];${moving.filters.join(';')};`
-          + '[cv]format=rgba,hwupload[ov];'
-        : '[1:v]format=rgba,hwupload[ov];';
-      const graph = canvasChain
+      const graph = '[1:v]format=rgba,hwupload[ov];'
         + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];`
         + composite;
       return [
@@ -4351,7 +4334,6 @@ export function buildSourceArgs({
         '-i', srcPath,
         ...pipeInputArgs(pipePlan, overlayPipe,
           { capSecs: Math.max(1, duration - offset) + 2 }),
-        ...(moving?.inputs ?? []),
         ...bgInput,
         '-filter_complex', graph,
         '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
