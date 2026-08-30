@@ -1285,6 +1285,7 @@ export class PipelinePlayout extends EventEmitter {
        * used to hardcode; several produce a tee.
        */
       ...publishOutputArgs(this.destinations, {
+        codec: this.profile?.codec ?? 'h264',
         videoBitrate: this.profile?.videoBitrate ?? null,
       }),
     ];

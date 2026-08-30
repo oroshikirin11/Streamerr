@@ -486,6 +486,7 @@
           videoBitrate: cfg.encoder.videoBitrate,
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
+          codec: cfg.encoder.codec || 'h264',
           tonemap: cfg.encoder.tonemap || 'auto',
           frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
@@ -1122,6 +1123,18 @@
       passed into the container.
     </p>
     {/if}
+
+    <label>Output codec</label>
+    <select bind:value={cfg.encoder.codec}>
+      <option value="h264">H.264 — plays everywhere (default)</option>
+      <option value="hevc">H.265/HEVC — ~35% less bitrate; Apple + hw-decode Chromium only</option>
+      <option value="av1">AV1 — best compression; Chromium/Firefox; needs SRT to the receiver</option>
+    </select>
+    <p class="muted small">
+      Run "Test encoders" after changing this — hardware support varies
+      (this box may fall back to a software encoder or refuse). AV1 cannot
+      travel over RTMP or MPEG-TS; use an SRT destination.
+    </p>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
       <input type="checkbox" bind:checked={cfg.encoder.hwDecode} style="width:auto" />

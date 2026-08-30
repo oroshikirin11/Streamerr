@@ -40,7 +40,13 @@ export function publishDefaults() {
 }
 
 /** The container each protocol carries. */
-export function muxerFor(protocol) {
+export function muxerFor(protocol, codec = 'h264') {
+  // AV1 cannot ride mpegts (measured on the receiver: demuxes as
+  // bin_data) — over SRT it goes in matroska, per the receiver contract.
+  if (protocol === 'srt' && codec === 'av1') return 'matroska';
+  return muxerForBase(protocol);
+}
+function muxerForBase(protocol) {
   return protocol === 'srt' ? 'mpegts' : 'flv';
 }
 
@@ -167,13 +173,16 @@ const teeEscape = (s) => String(s).replace(/[\\|\]]/g, (c) => `\\${c}`);
  * MPEG-TS whose stream types are the correct 27/15. Without the tags the
  * FLV slave refuses the TS stream types outright and aborts the whole tee.
  */
-export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
+export function publishOutputArgs(dests, { videoBitrate = null, codec = 'h264' } = {}) {
   if (!dests.length) throw new Error('No broadcast destination is configured');
 
   const flvFlags = 'no_duration_filesize+no_sequence_end';
+  // flv fourcc by codec: 7 = AVC, hvc1/av01 = enhanced-RTMP. Remapped per
+  // muxer as before; mpegts ignores tags.
+  const vtag = { h264: '7', hevc: 'hvc1', av1: 'av01' }[codec] ?? '7';
   const common = [
     '-c', 'copy',
-    '-tag:v', '7', '-tag:a', '10',
+    '-tag:v', vtag, '-tag:a', '10',
     ...(videoBitrate ? ['-b:v', String(videoBitrate)] : []),
     '-muxdelay', '0', '-muxpreload', '0', '-max_interleave_delta', '0',
   ];
@@ -183,8 +192,8 @@ export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
     const url = targetUrl(protocol, creds);
     return [
       ...common,
-      ...(muxerFor(protocol) === 'flv' ? ['-flvflags', flvFlags] : []),
-      '-f', muxerFor(protocol), url,
+      ...(muxerFor(protocol, codec) === 'flv' ? ['-flvflags', flvFlags] : []),
+      '-f', muxerFor(protocol, codec), url,
     ];
   }
 
@@ -214,7 +223,7 @@ export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
    * silence.
    */
   const slaves = dests.map(({ protocol, creds, primary }) => {
-    const inner = muxerFor(protocol);
+    const inner = muxerFor(protocol, codec);
     const innerOpts = inner === 'flv' ? `:format_opts=flvflags=${flvFlags}` : '';
     const opts = primary
       ? [`f=${inner}`, 'onfail=ignore',

@@ -67,7 +67,15 @@ export const BACKENDS = {
     /** Tail of the video filter chain — hands software frames to the GPU. */
     uploadFilter: () => 'format=nv12,hwupload',
     encoderArgs: (p) => [
-      '-c:v', 'h264_vaapi',
+      /**
+       * The output CODEC is a setting now (encoder.codec): h264 stays the
+       * universal default (99.9% browser decode), hevc buys ~35% bitrate
+       * at the same quality where the audience allows it, av1 more still.
+       * Hardware support is probed by doing at the check endpoint — RDNA2
+       * has no AV1 encode, Alder Lake-N neither; where vaapi lacks the
+       * codec the operator sees the probe fail rather than a demotion.
+       */
+      '-c:v', { h264: 'h264_vaapi', hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[p.codec ?? 'h264'] ?? 'h264_vaapi',
       '-rc_mode', 'CBR',
       '-b:v', p.videoBitrate,
       '-maxrate', p.videoBitrate,
@@ -155,7 +163,26 @@ export const BACKENDS = {
     hwaccel: false,
     deviceArgs: () => [],
     uploadFilter: () => 'format=yuv420p',
-    encoderArgs: (p) => [
+    encoderArgs: (p) => (p.codec === 'av1' ? [
+      // Software AV1 = SVT-AV1: the only AV1 path on pre-RDNA3 / N-series
+      // hosts. preset 9 holds realtime 1080p on ~8 modern cores; rate
+      // control via plain b:v/maxrate like the rest.
+      '-c:v', 'libsvtav1',
+      '-preset', '9',
+      '-b:v', p.videoBitrate,
+      '-maxrate', p.videoBitrate,
+      '-bufsize', bufsize(p.videoBitrate),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
+      '-svtav1-params', 'rc=2',
+    ] : p.codec === 'hevc' ? [
+      '-c:v', 'libx265',
+      '-preset', 'veryfast',
+      '-b:v', p.videoBitrate,
+      '-maxrate', p.videoBitrate,
+      '-bufsize', bufsize(p.videoBitrate),
+      '-g', String(Math.round(p.gopSeconds * p.fps)),
+      '-x265-params', `keyint=${Math.round(p.gopSeconds * p.fps)}:min-keyint=${Math.round(p.gopSeconds * p.fps)}:scenecut=0:bframes=0`,
+    ] : [
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-b:v', p.videoBitrate,
@@ -168,7 +195,7 @@ export const BACKENDS = {
       '-keyint_min', String(Math.round(p.gopSeconds * p.fps)),
       '-sc_threshold', '0',
       '-bf', '0',
-    ],
+    ]),
   },
 };
 

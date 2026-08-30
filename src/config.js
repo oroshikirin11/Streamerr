@@ -78,6 +78,7 @@ const DEFAULTS = {
     // 'auto' matches each file's native rate up to `fps` as a cap;
     // 'fixed' always outputs exactly `fps`.
     fpsMode: 'auto',
+    codec: 'h264',
     videoBitrate: '4500k',
     audioBitrate: '160k',
     gopSeconds: 2,
