@@ -2368,7 +2368,10 @@ export class PipelinePlayout extends EventEmitter {
       if (rSpec) {
         try {
           this._ovFeed ??= new OverlayFeed({
-            path: join(this.cacheDir, `overlay-${process.pid}.fifo`),
+            // The canvas lives on the ramdisk: appends are page-cache
+            // memcpys and the reaper's punched holes cost nothing.
+            path: join(existsSync('/dev/shm') ? '/dev/shm' : this.cacheDir,
+              `overlay-${process.pid}.fifo`),
             log: (m) => this.emit('log', m),
           });
           this._ovFeed.resetSync();
