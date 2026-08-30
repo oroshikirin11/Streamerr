@@ -192,10 +192,35 @@ export function publishOutputArgs(dests, { videoBitrate = null } = {}) {
    * receives every byte. Without it, one unreachable server takes the
    * broadcast down with it.
    */
-  const slaves = dests.map(({ protocol, creds }) => {
-    const opts = [`f=${muxerFor(protocol)}`, 'onfail=ignore'];
-    if (muxerFor(protocol) === 'flv') opts.push(`flvflags=${flvFlags}`);
-    return `[${opts.join(':')}]${teeEscape(targetUrl(protocol, creds))}`;
+  /**
+   * EXTRA destinations additionally ride ffmpeg's fifo muxer, which is
+   * what makes them come BACK: onfail=ignore alone drops a slave forever
+   * on the first refused connection, so a receiver restart killed the
+   * destination until someone restarted the broadcast. The fifo puts a
+   * queue and a reconnect loop in front of the real muxer —
+   * attempt_recovery with recovery_wait_time retries indefinitely
+   * (max_recovery_attempts=0), restart_with_keyframe rejoins decodably,
+   * and drop_pkts_on_overflow keeps a dead receiver from ever
+   * backpressuring the tee: the queue caps at ~10s of stream
+   * (queue_size=240 packets) and then sheds, so the primary and the
+   * other slaves never feel it.
+   *
+   * The PRIMARY keeps the plain direct muxer on purpose: its failure
+   * semantics feed the engine's own publisher supervision, and hiding
+   * its death behind a fifo would turn "the broadcast is down" into
+   * silence.
+   */
+  const slaves = dests.map(({ protocol, creds, primary }) => {
+    const inner = muxerFor(protocol);
+    const innerOpts = inner === 'flv' ? `:format_opts=flvflags=${flvFlags}` : '';
+    const opts = primary
+      ? [`f=${inner}`, 'onfail=ignore',
+        ...(inner === 'flv' ? [`flvflags=${flvFlags}`] : [])]
+      : ['f=fifo', `fifo_format=${inner}`,
+        'attempt_recovery=1', 'recover_any_error=1', 'max_recovery_attempts=0',
+        'restart_with_keyframe=1', 'recovery_wait_time=2',
+        'drop_pkts_on_overflow=1', 'queue_size=240', 'onfail=ignore'];
+    return `[${opts.join(':')}${primary ? '' : innerOpts}]${teeEscape(targetUrl(protocol, creds))}`;
   });
   // tee needs the streams named explicitly; it maps nothing by default.
   return [...common, '-map', '0:v:0', '-map', '0:a:0?', '-f', 'tee', slaves.join('|')];
