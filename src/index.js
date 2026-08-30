@@ -1948,7 +1948,7 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (ws, req) => {
   // No `passwordHash() &&`: an unconfigured panel must be closed, not open.
-  if (!validSession(tokenFromRequest(req))) {
+  if (!authDisabled() && !validSession(tokenFromRequest(req))) {
     ws.close(4401, 'unauthorized');
     return;
   }
@@ -1959,7 +1959,7 @@ wss.on('connection', (ws, req) => {
 });
 
 previewWss.on('connection', (ws, req) => {
-  if (!validSession(tokenFromRequest(req))) {
+  if (!authDisabled() && !validSession(tokenFromRequest(req))) {
     ws.close(4401, 'unauthorized');
     return;
   }
