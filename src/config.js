@@ -86,6 +86,15 @@ const DEFAULTS = {
      * and says so, because dead air is worse than a substitution.
      */
     tonemap: 'auto',   // auto | vaapi | cpu | none
+    /**
+     * Overlay changes without restarting the source: the canvas comes from
+     * a renderer process over a pipe, and Apply replaces the renderer while
+     * the encoder runs on. This IS the compositor — on by default, and not
+     * surfaced in Settings. It exists in config as a support lever only,
+     * and a driver that refuses the piped graph demotes to the classic
+     * restart path on its own, loudly.
+     */
+    overlayPipe: true,
     // Decode on the GPU. Whether this helps depends entirely on the machine
     // and the source: it is a large win for 10-bit HEVC on a weak CPU, and a
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer

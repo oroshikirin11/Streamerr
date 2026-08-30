@@ -24,17 +24,19 @@ layer in as raw RGBA on a pipe. A renderer we own fills the pipe and restarts
 freely. Verified: renderer swapped mid-stream (red -> blue), encoder produced
 all 8s in ONE process and never restarted.
 
-- [ ] Build the overlay renderer — largely the EXISTING subtitle/image graph, redirected to `-f rawvideo -pix_fmt rgba` on a pipe
-- [ ] Fix the main graph shape: `[media][rgba pipe] overlay_vaapi` — stops varying with overlays
-- [ ] "Apply" restarts the RENDERER, not the source
-- [ ] **A wrapper must hold the pipe's write end open across renderer restarts.** If it closes, ffmpeg sees EOF and `eof_action=repeat` freezes the last frame forever.
-- [ ] No more stream aborts on apply; no splice, no re-buffer
+- [x] Build the overlay renderer — `overlay-renderer.js` + `buildRendererSpec`
+- [x] Fix the main graph shape: `[media][rgba pipe] overlay_vaapi` — stops varying with overlays
+- [x] "Apply" restarts the RENDERER, not the source (`setOverlay` piped branch)
+- [x] The pipe's write end held open across renderer restarts (`OverlayFeed`)
+- [x] **And bounded on the READER side** (`-t duration+2`) — found by e2e: a held-open fifo leaves ffmpeg's input thread blocked in read() at end of clip and the process never exits
+- [x] No more stream aborts on apply; demotion to the classic path on any pipe failure, keyed on the spawned argv
+- [x] E2E on the 6900 XT: one encoder process, swap mid-clip, pixels verified before/after, clean exit (`npm run test:e2e`)
 
-Measure before committing:
+Measured / still to measure:
 
-- [ ] Pipe bandwidth — ~199 MB/s at 1080p24 full-frame RGBA. Desktop fine, N100 unknown. Mitigations already in-tree: content-rect canvas, half-rate canvas.
-- [ ] Framesync — drop late overlay frames rather than let the main graph block
-- [ ] Renderer startup shows as a stale overlay for a few frames instead of a splice
+- [x] Node feed hop: 2.7 GB/s — not a bottleneck at any realistic geometry
+- [ ] N100: run `npm run test:e2e` there, and a real broadcast with applies
+- [ ] Renderer startup gap under a real broadcast (absorbed by the bank; verify)
 
 Scope: this removes restarts for **overlay** changes only. Clip changes and
 seeks still splice — that is what the cushion is for, and it is not the

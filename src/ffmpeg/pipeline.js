@@ -46,6 +46,8 @@ import {
   splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
 } from './overlay-image.js';
 import { publishOutputArgs, targetUrl, SECRET_FIELDS } from '../publish.js';
+import { OverlayFeed } from './overlay-feed.js';
+import { rendererArgs, pipeInputArgs } from './overlay-renderer.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -704,6 +706,10 @@ export class PipelinePlayout extends EventEmitter {
   stop({ graceful = false } = {}) {
     this._stopping = true;
     this._abort.abort();     // take background extractions down too
+    // The overlay feed dies with the broadcast: its renderer would only
+    // stall on a fifo nobody reads.
+    try { this._ovFeed?.stopSync(); } catch { /* already down */ }
+    this._ovFeed = null;
     // Stopping during an off-air break: no publisher exists, so the close
     // handler that normally finishes a broadcast will never run.
     if (this._break) {
@@ -782,6 +788,8 @@ export class PipelinePlayout extends EventEmitter {
   hardStop() {
     this._stopping = true;
     this._abort.abort();
+    try { this._ovFeed?.stopSync(); } catch { /* already down */ }
+    this._ovFeed = null;
     if (this._break?.timer) clearTimeout(this._break.timer);
     this._break = null;
     this._bank = [];
@@ -1027,6 +1035,57 @@ export class PipelinePlayout extends EventEmitter {
     // episode to apply an overlay — so don't: the next clip picks the
     // change up from the profile anyway, a second later.
     if (dur && this.position >= dur - 1) return true;
+
+    /**
+     * The piped apply: nothing restarts.
+     *
+     * The source, its bank and the publisher never hear about this — only
+     * the renderer feeding the overlay fifo is replaced. The new one must
+     * continue at exactly the frame the old one stopped at: rawvideo has no
+     * timestamps, so the feed's frame count is the shared clock, and the
+     * continuation point is clipOffset + frames/rate. Off by one frame and
+     * every subtitle drifts by that much for the rest of the clip.
+     *
+     * The change reaches air when the encoded cushion drains past it —
+     * same arrival time as the classic path's "cushion kept" mode, minus
+     * the splice, the DTS discontinuities and the re-encode.
+     */
+    if (this._pipedClip && this._ovFeed?.active) {
+      const tok = (this._selToken = (this._selToken ?? 0) + 1);
+      this._detached(this._extract(item).finally(() => {
+        if (this._stopping || this._selToken !== tok) return undefined;
+        if (this.current?.item !== item || this.status !== 'running') return undefined;
+        if (!this._pipedClip || !this._ovFeed?.active) return undefined;
+        const shift = this._pipeClipOffset
+          + this._ovFeed.frames / (this._pipeFps || 24);
+        const cached = this._cachedSubs(item.srcPath);
+        const spec = buildRendererSpec({
+          profile: this.profile,
+          selection: this.selection,
+          srcPath: item.srcPath,
+          shift,
+          duration: dur,
+          extractedPath: cached?.path ?? null,
+          fontsDir: cached?.fontsDir ?? null,
+          overlayPath: this._overlayFile(item, 0),
+          overlayImages: this._overlayImages(item, shift),
+        });
+        if (!spec) {
+          // Eligibility changed underneath (a demotion mid-clip). The
+          // classic restart still works; use it rather than not applying.
+          this._bankTrimToPacket();
+          this._play(item, Math.max(this.aired ?? 0, this.position),
+            { duration: dur });
+          return undefined;
+        }
+        return this._ovFeed.swap(rendererArgs(spec.spec)).then(() => {
+          const ahead = Math.max(0, (this.position ?? 0) - (this.aired ?? 0));
+          this.emit('log', '[overlay] applied live — no restart, reaches air '
+            + `in ~${ahead.toFixed(1)}s as the buffer plays out\n`);
+        });
+      }), 'applying overlays');
+      return true;
+    }
     // Same ordering as a track change, and for the same reason: extract
     // while the old source still feeds the pipe, or the new source's
     // subtitle filter re-reads the container and starves the publisher
@@ -2185,6 +2244,10 @@ export class PipelinePlayout extends EventEmitter {
     this._flushed = false;
     const workers = this._chunkWorkers();
     if (workers > 1 && this.selection?.subtitle) {
+      // Chunked clips are many parallel encoders; one fifo cannot feed
+      // them. They keep the classic apply-by-restart behaviour.
+      this._pipedClip = false;
+      if (this._ovFeed?.active) this._ovFeed.stopSync();
       this._playChunked(item, offset, cached, workers, flushed);
       this.emit('nowplaying', this.snapshot());
       this._fillDuration(item);
@@ -2193,6 +2256,59 @@ export class PipelinePlayout extends EventEmitter {
 
     const overlayImages = this._overlayImages(item, offset);
     const overlayFile = this._overlayFile(item, 0);
+    /**
+     * The overlay pipe — the compositor path, and the default.
+     *
+     * When this clip is eligible, the overlay canvas is not part of the
+     * source's command at all: a renderer process feeds it through a fifo,
+     * and an overlay change replaces the renderer while THIS process, its
+     * bank and the publisher run on untouched. buildRendererSpec and
+     * buildSourceArgs both derive geometry from planOverlayPipe, so the
+     * two ends of the pipe cannot disagree.
+     *
+     * Any failure here falls back to the classic restart path for this
+     * clip rather than blocking playback — the pipe is an upgrade, never
+     * a new way to not broadcast.
+     */
+    this._pipedClip = false;
+    let pipePath = null;
+    if (this.profile?.overlayPipe && this.cacheDir) {
+      const rSpec = buildRendererSpec({
+        profile: this.profile,
+        selection: this.selection,
+        srcPath: item.srcPath,
+        shift: offset,
+        duration: clipDuration,
+        extractedPath: cached?.path ?? null,
+        fontsDir: cached?.fontsDir ?? null,
+        overlayPath: overlayFile,
+        overlayImages,
+      });
+      if (rSpec) {
+        try {
+          this._ovFeed ??= new OverlayFeed({
+            path: join(this.cacheDir, `overlay-${process.pid}.fifo`),
+            log: (m) => this.emit('log', m),
+          });
+          this._ovFeed.resetSync({ width: rSpec.width, height: rSpec.height });
+          this._ovFeed.spawnRenderer(rendererArgs(rSpec.spec));
+          pipePath = this._ovFeed.path;
+          this._pipedClip = true;
+          this._pipeClipOffset = offset;
+          this._pipeFps = rSpec.fps;
+        } catch (err) {
+          this.emit('warn', 'overlay pipe unavailable — applying overlays '
+            + `will restart the source: ${err.message}`);
+          try { this._ovFeed?.stopSync(); } catch { /* fine */ }
+          pipePath = null;
+          this._pipedClip = false;
+        }
+      } else if (this._ovFeed?.active) {
+        this._ovFeed.stopSync();
+      }
+    } else if (this._ovFeed?.active) {
+      this._ovFeed.stopSync();
+    }
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       offset,
@@ -2246,6 +2362,7 @@ export class PipelinePlayout extends EventEmitter {
       extractedPath: cached?.path ?? null,
       fontsDir: cached?.fontsDir ?? null,
       duration: clipDuration,
+      overlayPipe: pipePath,
     });
 
     this._spawnSource(args, { kind: 'clip' });
@@ -3320,6 +3437,31 @@ export class PipelinePlayout extends EventEmitter {
             { duration: this.current.duration });
           return;
         }
+        /**
+         * The overlay pipe is demoted LAST, after every more specific
+         * demotion has had its claim: a piped HDR clip dying at the tone
+         * map should lose the tone map, not the pipe. What lands here is a
+         * driver refusing the piped composite itself — a graph shape no
+         * probe has vouched for on hardware nobody tested.
+         *
+         * Matched on the argv that actually ran, not on intended state:
+         * profile flags are rebuilt from a copy per clip and have drifted
+         * from the running command before (see the tonemap demotion).
+         */
+        if (!this._sawBlock && this.current && !this._pipeDemoted
+            && /overlay-\d+\.fifo/.test(this._lastArgs ?? '')) {
+          this._pipeDemoted = true;
+          this._demote({ overlayPipe: false });
+          try { this._ovFeed?.stopSync(); } catch { /* already down */ }
+          this._pipedClip = false;
+          this.emit('warn', 'This driver would not run the overlay pipe — '
+            + 'falling back to classic overlay applies (with restarts) for '
+            + `this broadcast. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
         // A clip that exits with an error before producing a single frame
         // did not "finish" — it failed. Advancing here turns one broken
         // filtergraph into a silent march through the whole queue, each
@@ -3403,9 +3545,13 @@ export class PipelinePlayout extends EventEmitter {
     // take the decoder's surfaces is a property of the driver, not of the
     // clip, so re-arming buys one dead spawn per episode to relearn it.
     const keep = this._demoted.noGpuImages || this._demoted.noIdentitySkip
+      || this._demoted.overlayPipe === false
       ? {
         ...(this._demoted.noGpuImages ? { noGpuImages: true } : null),
         ...(this._demoted.noIdentitySkip ? { noIdentitySkip: true } : null),
+        // A driver that refused the piped composite once will refuse it on
+        // the next clip too; re-arming would buy a dead spawn per episode.
+        ...(this._demoted.overlayPipe === false ? { overlayPipe: false } : null),
       }
       : null;
     this._demoted = keep;
@@ -3553,6 +3699,111 @@ export class PipelinePlayout extends EventEmitter {
 const item = (self) => self.current?.item?.title ?? 'clip';
 
 /**
+ * Whether — and at what geometry — this clip can take the overlay pipe.
+ *
+ * The pipe keeps the main graph's SHAPE fixed for the life of the source, so
+ * nothing an Apply can change is allowed to influence the answer: no band
+ * (its height depends on what the overlays currently are), no half-rate
+ * canvas (a bouncing picture added later needs every frame), no baked still
+ * layer. The canvas is always the full content rectangle at the full
+ * effective rate. That costs some of the optimisations the inline path has,
+ * which is the honest price of never restarting for an overlay.
+ *
+ * Null means "use the ordinary paths": the guards mirror the inline canvas
+ * path exactly, plus two of the pipe's own —
+ *  - a pillarboxed clip WITHOUT subtitles has no probed barsGraph (the
+ *    probe only runs when subtitles exist), and an unprobed composite shape
+ *    is how this project earned its -22 scars; and
+ *  - bitmap subtitles need the video frames themselves and cannot move into
+ *    a renderer that has no access to them.
+ */
+export function planOverlayPipe({ profile, selection, sub, duration = null }) {
+  if (!profile?.overlayPipe || profile.backend !== 'vaapi' || !profile.gpuFull) return null;
+  if (sub?.needsComplex) return null;
+  // The pipe input must be BOUNDED or the main process cannot exit — see
+  // pipeInputArgs. No known duration, no bound, no pipe.
+  if (!(duration > 0)) return null;
+  const rect = contentRect(selection?.video, profile);
+  if (sub?.filter) {
+    // Same conditions the inline GPU canvas demands, for the same reasons.
+    if (!profile.gpuSubs) return null;
+    if (!gpuDecodable(selection?.video) || profile.swDecode) return null;
+    if (profile.barsFailed && rect.bars) return null;
+    if (rect.bars && !profile.barsGraph) return null;
+  } else if (rect.bars) {
+    return null;
+  }
+  const eff = effectiveFps(selection?.video, profile);
+  // wide-canvas is the one probed shape where the CANVAS carries the
+  // pillarbox padding, so the pipe has to carry the full output frame.
+  const wide = rect.bars && profile.barsGraph === 'wide-canvas';
+  const width = wide ? profile.width : rect.w;
+  const height = wide ? profile.height : rect.h;
+  const rs = String(eff.rate);
+  const fps = rs.includes('/')
+    ? Number(rs.split('/')[0]) / Number(rs.split('/')[1])
+    : Number(rs);
+  return { rect, eff, wide, width, height, rate: eff.rate, fps };
+}
+
+/**
+ * The renderer's own command spec: the overlay canvas as a standalone
+ * process emitting RGBA to a pipe.
+ *
+ * `shift` is the media time of the FIRST frame this renderer will produce.
+ * At clip start that is the clip offset; at an Apply it is the continuation
+ * point, computed by the caller from the feed's frame count — rawvideo has
+ * no timestamps, so the frame count is the only clock both sides share.
+ * Subtitle events and picture motion both key off it, exactly as the inline
+ * canvas keys off the spawn offset.
+ */
+export function buildRendererSpec({
+  profile, selection, srcPath, shift = 0, duration = null,
+  extractedPath = null, fontsDir = null, overlayPath = null,
+  overlayImages = [],
+}) {
+  const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
+    { extractedPath, fontsDir, overlayPath });
+  const plan = planOverlayPipe({ profile, selection, sub, duration });
+  if (!plan) return null;
+  const { rect, eff, wide } = plan;
+  const imgList = (overlayImages ?? []).filter((i) => i?.path);
+  // Bound the generated base or the renderer never exits on its own; +5 so
+  // it always outlives the clip rather than starving the composite's tail.
+  const cap = duration != null && duration > 0
+    ? ['-t', (Math.max(1, duration - shift) + 5).toFixed(3)]
+    : [];
+  const sh = Number(shift).toFixed(3);
+  const inputs = ['-f', 'lavfi', ...cap, '-i',
+    `color=c=black@0.0:s=${rect.w}x${rect.h}:r=${eff.rate},format=rgba`];
+  // The same head the inline canvas builds, with the base at input 0
+  // instead of 1 — the renderer is its own process and numbers from zero.
+  const head = sub.filter
+    ? `[0:v]setpts=PTS+${sh}/TB,${sub.filter}:alpha=1,setpts=PTS-STARTPTS,format=rgba`
+    : '[0:v]null';
+  const imgs = canvasImageChain(imgList, {
+    width: rect.w, firstInput: 1, inLabel: 'sub', outLabel: 'cv', phase: shift,
+  });
+  const pad = wide
+    ? `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`
+    : '';
+  // No trailing format=rgba: the subtitle head ends on one, the image
+  // chain guarantees one, and the bare-transparent base IS one. pad of an
+  // rgba frame stays rgba.
+  const filters = imgs.filters.length
+    ? [`${head}[sub]`, ...imgs.filters, `[cv]null${pad}[out]`]
+    : [`${head}${pad}[out]`];
+  inputs.push(...imgs.inputs);
+  return {
+    ...plan,
+    spec: {
+      inputs, filters, out: 'out',
+      width: plan.width, height: plan.height, rate: plan.rate,
+    },
+  };
+}
+
+/**
  * Source: decode → software filters → hardware encode → MPEG-TS on stdout.
  *
  * `-re` lives here because this is what sets the pace; the publisher must not
@@ -3562,7 +3813,7 @@ export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
   overlayPath = null, overlayImages = [], overlayLayer = null, subBand = null,
-  overlayAnimated = false,
+  overlayAnimated = false, overlayPipe = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -3611,6 +3862,15 @@ export function buildSourceArgs({
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
+  // The overlay pipe: when a fifo path arrives AND this clip is eligible,
+  // the canvas is not built here at all — a renderer process feeds it in as
+  // input 1, and the graph's shape stops depending on what the overlays
+  // are. planOverlayPipe is the single authority on eligibility and
+  // geometry; the engine calls the same function to size the pipe, so the
+  // two ends cannot disagree.
+  const pipePlan = overlayPipe
+    ? planOverlayPipe({ profile, selection, sub, duration })
+    : null;
   const audioIdx = selection?.audio?.typeIndex ?? 0;
   // Source-rate matching applies to every path, not just the GPU one —
   // duplicating 24fps to 30 is wasted work and judder wherever it happens.
@@ -3633,7 +3893,10 @@ export function buildSourceArgs({
    * a subtitle-free clip disappeared with nothing logged.
    */
   const imagesNeedPerFrame = imgList.some((i) => isMoving(i) || i?.animated);
-  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame) {
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame
+      // Piped clips always carry the overlay input, so the first overlay of
+      // a broadcast lands without a restart. That is the feature.
+      && !pipePlan) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     // null, not the scale: a full-frame VPP pass that changes nothing is
@@ -3685,7 +3948,7 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (profile.gpuSubs && sub.filter && !sub.needsComplex
+  if (pipePlan || (profile.gpuSubs && sub.filter && !sub.needsComplex
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -3693,7 +3956,7 @@ export function buildSourceArgs({
       && gpuDecodable(selection?.video) && !profile.swDecode
       // barsFailed: the pillarboxed composite died live on this driver, so
       // only clips that need bars take the CPU path; 16:9 stays on the GPU.
-      && !(profile.barsFailed && contentRect(selection?.video, profile).bars)) {
+      && !(profile.barsFailed && contentRect(selection?.video, profile).bars))) {
     // The canvas is an infinite generated input. Without bounding it, the
     // process NEVER exits when the episode ends — it idles on the canvas
     // forever, _advance() never fires, and the next episode never starts.
@@ -3776,6 +4039,41 @@ export function buildSourceArgs({
     }
 
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
+    if (pipePlan) {
+      /**
+       * The piped graph. Identical to the inline one downstream of the
+       * upload — same videoChain, same probed composite shape — but input 1
+       * is a rawvideo fifo a renderer process fills, so nothing about the
+       * overlays is baked into this command. Changing them means replacing
+       * the renderer; this process never hears about it.
+       */
+      const graph = '[1:v]format=rgba,hwupload[ov];'
+        + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];`
+        + composite;
+      return [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
+        ...(hwDec
+          ? ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va']
+          : []),
+        '-extra_hw_frames', '8',
+        ...(offset > 0 ? ['-ss', shift] : []),
+        '-i', srcPath,
+        ...pipeInputArgs(pipePlan, overlayPipe,
+          { capSecs: Math.max(1, duration - offset) + 2 }),
+        ...bgInput,
+        '-filter_complex', graph,
+        '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
+        ...be.encoderArgs({ ...profile, fps: eff.fps }),
+        '-async_depth', '4',
+        ...audioArgs(profile),
+        '-r', eff.rate, '-fps_mode', 'cfr',
+        '-output_ts_offset', Number(tsOffset).toFixed(3),
+        '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+        '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+        '-f', 'mpegts', 'pipe:1',
+      ];
+    }
     // Input 0 is the clip, 1 the subtitle canvas, and 2 the black background
     // when the driver's pillarbox shape needs one — so pictures start after
     // whichever of those exist, or they would read the wrong stream.

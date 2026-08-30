@@ -210,6 +210,23 @@ async function tuneProfile(profile, selection, srcPath = null) {
   profile.gpuFull = true;
   profile.gpuSubs = false;
   profile.barsGraph = undefined;
+
+  /**
+   * The overlay pipe needs the same driver honesty subtitles do — an
+   * overlay_vaapi that blends alpha correctly — whether or not this clip
+   * HAS subtitles, because in pipe mode every clip carries the composite.
+   * So the probe runs for every clip when the pipe is enabled, not only
+   * for subtitled ones. The answer is cached for the process.
+   */
+  profile.overlayPipe = false;
+  if (config.encoder.overlayPipe !== false) {
+    if (globalThis.__alphaOk === undefined) {
+      globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
+        { width: profile.width, height: profile.height });
+    }
+    profile.overlayPipe = globalThis.__alphaOk;
+  }
+
   if (!selection?.subtitle) return;
 
   if (globalThis.__alphaOk === undefined) {
@@ -929,6 +946,9 @@ app.put('/api/config', (req, res) => {
   }
   if (patch.encoder?.fps !== undefined) {
     patch.encoder.fps = clamp(patch.encoder.fps, 1, 240, config.encoder.fps);
+  }
+  if (patch.encoder?.overlayPipe !== undefined) {
+    patch.encoder.overlayPipe = Boolean(patch.encoder.overlayPipe);
   }
   if (patch.encoder?.tonemap !== undefined) {
     // An unknown value must not silently become a filter graph.

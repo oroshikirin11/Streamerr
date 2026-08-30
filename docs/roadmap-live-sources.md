@@ -236,3 +236,31 @@ Moderate, and mostly rearrangement rather than new invention:
   waits on it. Needs a policy — drop late overlay frames rather than block.
 - **Renderer startup latency** becomes visible as a stale overlay for a few
   frames after each apply, instead of a splice.
+
+---
+
+## Phase 1 implementation notes — 2026-08-30
+
+Shipped. What the build taught beyond the feasibility experiment:
+
+- **The fifo must be bounded on the reader side.** The holder keeps it from
+  EOFing (that is its job), but a held-open silent pipe leaves ffmpeg's input
+  thread blocked in read() at end of clip and the process NEVER exits —
+  measured: a 10s clip encoded 9.96s and sat until killed. The writer cannot
+  signal the end either: once the reader stops consuming, the renderer blocks
+  on the full fifo and never reaches its own cap. So the reader carries
+  `-t duration+2`; eof_action=repeat covers the margin. This is also why the
+  pipe requires a KNOWN clip duration (planOverlayPipe refuses without one).
+- **The continuation clock counts delivered frames, not consumed ones.** The
+  main process reads the pipe ahead of the composite, so an Apply lands a
+  little past the click point on the media timeline — equivalent to the old
+  "end of buffer" semantics, and alignment stays exact because the count is
+  the clock.
+- **Nothing Apply can change may affect pipe geometry**, so pipe mode pins:
+  full content-rect canvas, full frame rate, no band, no baked layer. The
+  half-rate and band optimisations are the price of never restarting.
+- Pillarboxed clips WITHOUT subtitles keep the classic path: barsGraph is
+  only probed when subtitles exist, and unprobed composite shapes are how
+  this project earned its -22 scars.
+- Chunked clips keep the classic path: many parallel encoders cannot share
+  one fifo.

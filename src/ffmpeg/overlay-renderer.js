@@ -89,8 +89,24 @@ export function rendererArgs(spec) {
  * `path` is a named pipe rather than an fd because the renderer is replaced
  * repeatedly and ffmpeg must not see EOF when it is. See holdOpen below.
  */
-export function pipeInputArgs(spec, path) {
-  return [...pipeFormatArgs(spec), '-i', path];
+export function pipeInputArgs(spec, path, { capSecs = null } = {}) {
+  return [
+    ...pipeFormatArgs(spec),
+    /**
+     * The input-side bound is what lets the main process EXIT.
+     *
+     * The fifo never EOFs — the holder keeps it open so renderer swaps are
+     * invisible — and ffmpeg's input thread blocks in read() on a silent
+     * open pipe, which hangs the whole process at end of clip: measured, a
+     * 10s clip encoded 9.96s and then sat forever. The writer cannot signal
+     * the end either; once the reader stops consuming, the renderer blocks
+     * on the full fifo and never reaches its own cap. So the READER is
+     * bounded: after capSecs it closes the input itself, eof_action=repeat
+     * carries the last frame across the margin, and shutdown joins cleanly.
+     */
+    ...(capSecs != null && capSecs > 0 ? ['-t', Number(capSecs).toFixed(3)] : []),
+    '-i', path,
+  ];
 }
 
 /**
