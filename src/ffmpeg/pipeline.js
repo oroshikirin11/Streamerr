@@ -2325,7 +2325,7 @@ export class PipelinePlayout extends EventEmitter {
             path: join(this.cacheDir, `overlay-${process.pid}.fifo`),
             log: (m) => this.emit('log', m),
           });
-          this._ovFeed.resetSync({ width: rSpec.width, height: rSpec.height });
+          this._ovFeed.resetSync();
           const rArgs = rendererArgs(rSpec.spec);
           // The renderer spawns as visibly as the source: an entire hunt ran
           // blind on which files and filters production actually used.

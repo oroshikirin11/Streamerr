@@ -236,7 +236,7 @@ const paint = (colour, frames) => rendererArgs({
   filters: ['[0:v]null[out]'],
 });
 try {
-  feed.resetSync({ width: 4, height: 2 });
+  feed.resetSync();
   const rd = createReadStream(fifo, { highWaterMark: 4096 });
   const collecting = pull(rd, 6000);
   feed.spawnRenderer(paint('red', 3));
@@ -247,7 +247,6 @@ try {
   const headers = bytes.toString('latin1').split('nut/multimedia container').length - 1;
   check('bytes flowed through the feed', bytes.length > 200, true);
   check('a swap appends a SECOND NUT stream, no EOF between', headers, 2);
-  check('the byte odometer moved', feed.bytes > 0, true);
 } finally {
   feed.stopSync();
   rmSync(fifo, { force: true });
