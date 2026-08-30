@@ -190,8 +190,8 @@ try {
     extractedPath: ass1, duration: 10, overlayPipe: fifo,
     overlayImages: [logoDesc], cpuImages: true,
   });
-  check('variant B source composites on the CPU',
-    argsB[argsB.indexOf('-filter_complex') + 1].includes('hwdownload')
+  check('variant B decodes in software and composites on the CPU',
+    !argsB.includes('-hwaccel')
     && !argsB[argsB.indexOf('-filter_complex') + 1].includes('overlay_vaapi'));
   argsB.splice(argsB.indexOf('-i'), 0, '-re');
   argsB.splice(argsB.indexOf('-progress'), 4);

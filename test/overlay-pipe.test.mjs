@@ -159,13 +159,14 @@ console.log('\nvariant B — pictures composite on the CPU, canvas stays a trick
   };
   const args = buildSourceArgs(piped);
   const g = args[args.indexOf('-filter_complex') + 1];
-  check('the source downloads once and uploads once', /hwdownload/.test(g) && /hwupload/.test(g), true);
+  check('the source decodes in SOFTWARE and uploads once — the shape that held the bank',
+    !/hwdownload/.test(g) && !args.includes('-hwaccel') && /hwupload/.test(g), true);
   check('the canvas composites on the CPU, not overlay_vaapi', g.includes('overlay_vaapi'), false);
   check('the moving picture keeps its per-frame position expressions', /abs\(mod\(/.test(g), true);
   check('both pictures are graph inputs', args.filter((x) => String(x).endsWith('.png')).length, 2);
   check('the pipe input survives as input 1', args.indexOf('/tmp/x.fifo') > 0, true);
-  check('classic surface pool — framesync queues CPU frames here',
-    args[args.indexOf('-extra_hw_frames') + 1], '8');
+  check('no decode surfaces at all — the GPU only encodes here',
+    args.includes('-extra_hw_frames'), false);
   // With a band, the source crops the canvas and blends only its rows.
   const bandArgs = buildSourceArgs({
     ...piped,

@@ -1081,8 +1081,7 @@ export class PipelinePlayout extends EventEmitter {
         );
         const needCpu = (overlayImages ?? []).some((i) => i?.path)
           && !animNow
-          && !contentRect(this.selection?.video, this.profile).bars
-          && gpuDecodable(this.selection?.video) && !this.profile?.swDecode;
+          && !contentRect(this.selection?.video, this.profile).bars;
         const sigNow = JSON.stringify((this.profile?.overlay ?? [])
           .filter((i) => i?.type === 'image' && i?.enabled !== false));
         if (needCpu !== (this._pipeCpuImages ?? false)
@@ -2337,8 +2336,7 @@ export class PipelinePlayout extends EventEmitter {
      */
     const pipeCpuImages = (overlayImages ?? []).some((i) => i?.path)
       && !pipeAnimated
-      && !contentRect(this.selection?.video, this.profile).bars
-      && gpuDecodable(this.selection?.video) && !this.profile?.swDecode;
+      && !contentRect(this.selection?.video, this.profile).bars;
     const pipeBand = this.profile?.overlayPipe && this.cacheDir
       ? this._subtitleBand(
         this.selection?.subtitle?.external
@@ -4303,7 +4301,7 @@ export function buildSourceArgs({
     }
 
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
-    if (pipePlan && cpuImages && imgList.length && !rect.bars && hwDec) {
+    if (pipePlan && cpuImages && imgList.length && !rect.bars) {
       /**
        * The piped graph with CPU pictures — the shape that holds the 15s
        * bank when the studio carries pictures, measured against every
@@ -4345,7 +4343,16 @@ export function buildSourceArgs({
         ? `[1:v]crop=${rect.w}:${bandB.height}:0:${bandB.y}[ovc];`
         : '[1:v]format=rgba[ovc];';
       const at2 = bandB ? `x=0:y=${bandB.y}:` : '';
-      const graph = `[0:v]${scalePart},hwdownload,format=nv12[bd];`
+      /**
+       * SOFTWARE decode, deliberately. The hwdownload round trip looked
+       * cheaper on paper and measured 0.80x flat on the N100 whatever the
+       * blend size — a GPU sync point per frame serialises the whole
+       * chain. The old inline way never paid it: decode lands in system
+       * memory already parallel across the cores, the CPU blends, ONE
+       * upload feeds the encoder, and the GPU does nothing else. That
+       * shape held a constant bank live for months; this is that shape.
+       */
+      const graph = `[0:v]${base},format=nv12[bd];`
         + canvasIn
         // shortest=1: without it framesync's default keeps REPEATING the
         // last video frame after the main input ends, for as long as the
@@ -4359,10 +4366,6 @@ export function buildSourceArgs({
       return [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
         '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
-        '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
-        // The classic depth: framesync queues CPU frames here, not decoder
-        // surfaces, so the deeper piped pool is unnecessary.
-        '-extra_hw_frames', '8',
         ...(offset > 0 ? ['-ss', shift] : []),
         '-i', srcPath,
         ...pipeInputArgs(pipePlan, overlayPipe,
