@@ -93,5 +93,22 @@ check('unknown rate -> passthrough (benefit of the doubt)', isCopy(buildSourceAr
   ...base, srcKbps: null,
 })));
 
+// Seam alignment: with a probed landing, the copy opens the file twice.
+check('copyAlign gap -> two inputs, itsoffset folds the gap', (() => {
+  const s = buildSourceArgs({ ...base, offset: 115.5,
+    copyAlign: { req: 115.5, landing: 110.0 } });
+  const j = s.join(' ');
+  return j.includes('-itsoffset 5.500') && j.includes('-ss 115.500')
+    && j.includes('-ss 110.000') && j.includes('-map 1:a:0?')
+    && s.filter((a) => a === '-i').length === 2;
+})());
+check('copyAlign landing==request -> single input as before', (() => {
+  const s = buildSourceArgs({ ...base, offset: 60,
+    copyAlign: { req: 60, landing: 60 } });
+  return s.filter((a) => a === '-i').length === 1 && s.join(' ').includes('-map 0:a:0?');
+})());
+check('hevc copy carries initial_discontinuity', buildSourceArgs(base)
+  .join(' ').includes('+resend_headers+initial_discontinuity'));
+
 console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');
 process.exit(failures ? 1 : 0);

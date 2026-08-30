@@ -1961,6 +1961,51 @@ export class PipelinePlayout extends EventEmitter {
    * appear. Anything whose window has already closed is dropped rather than
    * handed to ffmpeg as an extra input that draws nothing.
    */
+  /**
+   * Where will `-ss offset` ACTUALLY land the video, in source time?
+   *
+   * Asked of ffmpeg itself, with the exact seek the spawn will use —
+   * ffprobe's read_intervals seeks differently (measured: inclusive vs
+   * a cue-table threshold that put ffmpeg a whole GOP earlier), and only
+   * the real path's answer is worth having. -copyts keeps source
+   * timestamps so the first packet's pts IS the landing; one keyframe's
+   * worth of TS to a pipe, ~150ms. Null on any failure — the caller
+   * then seeks unaligned, which is only the old behaviour.
+   */
+  _probeCopyLanding(srcPath, offset) {
+    return new Promise((resolve) => {
+      let enc; let probe;
+      const done = (v) => { resolve(v); try { enc?.kill('SIGKILL'); } catch { /* gone */ } };
+      try {
+        enc = spawn('ffmpeg', ['-v', 'error', '-nostdin',
+          '-ss', Number(offset).toFixed(3), '-copyts', '-i', srcPath,
+          '-map', '0:v:0', '-c', 'copy', '-frames:v', '1',
+          '-muxdelay', '0', '-f', 'mpegts', 'pipe:1'],
+        { stdio: ['ignore', 'pipe', 'ignore'] });
+        probe = spawn('ffprobe', ['-v', 'error',
+          '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', '-'],
+        { stdio: ['pipe', 'pipe', 'ignore'] });
+      } catch { done(null); return; }
+      enc.stdout.pipe(probe.stdin);
+      // A dying writer must not take the reader down mid-parse.
+      probe.stdin.on('error', () => { /* EPIPE when ffmpeg exits first */ });
+      let out = '';
+      probe.stdout.on('data', (d) => { out += d; });
+      const kill = setTimeout(() => {
+        try { enc.kill('SIGKILL'); } catch { /* gone */ }
+        try { probe.kill('SIGKILL'); } catch { /* gone */ }
+      }, 8000);
+      kill.unref?.();
+      probe.on('close', () => {
+        clearTimeout(kill);
+        const v = parseFloat(String(out).trim().split(/[\s,]+/)[0]);
+        done(Number.isFinite(v) ? v : null);
+      });
+      probe.on('error', () => { clearTimeout(kill); done(null); });
+      enc.on('error', () => { /* probe's close settles the promise */ });
+    });
+  }
+
   _overlayImages(item, offset = 0, span = null) {
     const items = this.profile?.overlay ?? [];
     if (!items.length || !this.overlayDir) return [];
@@ -2543,6 +2588,7 @@ export class PipelinePlayout extends EventEmitter {
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       srcKbps,
+      copyAlign: this._copyAlignFor?.req === offset ? this._copyAlignFor : null,
       offset,
       // Offset 0: every graph restores the clip's timeline before drawing
       // the ASS, so the file is written in clip time. Shifting it here as
@@ -2610,6 +2656,44 @@ export class PipelinePlayout extends EventEmitter {
     {
       const ci = args.indexOf('-c:v');
       const isCopy = ci !== -1 && args[ci + 1] === 'copy';
+      /**
+       * COPY SEAM ALIGNMENT — the fix for the HEVC seek corruption.
+       *
+       * A copy-mode `-ss` splits the streams: the demuxer starts VIDEO at
+       * a keyframe at-or-before the target (matroska cues, sometimes a
+       * whole GOP early — measured 10s on open-GOP x265) while AUDIO
+       * starts at the target itself. The publisher's per-stream
+       * discontinuity handlers then disagree by exactly that gap and
+       * flip-flop the offset on every packet — the receiver's A/V
+       * baselines split and every segment is garbage until the broadcast
+       * restarts (operator-reported, reproduced locally, 352 rebase lines
+       * from one seek). No ffmpeg flag aligns them: -noaccurate_seek and
+       * first_pts were both measured changing nothing.
+       *
+       * So ask the file where video will land (one ffprobe packet read,
+       * ~150ms) and request THAT plus a millisecond — under the demuxer's
+       * "greatest keyframe before the request" rule both streams then
+       * start together, and the seek lands exactly on a keyframe like any
+       * player's. The probe is async because _play must not block the
+       * event loop; the token guards a supersede while it runs.
+       */
+      if (isCopy && offset > 0 && this._copyAlignFor?.req !== offset) {
+        const tok = this._alignTok = {};
+        const dur = clipDuration;
+        this._detached((async () => {
+          const landing = await this._probeCopyLanding(item.srcPath, offset);
+          if (this._alignTok !== tok || this._stopping) return;
+          if (landing != null && landing < offset - 0.005) {
+            this.emit('log', `[seek] video will land on the keyframe at `
+              + `${landing.toFixed(3)}s for a ${offset.toFixed(3)}s request — `
+              + `audio seeks there too so the streams stay glued\n`);
+          }
+          this._copyAlignFor = { req: offset, landing: landing ?? offset };
+          this._play(item, offset, { duration: dur });
+        })(), 'aligning the copy seek');
+        return;
+      }
+      if (this._copyAlignFor?.req === offset) this._copyAlignFor = null;
       const kbps = isCopy ? Math.max(this._kbpsBase, srcKbps ?? 0) : this._kbpsBase;
       if (isCopy) {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
@@ -4291,7 +4375,7 @@ export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
   overlayPath = null, overlayImages = [], overlayLayer = null, subBand = null,
-  overlayAnimated = false, overlayPipe = null, srcKbps = null,
+  overlayAnimated = false, overlayPipe = null, srcKbps = null, copyAlign = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -4353,6 +4437,17 @@ export function buildSourceArgs({
     })
     : null;
   const audioIdx = selection?.audio?.typeIndex ?? 0;
+  /**
+   * HEVC seams announce themselves. Every respawn starts fresh continuity
+   * counters and cuts the old PES mid-frame; the publisher logged "Packet
+   * corrupt ... dropping it" at every splice, and at 4K HEVC rates that
+   * dropped packet is a visible rainbow band (operator screenshots). The
+   * discontinuity indicator is the container's own way of saying the jump
+   * is intentional — the exact fix the chunk files already ship. H.264 is
+   * left untouched (tuned path, byte-identical by test).
+   */
+  const tsFlags = profile.codec === 'hevc'
+    ? '+resend_headers+initial_discontinuity' : '+resend_headers';
 
   /**
    * PASSTHROUGH: an HEVC-native file under codec=hevc with nothing to draw
@@ -4385,15 +4480,40 @@ export function buildSourceArgs({
       && (srcKbps == null
         || srcKbps <= (Number(profile.copyLimitKbps) > 0
           ? Number(profile.copyLimitKbps) : 30000))) {
+    /**
+     * THE SEAM ALIGNMENT. A copy-mode `-ss` splits the streams: the
+     * demuxer starts VIDEO at whatever keyframe the cue table picks —
+     * measured up to a full GOP before the request, with an arbitrary
+     * per-file threshold — while AUDIO is trimmed to the request itself.
+     * The publisher's per-stream discontinuity handlers then disagree by
+     * that gap and flip-flop the offset on EVERY packet; the receiver's
+     * A/V baselines split and the picture is garbage until the broadcast
+     * restarts (operator-reported fatal mode, reproduced: 350+ rebase
+     * lines from one seek). No single-input flag fixes it — measured:
+     * -noaccurate_seek, first_pts, exact-keyframe requests, output -ss
+     * (drops ALL copied video) all fail.
+     *
+     * So the engine probes where video will actually land (copyAlign,
+     * one tiny ffmpeg run) and opens the file TWICE: video seeks by the
+     * original request with -itsoffset folding the landing gap away,
+     * audio seeks directly to the landing. Both streams then start on
+     * the same tick, and the seam is one announced discontinuity instead
+     * of a war.
+     */
+    const gap = copyAlign && Number.isFinite(copyAlign.landing)
+      && copyAlign.landing < offset - 0.005
+      ? offset - copyAlign.landing : 0;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
+      ...(gap > 0 ? ['-itsoffset', gap.toFixed(3)] : []),
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
+      ...(gap > 0 ? ['-ss', copyAlign.landing.toFixed(3), '-i', srcPath] : []),
       '-map', '0:v:0', '-c:v', 'copy',
-      '-map', `0:a:${audioIdx}?`,
+      '-map', `${gap > 0 ? 1 : 0}:a:${audioIdx}?`,
       ...audioArgs(profile),
       '-output_ts_offset', Number(tsOffset).toFixed(3),
-      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', tsFlags,
       '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
       '-f', 'mpegts', 'pipe:1',
     ];
@@ -4508,7 +4628,7 @@ export function buildSourceArgs({
       ...audioArgs(profile),
       '-r', effAll.rate, '-fps_mode', 'cfr',
       '-output_ts_offset', Number(tsOffset).toFixed(3),
-      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', tsFlags,
       '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
       '-f', 'mpegts', 'pipe:1',
     ];
@@ -4650,7 +4770,7 @@ export function buildSourceArgs({
         ...audioArgs(profile),
         '-r', eff.rate, '-fps_mode', 'cfr',
         '-output_ts_offset', Number(tsOffset).toFixed(3),
-        '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+        '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', tsFlags,
         '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
         '-f', 'mpegts', 'pipe:1',
       ];
@@ -4869,7 +4989,7 @@ export function buildSourceArgs({
       ...audioArgs(profile),
       '-r', eff.rate, '-fps_mode', 'cfr',
       '-output_ts_offset', Number(tsOffset).toFixed(3),
-      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', tsFlags,
       '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
       '-f', 'mpegts', 'pipe:1',
     ];
@@ -4978,7 +5098,7 @@ export function buildSourceArgs({
     '-muxdelay', '0', '-muxpreload', '0',
     // AV1 rides NUT — mpegts writes it as private data its own demuxer
     // cannot read back. Timestamps behave identically (measured).
-    ...(profile.codec === 'av1' ? [] : ['-mpegts_flags', '+resend_headers']),
+    ...(profile.codec === 'av1' ? [] : ['-mpegts_flags', tsFlags]),
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
     '-f', profile.codec === 'av1' ? 'nut' : 'mpegts', 'pipe:1',
   ];
