@@ -3996,7 +3996,7 @@ export function buildRendererSpec({
   const tune = profile.pipeTuning ?? {};
   const chainRate = (tune.fullRate ? plan.rate : halfRate(plan.rate)) || plan.rate;
   const beat = Number(tune.beat) > 0 ? Number(tune.beat) : 6;
-  const readrate = Number(tune.readrate) > 0 ? String(tune.readrate) : '1.3';
+  const readrate = Number(tune.readrate) > 0 ? String(tune.readrate) : '2.5';
   const inputs = ['-f', 'lavfi', '-readrate', readrate, ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
@@ -4339,7 +4339,7 @@ export function buildSourceArgs({
         // pipe-vs-legacy gap on iHD.
         '-extra_hw_frames',
         String(Number(profile.pipeTuning?.hwFrames) > 0
-          ? profile.pipeTuning.hwFrames : 16),
+          ? profile.pipeTuning.hwFrames : 8),
         ...(offset > 0 ? ['-ss', shift] : []),
         '-i', srcPath,
         ...pipeInputArgs(pipePlan, overlayPipe,
