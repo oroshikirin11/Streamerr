@@ -758,6 +758,54 @@ app.get('/api/debug/log', (req, res) => {
 });
 
 /**
+ * Per-process CPU for this service and its ffmpeg children, sampled from
+ * /proc over ~700ms. Read-only introspection of our own process tree —
+ * exists so a slow broadcast can be diagnosed remotely ("which process is
+ * hot?") without a shell on the box.
+ */
+app.get('/api/debug/cpu', async (req, res) => {
+  const { readFileSync: rf, readdirSync } = await import('fs');
+  const sample = () => {
+    const out = new Map();
+    for (const pid of readdirSync('/proc')) {
+      if (!/^\d+$/.test(pid)) continue;
+      try {
+        const stat = rf(`/proc/${pid}/stat`, 'utf8');
+        // comm may contain spaces/parens; fields count from after the LAST ')'.
+        const f = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        const comm = stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')'));
+        if (comm !== 'ffmpeg' && Number(pid) !== process.pid) continue;
+        const cmdline = rf(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' ');
+        const role = Number(pid) === process.pid ? 'node (panel + feed)'
+          : cmdline.includes('-f nut pipe:1') ? 'overlay renderer'
+            : cmdline.includes('-f mpegts pipe:1') ? 'source (decode+composite+encode)'
+              : cmdline.includes('flv') ? 'publisher' : 'ffmpeg (other)';
+        // utime + stime are fields 12 and 13 counted from pid, i.e. 11 and
+        // 12 in the post-comm split's 0-basing minus the two consumed.
+        out.set(pid, { role, jiffies: Number(f[11]) + Number(f[12]) });
+      } catch { /* raced an exit */ }
+    }
+    return out;
+  };
+  const hz = 100; // USER_HZ is 100 on every platform this ships to
+  const a = sample();
+  await new Promise((r) => { setTimeout(r, 700); });
+  const b = sample();
+  const procs = [];
+  for (const [pid, cur] of b) {
+    const before = a.get(pid);
+    if (!before) continue;
+    procs.push({
+      pid: Number(pid),
+      role: cur.role,
+      cpu: Math.round(((cur.jiffies - before.jiffies) / hz / 0.7) * 1000) / 10,
+    });
+  }
+  procs.sort((x, y) => y.cpu - x.cpu);
+  res.json({ cores: (await import('os')).cpus().length, procs });
+});
+
+/**
  * Directory listing for the library folder picker. Directories only, names
  * only — never file contents — and only for an authenticated session (the
  * panel already runs with filesystem-wide read access by design: its whole

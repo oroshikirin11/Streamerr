@@ -3964,10 +3964,13 @@ export function buildRendererSpec({
    * rejected mpdecimate does not apply here.
    */
   // The heartbeat tracks the cadence so framesync's pairing queue stays at
-  // half a second of media either way. mpdecimate stays on the moving chain
-  // too — it thins nothing there, but its removal is one of the bisection
-  // suspects and it does not return until a live test acquits it.
-  const thin = `,mpdecimate=max=${beat}`;
+  // half a second of media either way. The moving chain runs WITHOUT
+  // mpdecimate: its pixels differ every frame, so the filter never dropped
+  // anything there — it just burned a full-frame SAD compare 24 times a
+  // second (this was once a bisection suspect for the torn-packet ghosts;
+  // the swap-time boundary guard removed the tear itself, and the guarded
+  // build's live bounce ran clean).
+  const thin = perFrame ? '' : `,mpdecimate=max=${beat}`;
   /**
    * Thin BEFORE pad — worth ~85MB/s of renderer memcpy on a banded title:
    * SAD compares the 420px band instead of the padded 1080p frame, and the
