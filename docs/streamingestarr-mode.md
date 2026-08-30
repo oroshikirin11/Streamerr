@@ -52,10 +52,19 @@ Use it to validate the token and pick transport per codec:
    change, and re-push after receiver restarts (its list is in-memory;
    hooking the existing `STREAM_STARTED` webhook works). Powers the lobby
    countdown.
-3. The old `POST /api/integrations/streamtitle` still works there as a
+3. **Artwork** — `POST /api/integrations/metadata/artwork`
+   `{id, type: "image/jpeg|png|webp", data: <base64, max 1 MiB>}`, then
+   reference the id as `artworkId` on nowplaying / upNext / schedule
+   items. Version ids (e.g. content hash) — viewers cache them immutable.
+   Jellyfin poster URLs / local artwork are both fine sources; downscale
+   to ~300×450 before pushing. Re-push after receiver restarts (its cache
+   is in-memory, bounded to 24 entries).
+4. **Pause/resume** — include `paused: true|false` in nowplaying pushes;
+   viewers freeze/resume the progress ring.
+5. The old `POST /api/integrations/streamtitle` still works there as a
    fallback; mode senders can skip it.
 
 ## Future phases (receiver will bump `apiVersion`)
 
-Poster upload for the now-playing card; **WebVTT subtitle upload per clip**
+**WebVTT subtitle upload per clip**
 (replaces burn-in — the big N100 win); DVR window; receiver-side ABR.
