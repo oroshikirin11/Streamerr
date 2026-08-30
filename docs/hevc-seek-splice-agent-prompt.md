@@ -23,6 +23,21 @@
 > files, bounded by one GOP — normal random-access behaviour.
 > The `_box`/0.27x secondary observation was the 3x bitrate ceiling, since
 > replaced by the absolute `copyLimitKbps` (commit 6092b70).
+>
+> **Round 2 (same night):** the operator verified sender-side clean but
+> viewers still saw heavy banding — the panel preview (software decode,
+> concealing) was fine while Chrome's HARDWARE decoder behind the
+> receiver was not. Cause: a copy->copy splice opens the new stream on a
+> CRA, and a CRA mid-stream does not reset a decoder — stale DPB + POC
+> collisions smear until an IDR the file may never contain. Fix: mid-clip
+> copy respawns now RECONNECT the session (the _reshape machinery), so
+> the receiver re-inits and hardware decoders start from scratch; an
+> IDR-led transcode respawn never needs this. Plus reshape robustness
+> learned live: receivers hold the dying session until their idle timeout
+> and refuse the replacement — a fast publisher death inside a 30s
+> reconnect window now knocks again every 3s at the ORIGINAL offset
+> instead of tripping the hard-fail heuristic. Verified: seek -> one
+> reshape cycle, lands on target, repeatable, broadcast never dies.
 
 Copy everything below the line into the agent working on Jellystreamerr.
 

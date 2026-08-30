@@ -881,6 +881,8 @@ export class PipelinePlayout extends EventEmitter {
     // The countdown counts wall-clock time; there is nothing to seek in.
     if (this.current.item?.countdown) return this.position;
 
+    // A fresh seek earns a fresh reconnect (see the copy-seam reshape).
+    this._reshapedFor = null;
     // Flush first: it rewinds the playhead to what has aired, and a
     // relative skip has to count from there or +30 lands a bankful further
     // ahead than the viewer expects.
@@ -1398,6 +1400,31 @@ export class PipelinePlayout extends EventEmitter {
       if (this._break && !this._stopping) {
         this.current = null;
         this._breakWait();
+        return;
+      }
+
+      /**
+       * Fresh death inside the reconnect window: the receiver was still
+       * holding the previous session when the replacement knocked —
+       * measured live, the refusal comes ~4s in and used to trip the
+       * hard-fail heuristic and end the broadcast. Keep knocking until
+       * the window closes; the source rebuilds with the publisher.
+       */
+      if (!this._stopping && ranMs < PUBLISH_FAIL_MS && this.current
+          && (this._reconnectUntil ?? 0) > Date.now()) {
+        this.emit('warn', 'the receiver refused the new session — the old '
+          + 'one may still be draining; knocking again in 3s');
+        this._reshaping = this._lastReshape
+          && this._lastReshape.at > Date.now() - 60_000
+          ? this._lastReshape
+          : {
+            item: this.current.item, offset: this.position,
+            duration: this.current.duration,
+          };
+        const t = setTimeout(() => {
+          if (!this._stopping) this._finishReshape(); else this._reshaping = null;
+        }, 3000);
+        t.unref?.();
         return;
       }
 
@@ -2385,6 +2412,11 @@ export class PipelinePlayout extends EventEmitter {
    * session as frames of the wrong size.
    */
   _reshape(item, offset, duration, shape) {
+    // Receivers hold the dying session until their own idle timeout
+    // (Owncast's single-publisher rule, ~10s) and refuse the replacement
+    // meanwhile. Open a window in which a fast publisher death means
+    // "knock again", not "the config is broken".
+    this._reconnectUntil = Date.now() + 30_000;
     this._reshaping = { item, offset, duration };
     this.emit('warn', `Switching output to ${shape.width}x${shape.height} for `
       + `${item?.title ?? 'the next clip'} — viewers reconnect once.`);
@@ -2404,6 +2436,11 @@ export class PipelinePlayout extends EventEmitter {
     const next = this._reshaping;
     if (!next) return;
     this._reshaping = null;
+    // Remembered for the knock-again retry: a refused session must come
+    // back to THIS offset, not to wherever the playhead drifted while
+    // the retry timer ran (measured: the drift caused a second, useless
+    // reconnect cycle).
+    this._lastReshape = { ...next, at: Date.now() };
     // A fresh RTMP session restarts the viewer's clock, so the published
     // timeline starts over with it rather than resuming mid-episode.
     this.timeline = 0;
@@ -2689,6 +2726,28 @@ export class PipelinePlayout extends EventEmitter {
               + `audio seeks there too so the streams stay glued\n`);
           }
           this._copyAlignFor = { req: offset, landing: landing ?? offset };
+          /**
+           * A copy->copy splice starts the new stream on a CRA, and a CRA
+           * mid-stream does NOT reset a decoder: hardware decoders (Chrome
+           * MSE behind the receiver) keep their stale reference buffer,
+           * POCs collide, and the picture smears until an IDR the file may
+           * never contain — operator-verified: the panel preview (software
+           * decode, concealing) was clean while viewers saw garbage. So a
+           * mid-clip copy respawn reconnects the session: the receiver
+           * re-inits and its decoder starts from scratch, which an IDR-led
+           * transcode respawn gets for free and copy cannot fake. Viewers
+           * see one rebuffer at the seek — honest, and bounded.
+           */
+          if (this.publisher && !this._reshaping
+              && this._reshapedFor !== offset) {
+            this._reshapedFor = offset;
+            this.emit('warn', 'seek on a passthrough clip — reconnecting so '
+              + 'viewers’ decoders restart clean (copy cannot open with an IDR)');
+            this._reshape(item, offset, dur, {
+              width: this.profile.width, height: this.profile.height,
+            });
+            return;
+          }
           this._play(item, offset, { duration: dur });
         })(), 'aligning the copy seek');
         return;
