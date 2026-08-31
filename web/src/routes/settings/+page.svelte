@@ -1944,7 +1944,7 @@
                 onpick={addRoot} onclose={() => (browsing = false)} />
   {/if}
 
-  <p class="muted small">
+  <p class="muted small foot" class:centered={viewMode === 'simple'}>
       Prefer the guided flow? <a href="/setup">Re-run setup</a> &mdash; same settings, in order.
     </p>
 {/if}
@@ -1994,6 +1994,10 @@
   .diff b { color: var(--text); font-weight: 500; }
   .driftline { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
   .driftline b { color: var(--text); }
+  .foot { margin-top: 18px; }
+  /* Simple mode centers a narrow column; the footer follows it instead of
+     hugging the page edge. */
+  .foot.centered { max-width: 640px; margin-left: auto; margin-right: auto; }
 
   @media (max-width: 900px) {
     .wrap { max-width: 680px; }
