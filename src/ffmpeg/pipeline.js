@@ -882,6 +882,9 @@ export class PipelinePlayout extends EventEmitter {
       // after a seek outside the cache): the panel shows the same build
       // indicator it shows before going live, for as long as the card is.
       rebuilding: Boolean(this.holding && this.scheduler),
+      // True while the on-air clip ships HDR bits (copy of an HDR file or
+      // the main10 encode) — matched against the spawned argv per clip.
+      hdrOnAir: Boolean(this.hdrOnAir),
       // Both bands measured from what has actually AIRED, so the shaded
       // regions are exactly the instant-seek territory: 'delivered'
       // content the viewer has not seen yet belongs to the AHEAD band,
@@ -2916,6 +2919,17 @@ export class PipelinePlayout extends EventEmitter {
     {
       const ci = args.indexOf('-c:v');
       const isCopy = ci !== -1 && args[ci + 1] === 'copy';
+      /**
+       * Is the clip going out with its HDR intact? Matched against the
+       * spawned argv, not re-derived (the tonemap demotion taught us why):
+       * a copied HDR file ships its PQ untouched, and the hdrPass encode
+       * keeps the P010 surface with no tone map in the graph. Everything
+       * else — including an HDR source being tone-mapped — is SDR on air.
+       * The metadata push reads this to tell viewers honestly.
+       */
+      const argStr = args.join(' ');
+      this.hdrOnAir = Boolean(this.selection?.video?.hdr)
+        && (isCopy || (argStr.includes('format=p010') && !/tonemap/.test(argStr)));
       /**
        * COPY SEAM ALIGNMENT — the fix for the HEVC seek corruption.
        *

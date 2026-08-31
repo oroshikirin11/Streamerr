@@ -579,6 +579,10 @@ async function sgNowPlaying({ announce = false } = {}) {
     position: snap.position ?? undefined,
     duration: it.duration ?? undefined,
     paused: snap.status === 'paused',
+    // Declared per clip so the receiver can badge HDR honestly — and
+    // 'sdr' is sent explicitly, because a tone-mapped clip after an HDR
+    // one must RESET the receiver's range, not inherit it.
+    videoRange: snap.hdrOnAir ? 'pq' : 'sdr',
     ...(next ? { upNext: { ...sgSplit(next), ...(nextArt ? { artworkId: nextArt } : {}) } } : {}),
     announce: Boolean(announce && fresh),
     channel: 'main',
