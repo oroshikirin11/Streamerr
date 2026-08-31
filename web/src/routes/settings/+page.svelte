@@ -794,6 +794,7 @@
   </div>
   {:else}
   <div class="cols">
+  <div class="col">
 
   <!-- ===== Broadcast: connection, receivers, metadata ===== -->
   <section class="card group">
@@ -1111,6 +1112,312 @@
   </section>
 
   </section>
+
+  <!-- ===== Library: sources, metadata, languages, browsing ===== -->
+  <section class="card group">
+    <h3>Library</h3>
+    <p class="lead muted small">Where media comes from and how it is presented.</p>
+  <!-- Library -->
+  <section class="subcard">
+    <h3>Sources</h3>
+    <!-- One row per place media lives. Hidden entirely while there is only
+         one, so a setup that never wants a second never sees the concept. -->
+    {#if cfg.library.sources.length > 1 || sel > 0}
+      <div class="srcbar">
+        {#each cfg.library.sources as x, i (x.id)}
+          <button class="chip" class:on={i === sel} onclick={() => selectSource(i)}>
+            {x.name?.trim() || `Source ${i + 1}`}
+          </button>
+        {/each}
+        <button class="chip add" onclick={addSource}>+ Add source</button>
+      </div>
+    {/if}
+
+    {#if src}
+      <label>Name</label>
+      <input bind:value={src.name} spellcheck="false" placeholder="Shows" />
+
+      <!-- Two answers, because these are the only two places bytes live.
+           A catalogue is chosen separately, below. -->
+      <div class="segc" role="radiogroup" aria-label="Where the media is">
+        <button class:on={src.provider === 'filesystem'}
+                onclick={() => (src.provider = 'filesystem')}>A folder</button>
+        <button class:on={src.provider === 'smb'}
+                onclick={() => (src.provider = 'smb')}>SMB share</button>
+      </div>
+
+    {#if src.provider === 'smb'}
+      <label>Server (hostname, IP, or a full smb:// address)</label>
+      <input bind:value={src.smb.host} spellcheck="false"
+             placeholder="nas.local  or  smb://user@nas/share/folder"
+             onchange={() => {
+               // A pasted smb:// URL or UNC path distributes into the
+               // fields below, so what you see is exactly what mounts.
+               let h = src.smb.host.trim()
+                 .replace(/^smb:\/\//i, '').replace(/^\\\\/, '').replace(/\\/g, '/');
+               const at = h.indexOf('@');
+               if (at !== -1) {
+                 const cred = h.slice(0, at); h = h.slice(at + 1);
+                 const colon = cred.indexOf(':');
+                 src.smb.username = colon === -1 ? cred : cred.slice(0, colon);
+                 if (colon !== -1) smbPassword = cred.slice(colon + 1);
+                 src.smb.guest = false;
+               }
+               const segs = h.split('/').filter(Boolean);
+               if (segs.length > 1) {
+                 src.smb.host = segs[0];
+                 src.smb.share = segs[1];
+                 src.smb.path = segs.slice(2).join('/');
+               } else {
+                 src.smb.host = segs[0] ?? '';
+               }
+             }} />
+      <label>Share name</label>
+      <input bind:value={src.smb.share} spellcheck="false" placeholder="media" />
+      <label>Folder within the share (optional)</label>
+      <input bind:value={src.smb.path} spellcheck="false" placeholder="anime" />
+      <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+        <input type="checkbox" bind:checked={src.smb.guest} style="width:auto" />
+        No password (guest share)
+      </label>
+      {#if !src.smb.guest}
+        <label>Username</label>
+        <input bind:value={src.smb.username} spellcheck="false" />
+        <label>Password</label>
+        <input type="password" bind:value={smbPassword}
+               placeholder={src.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
+      {/if}
+      <p class="muted small" style="margin-top:6px;">
+      Read over the network &mdash; no mount, no privileges, read-only. First playback
+      of each file is slower.
+    </p>
+    {:else}
+      <label>Folders, one per line</label>
+      <textarea rows="3" bind:value={fsRoots} spellcheck="false"></textarea>
+      <div class="actions" style="margin-top:8px;">
+        <button onclick={() => (browsing = true)}>Browse…</button>
+      </div>
+    {/if}
+
+    {#if src.provider !== 'jellyfin'}
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" style="width:auto"
+             checked={src.generateStills ?? stillsDefault(src.provider)}
+             onchange={(e) => (src.generateStills = e.currentTarget.checked)} />
+      Make episode pictures from the video when there are none
+    </label>
+    <p class="muted small">
+      {#if src.provider === 'smb' || src.provider === 'smbmount'}
+        Off by default over a share: one network seek per episode. Cached
+        after the first visit.
+      {:else}
+        About a fifth of a second per episode, then cached.
+      {/if}
+    </p>
+    {/if}
+
+    <div class="actions">
+      <button class="primary" onclick={() => save('library')}>Save</button>
+      <button onclick={testLibrary} disabled={testing === 'library'}>
+        {testing === 'library' ? 'Checking…' : 'Test'}
+      </button>
+      {#if saved === 'library'}<span class="ok small">Saved</span>{/if}
+    </div>
+    {#if libResult}
+      <div class="result" class:bad={!libResult.ok}>
+        {libResult.ok
+          ? `Connected${libResult.serverName ? ` to ${libResult.serverName}` : ''}${libResult.roots ? ` — ${libResult.roots} folder(s)` : ''}`
+          : libResult.error}
+      </div>
+    {/if}
+
+    <div class="srcfoot">
+      {#if cfg.library.sources.length <= 1 && sel === 0}
+        <button onclick={addSource}>Add another source</button>
+        <span class="muted small">A Jellyfin server and a folder can run side by side.</span>
+      {:else}
+        <button class="danger" onclick={() => removeSource(sel)}>Remove this source</button>
+      {/if}
+    </div>
+    {/if}
+  </section>
+
+  <!-- Titles and artwork -->
+  {#if src}
+    <section class="subcard">
+      <h3>Titles and artwork</h3>
+      <p class="muted small" style="margin-top:0">
+        Optional. Without it we use the filenames.
+      </p>
+
+      <div class="segc" role="radiogroup" aria-label="Metadata source">
+        <button class:on={metaProvider === 'none'}
+                onclick={() => setMeta('none')}>Filenames</button>
+        <button class:on={metaProvider === 'jellyfin'}
+                onclick={() => setMeta('jellyfin')}>Jellyfin</button>
+        <button disabled>TheTVDB <span class="tag">soon</span></button>
+      </div>
+
+      {#if metaProvider === 'jellyfin'}
+        <p class="muted small">
+          Jellyfin is a media server. If you run one for this library, it has
+          already fetched the posters and episode order.
+        </p>
+        <label>Address</label>
+        <input bind:value={src.metadata.url} spellcheck="false"
+               placeholder="http://192.168.1.10:8096" />
+        <label>API key</label>
+        <input type="password" bind:value={metaKey}
+               placeholder={src.metadata.apiKey === '__SET__'
+                 ? 'saved — type to replace' : 'Dashboard → API Keys'} />
+        <div class="row" style="margin-top:10px">
+          <button onclick={runMatch} disabled={matching || !src.metadata.url?.trim()}>
+            {matching ? 'Checking…' : 'Check'}
+          </button>
+          {#if src.metadata.pathMap?.length}
+            <span class="muted small">{src.metadata.pathMap.length} rule(s) saved</span>
+          {/if}
+        </div>
+        {#if match}
+          <div class="result" class:bad={!match.ok || match.matched === 0}>
+            {match.ok ? match.description : match.error}
+          </div>
+          {#if match.ok && match.counts}
+            <p class="muted small">
+              Catalogue: {match.counts.catalogue} files · Media: {match.counts.media} files
+            </p>
+          {/if}
+        {:else}
+          <p class="muted small">We work the paths out ourselves. Nothing to type.</p>
+        {/if}
+      {/if}
+
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick={() => save('library')}>Save</button>
+        {#if saved === 'library'}<span class="ok small">Saved</span>{/if}
+      </div>
+    </section>
+  {/if}
+
+  <!-- Languages -->
+  <section class="subcard">
+    <h3>Languages</h3>
+    <p class="muted small">
+      Chosen automatically, like Jellyfin. Change audio or subtitles any time,
+      including mid-episode.
+    </p>
+    <label>Languages you understand</label>
+    {#if options?.languages?.length}
+      <div class="langs">
+        {#each options.languages as l}
+          <button class="chip" class:on={langRank(l.code) >= 0}
+                  onclick={() => toggleLang(l.code)}
+                  title={l.code}>
+            {#if langRank(l.code) >= 0}<span class="pri">{langRank(l.code) + 1}</span>{/if}
+            {l.name}
+          </button>
+        {/each}
+      </div>
+      <p class="muted small">
+      In order of preference &mdash; the first a file offers wins. Used for both dubs
+      and subtitles.
+    </p>
+      <label>Other languages (optional)</label>
+      <input bind:value={extraLangs} onchange={applyExtras} spellcheck="false"
+             placeholder="swe, dan — ISO codes not listed above" />
+      <p class="muted small">Tried after the ones selected above.</p>
+    {:else}
+      <!-- The options fetch failed; fall back to the raw list so the setting
+           stays editable rather than disappearing. -->
+      <input value={(cfg.tracks.languages || []).join(', ')}
+             oninput={(e) => (cfg.tracks.languages = parseList(e.currentTarget.value))}
+             placeholder="eng" spellcheck="false" />
+      <p class="muted small">
+        Used both to pick a dub and to choose a subtitle language.
+      </p>
+    {/if}
+
+    <label>Audio</label>
+    <select bind:value={cfg.tracks.audioMode}>
+      <option value="original">Original language &mdash; Japanese for anime</option>
+      <option value="dubbed">Dubbed into your language when available</option>
+    </select>
+
+    <label>Subtitles</label>
+    <select bind:value={cfg.tracks.subtitleMode}>
+      <option value="auto">Only when you don&rsquo;t understand the audio</option>
+      <option value="always">Always</option>
+      <option value="forced">Forced only &mdash; signs and foreign dialogue</option>
+      <option value="off">Never</option>
+    </select>
+    <p class="muted small">
+      Original audio plus the first subtitle option gives Japanese anime with
+      subtitles and English film with none. Overridable per episode.
+    </p>
+    <div class="actions">
+      <button class="primary" onclick={() => save('tracks')}>Save</button>
+      {#if saved === 'tracks'}<span class="ok small">Saved</span>{/if}
+    </div>
+  </section>
+
+  <!-- Automatic scan -->
+  <section class="subcard">
+    <h3>Automatic scan</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.library.autoRefresh.enabled} style="width:auto"
+ />
+      Scan for new media automatically
+    </label>
+    {#if cfg.library.autoRefresh.enabled}
+      <div style="margin-top:10px; max-width: 260px;">
+        <select bind:value={scanSel} onchange={() => {
+          if (scanSel !== 'custom') cfg.library.autoRefresh.hours = Number(scanSel);
+        }}>
+          {#each SCAN_PRESETS as h}<option value={String(h)}>{scanLabel(h)}</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if scanSel === 'custom'}
+          <label class="row" style="margin-top:8px;">
+            <span>Every</span>
+            <input type="number" min="1" max="168" step="1"
+                   bind:value={cfg.library.autoRefresh.hours}
+                   style="width:80px" />
+            <span>hours</span>
+          </label>
+        {/if}
+      </div>
+    {/if}
+    <p class="muted small">
+      Rescans Jellyfin sources and reloads the shelves, so new episodes appear
+      on their own.
+    </p>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('autoscan')}>Save</button>
+      {#if saved === 'autoscan'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
+
+  <!-- Library display -->
+  <section class="subcard">
+    <h3>Display</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.ui.lazyImages} style="width:auto" />
+      Load artwork only as it scrolls into view
+    </label>
+    <p class="muted small">
+      Mainly for Jellyfin &mdash; folder and SMB libraries only show artwork sitting
+      beside the media.
+    </p>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('ui')}>Save</button>
+      {#if saved === 'ui'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
+
+  </section>
+
+  </div>
+  <div class="col">
 
   <!-- ===== Output: encoder, picture, cushion ===== -->
   <section class="card group">
@@ -1526,309 +1833,6 @@
 
   </section>
 
-  <!-- ===== Library: sources, metadata, languages, browsing ===== -->
-  <section class="card group">
-    <h3>Library</h3>
-    <p class="lead muted small">Where media comes from and how it is presented.</p>
-  <!-- Library -->
-  <section class="subcard">
-    <h3>Sources</h3>
-    <!-- One row per place media lives. Hidden entirely while there is only
-         one, so a setup that never wants a second never sees the concept. -->
-    {#if cfg.library.sources.length > 1 || sel > 0}
-      <div class="srcbar">
-        {#each cfg.library.sources as x, i (x.id)}
-          <button class="chip" class:on={i === sel} onclick={() => selectSource(i)}>
-            {x.name?.trim() || `Source ${i + 1}`}
-          </button>
-        {/each}
-        <button class="chip add" onclick={addSource}>+ Add source</button>
-      </div>
-    {/if}
-
-    {#if src}
-      <label>Name</label>
-      <input bind:value={src.name} spellcheck="false" placeholder="Shows" />
-
-      <!-- Two answers, because these are the only two places bytes live.
-           A catalogue is chosen separately, below. -->
-      <div class="segc" role="radiogroup" aria-label="Where the media is">
-        <button class:on={src.provider === 'filesystem'}
-                onclick={() => (src.provider = 'filesystem')}>A folder</button>
-        <button class:on={src.provider === 'smb'}
-                onclick={() => (src.provider = 'smb')}>SMB share</button>
-      </div>
-
-    {#if src.provider === 'smb'}
-      <label>Server (hostname, IP, or a full smb:// address)</label>
-      <input bind:value={src.smb.host} spellcheck="false"
-             placeholder="nas.local  or  smb://user@nas/share/folder"
-             onchange={() => {
-               // A pasted smb:// URL or UNC path distributes into the
-               // fields below, so what you see is exactly what mounts.
-               let h = src.smb.host.trim()
-                 .replace(/^smb:\/\//i, '').replace(/^\\\\/, '').replace(/\\/g, '/');
-               const at = h.indexOf('@');
-               if (at !== -1) {
-                 const cred = h.slice(0, at); h = h.slice(at + 1);
-                 const colon = cred.indexOf(':');
-                 src.smb.username = colon === -1 ? cred : cred.slice(0, colon);
-                 if (colon !== -1) smbPassword = cred.slice(colon + 1);
-                 src.smb.guest = false;
-               }
-               const segs = h.split('/').filter(Boolean);
-               if (segs.length > 1) {
-                 src.smb.host = segs[0];
-                 src.smb.share = segs[1];
-                 src.smb.path = segs.slice(2).join('/');
-               } else {
-                 src.smb.host = segs[0] ?? '';
-               }
-             }} />
-      <label>Share name</label>
-      <input bind:value={src.smb.share} spellcheck="false" placeholder="media" />
-      <label>Folder within the share (optional)</label>
-      <input bind:value={src.smb.path} spellcheck="false" placeholder="anime" />
-      <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
-        <input type="checkbox" bind:checked={src.smb.guest} style="width:auto" />
-        No password (guest share)
-      </label>
-      {#if !src.smb.guest}
-        <label>Username</label>
-        <input bind:value={src.smb.username} spellcheck="false" />
-        <label>Password</label>
-        <input type="password" bind:value={smbPassword}
-               placeholder={src.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
-      {/if}
-      <p class="muted small" style="margin-top:6px;">
-      Read over the network &mdash; no mount, no privileges, read-only. First playback
-      of each file is slower.
-    </p>
-    {:else}
-      <label>Folders, one per line</label>
-      <textarea rows="3" bind:value={fsRoots} spellcheck="false"></textarea>
-      <div class="actions" style="margin-top:8px;">
-        <button onclick={() => (browsing = true)}>Browse…</button>
-      </div>
-    {/if}
-
-    {#if src.provider !== 'jellyfin'}
-    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
-      <input type="checkbox" style="width:auto"
-             checked={src.generateStills ?? stillsDefault(src.provider)}
-             onchange={(e) => (src.generateStills = e.currentTarget.checked)} />
-      Make episode pictures from the video when there are none
-    </label>
-    <p class="muted small">
-      {#if src.provider === 'smb' || src.provider === 'smbmount'}
-        Off by default over a share: one network seek per episode. Cached
-        after the first visit.
-      {:else}
-        About a fifth of a second per episode, then cached.
-      {/if}
-    </p>
-    {/if}
-
-    <div class="actions">
-      <button class="primary" onclick={() => save('library')}>Save</button>
-      <button onclick={testLibrary} disabled={testing === 'library'}>
-        {testing === 'library' ? 'Checking…' : 'Test'}
-      </button>
-      {#if saved === 'library'}<span class="ok small">Saved</span>{/if}
-    </div>
-    {#if libResult}
-      <div class="result" class:bad={!libResult.ok}>
-        {libResult.ok
-          ? `Connected${libResult.serverName ? ` to ${libResult.serverName}` : ''}${libResult.roots ? ` — ${libResult.roots} folder(s)` : ''}`
-          : libResult.error}
-      </div>
-    {/if}
-
-    <div class="srcfoot">
-      {#if cfg.library.sources.length <= 1 && sel === 0}
-        <button onclick={addSource}>Add another source</button>
-        <span class="muted small">A Jellyfin server and a folder can run side by side.</span>
-      {:else}
-        <button class="danger" onclick={() => removeSource(sel)}>Remove this source</button>
-      {/if}
-    </div>
-    {/if}
-  </section>
-
-  <!-- Titles and artwork -->
-  {#if src}
-    <section class="subcard">
-      <h3>Titles and artwork</h3>
-      <p class="muted small" style="margin-top:0">
-        Optional. Without it we use the filenames.
-      </p>
-
-      <div class="segc" role="radiogroup" aria-label="Metadata source">
-        <button class:on={metaProvider === 'none'}
-                onclick={() => setMeta('none')}>Filenames</button>
-        <button class:on={metaProvider === 'jellyfin'}
-                onclick={() => setMeta('jellyfin')}>Jellyfin</button>
-        <button disabled>TheTVDB <span class="tag">soon</span></button>
-      </div>
-
-      {#if metaProvider === 'jellyfin'}
-        <p class="muted small">
-          Jellyfin is a media server. If you run one for this library, it has
-          already fetched the posters and episode order.
-        </p>
-        <label>Address</label>
-        <input bind:value={src.metadata.url} spellcheck="false"
-               placeholder="http://192.168.1.10:8096" />
-        <label>API key</label>
-        <input type="password" bind:value={metaKey}
-               placeholder={src.metadata.apiKey === '__SET__'
-                 ? 'saved — type to replace' : 'Dashboard → API Keys'} />
-        <div class="row" style="margin-top:10px">
-          <button onclick={runMatch} disabled={matching || !src.metadata.url?.trim()}>
-            {matching ? 'Checking…' : 'Check'}
-          </button>
-          {#if src.metadata.pathMap?.length}
-            <span class="muted small">{src.metadata.pathMap.length} rule(s) saved</span>
-          {/if}
-        </div>
-        {#if match}
-          <div class="result" class:bad={!match.ok || match.matched === 0}>
-            {match.ok ? match.description : match.error}
-          </div>
-          {#if match.ok && match.counts}
-            <p class="muted small">
-              Catalogue: {match.counts.catalogue} files · Media: {match.counts.media} files
-            </p>
-          {/if}
-        {:else}
-          <p class="muted small">We work the paths out ourselves. Nothing to type.</p>
-        {/if}
-      {/if}
-
-      <div class="row" style="margin-top:12px">
-        <button class="primary" onclick={() => save('library')}>Save</button>
-        {#if saved === 'library'}<span class="ok small">Saved</span>{/if}
-      </div>
-    </section>
-  {/if}
-
-  <!-- Languages -->
-  <section class="subcard">
-    <h3>Languages</h3>
-    <p class="muted small">
-      Chosen automatically, like Jellyfin. Change audio or subtitles any time,
-      including mid-episode.
-    </p>
-    <label>Languages you understand</label>
-    {#if options?.languages?.length}
-      <div class="langs">
-        {#each options.languages as l}
-          <button class="chip" class:on={langRank(l.code) >= 0}
-                  onclick={() => toggleLang(l.code)}
-                  title={l.code}>
-            {#if langRank(l.code) >= 0}<span class="pri">{langRank(l.code) + 1}</span>{/if}
-            {l.name}
-          </button>
-        {/each}
-      </div>
-      <p class="muted small">
-      In order of preference &mdash; the first a file offers wins. Used for both dubs
-      and subtitles.
-    </p>
-      <label>Other languages (optional)</label>
-      <input bind:value={extraLangs} onchange={applyExtras} spellcheck="false"
-             placeholder="swe, dan — ISO codes not listed above" />
-      <p class="muted small">Tried after the ones selected above.</p>
-    {:else}
-      <!-- The options fetch failed; fall back to the raw list so the setting
-           stays editable rather than disappearing. -->
-      <input value={(cfg.tracks.languages || []).join(', ')}
-             oninput={(e) => (cfg.tracks.languages = parseList(e.currentTarget.value))}
-             placeholder="eng" spellcheck="false" />
-      <p class="muted small">
-        Used both to pick a dub and to choose a subtitle language.
-      </p>
-    {/if}
-
-    <label>Audio</label>
-    <select bind:value={cfg.tracks.audioMode}>
-      <option value="original">Original language &mdash; Japanese for anime</option>
-      <option value="dubbed">Dubbed into your language when available</option>
-    </select>
-
-    <label>Subtitles</label>
-    <select bind:value={cfg.tracks.subtitleMode}>
-      <option value="auto">Only when you don&rsquo;t understand the audio</option>
-      <option value="always">Always</option>
-      <option value="forced">Forced only &mdash; signs and foreign dialogue</option>
-      <option value="off">Never</option>
-    </select>
-    <p class="muted small">
-      Original audio plus the first subtitle option gives Japanese anime with
-      subtitles and English film with none. Overridable per episode.
-    </p>
-    <div class="actions">
-      <button class="primary" onclick={() => save('tracks')}>Save</button>
-      {#if saved === 'tracks'}<span class="ok small">Saved</span>{/if}
-    </div>
-  </section>
-
-  <!-- Automatic scan -->
-  <section class="subcard">
-    <h3>Automatic scan</h3>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.library.autoRefresh.enabled} style="width:auto"
- />
-      Scan for new media automatically
-    </label>
-    {#if cfg.library.autoRefresh.enabled}
-      <div style="margin-top:10px; max-width: 260px;">
-        <select bind:value={scanSel} onchange={() => {
-          if (scanSel !== 'custom') cfg.library.autoRefresh.hours = Number(scanSel);
-        }}>
-          {#each SCAN_PRESETS as h}<option value={String(h)}>{scanLabel(h)}</option>{/each}
-          <option value="custom">Custom</option>
-        </select>
-        {#if scanSel === 'custom'}
-          <label class="row" style="margin-top:8px;">
-            <span>Every</span>
-            <input type="number" min="1" max="168" step="1"
-                   bind:value={cfg.library.autoRefresh.hours}
-                   style="width:80px" />
-            <span>hours</span>
-          </label>
-        {/if}
-      </div>
-    {/if}
-    <p class="muted small">
-      Rescans Jellyfin sources and reloads the shelves, so new episodes appear
-      on their own.
-    </p>
-      <div class="row" style="margin-top:12px">
-      <button class="primary" onclick={() => save('autoscan')}>Save</button>
-      {#if saved === 'autoscan'}<span class="ok small">Saved</span>{/if}
-    </div>
-</section>
-
-  <!-- Library display -->
-  <section class="subcard">
-    <h3>Display</h3>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.ui.lazyImages} style="width:auto" />
-      Load artwork only as it scrolls into view
-    </label>
-    <p class="muted small">
-      Mainly for Jellyfin &mdash; folder and SMB libraries only show artwork sitting
-      beside the media.
-    </p>
-      <div class="row" style="margin-top:12px">
-      <button class="primary" onclick={() => save('ui')}>Save</button>
-      {#if saved === 'ui'}<span class="ok small">Saved</span>{/if}
-    </div>
-</section>
-
-  </section>
-
   <!-- ===== Studio: the engine behind the Studio tab ===== -->
   <section class="card group">
     <h3>Studio</h3>
@@ -1929,6 +1933,10 @@
   </section>
   </section>
 
+
+
+  </div>
+
   </div>
   {/if}
   {#if browsing}
@@ -1948,13 +1956,17 @@
   .wrap { max-width: 1120px; margin: 0 auto; }
   section { margin-bottom: 16px; }
 
-  /* One centered column of five group cards. The old sixteen-card page used
-     a two-column masonry; five tall groups read better stacked, and the
-     grouping already gives the page its structure. */
-  .cols { max-width: 760px; margin: 0 auto; }
+  /* Two explicit columns of group cards — curated, not masonry: with only
+     five cards of very different heights the browser's own balancing
+     reorders the visual flow, so the pairing is chosen by hand instead.
+     Left: the streaming concerns (Broadcast, Studio, System). Right: the
+     machine and the content (Output, Library). */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+          align-items: start; }
+  .col { min-width: 0; }
   .simplecol { max-width: 640px; margin: 0 auto; }
   .pagehead { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-              max-width: 760px; margin: 0 auto 6px; }
+              margin: 0 0 26px; }
   .pagehead h1 { margin: 0; flex: 1; }
   .pagehead .segc { margin-top: 0; }
 
@@ -1985,6 +1997,7 @@
 
   @media (max-width: 900px) {
     .wrap { max-width: 680px; }
+    .cols { grid-template-columns: 1fr; }
   }
   section h3 {
     margin: 0 0 4px; padding-bottom: 10px;
