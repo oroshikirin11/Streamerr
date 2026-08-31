@@ -609,8 +609,11 @@
         <label class="pick"><input type="radio" bind:group={provider} value="smb" /> SMB share</label>
       </div>
       {#if provider === 'smb'}
-        <p class="muted">
-          Read over the network — no mount, no privileges, read-only.
+        <p class="muted small">
+          Read over the network &mdash; no mount, no privileges, read-only.
+          <em>Experimental, and prone to slowness</em>: first playbacks and
+          heavy titles take longer to prepare. A local folder is the fast
+          path when you have one.
         </p>
         <label>Server (hostname, IP, or a full smb:// address)</label>
         <input bind:value={smbHost} spellcheck="false"

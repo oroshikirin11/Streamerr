@@ -1203,8 +1203,10 @@
                placeholder={src.smb.password === '__SET__' ? 'leave blank to keep the saved password' : ''} />
       {/if}
       <p class="muted small" style="margin-top:6px;">
-      Read over the network &mdash; no mount, no privileges, read-only. First playback
-      of each file is slower.
+      Read over the network &mdash; no mount, no privileges, read-only.
+      <em>Experimental, and prone to slowness</em>: first playback of each file
+      reads it in full, and heavy titles take longer to prepare. A local
+      folder is the fast path when you have one.
     </p>
     {:else}
       <label>Folders, one per line</label>

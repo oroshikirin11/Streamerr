@@ -670,6 +670,11 @@
 <svelte:window on:keydown={onKey} />
 
 <div class="wrap">
+  <p class="softnote">
+    Overlays are <em>experimental</em>: an enabled item changes the encoding
+    pipeline &mdash; it can cost performance on small machines, and HDR titles
+    fall back to SDR while anything must be drawn.
+  </p>
   <div class="head">
     <h1>Studio</h1>
     <!-- Three groups, because these buttons do three unrelated things:
@@ -1036,6 +1041,11 @@
 </div>
 
 <style>
+  .softnote {
+    font-size: 12.5px; color: var(--muted); margin: 0 0 10px;
+    max-width: 72ch;
+  }
+
   /* Wider than the other pages on purpose: this one is a viewer, and the
      picture is the point. The side columns are fixed, so every extra pixel
      of window goes to the stage rather than to the panels. */
