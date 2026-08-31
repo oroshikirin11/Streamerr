@@ -57,10 +57,11 @@
   ];
   const pictureCurrent = $derived.by(() => {
     if (!cfg) return null;
-    // Simple's posture includes the classic overlay engine: the armed
-    // compositor is an advanced trade (it can demote HDR and cost a 4K
-    // title its realtime margin), so a config running it is "customized".
-    if (cfg.encoder?.overlayPipe !== false) return null;
+    // Simple's posture has no studio overlays: an enabled item changes the
+    // pipeline (it can demote HDR), so a config carrying one is
+    // "customized" until the operator picks a lever, which switches every
+    // item off.
+    if ((cfg.overlay?.items ?? []).some((i) => i?.enabled)) return null;
     const c = cfg.encoder?.codec || 'h264';
     if (c === 'hevc' && cfg.encoder?.hdrOutput) return 'best';
     if (c === 'h264') return 'compat';
@@ -78,12 +79,15 @@
     } else {
       cfg.encoder.codec = 'h264';
     }
-    // Every Simple posture runs the classic overlay engine: an armed
-    // compositor is what demoted HDR and drained a 4K title tonight —
-    // exactly the class of surprise Simple exists to rule out.
-    cfg.encoder.overlayPipe = false;
     syncPickers();
     await save('encoder');
+    // Simple means no studio overlays: an enabled item (even hidden) can
+    // demote HDR and change the pipeline. The lever switches every item
+    // off; the items themselves stay in Studio, one click from returning.
+    if ((cfg.overlay?.items ?? []).some((i) => i?.enabled)) {
+      cfg.overlay.items = cfg.overlay.items.map((i) => ({ ...i, enabled: false }));
+      await api.saveConfig({ overlay: { items: cfg.overlay.items } });
+    }
   }
   async function applyTiming(n) {
     setBuffer(n);
@@ -98,9 +102,9 @@
   const pictureDiff = (id) => (id === 'best'
     ? [['Codec', 'H.265'], ['HDR output', 'on'],
       ['Passthrough limit', 'at least 30 Mbps'],
-      ['Overlay engine', 'classic — applies restart behind the buffer']]
+      ['Studio overlays', 'all switched off']]
     : [['Codec', 'H.264'],
-      ['Overlay engine', 'classic — applies restart behind the buffer']]);
+      ['Studio overlays', 'all switched off']]);
 
   function setBuffer(n) {
     const secs = Math.min(60, Math.max(1, Math.round(Number(n) || 15)));
@@ -624,7 +628,8 @@
           deinterlace: cfg.encoder.deinterlace || 'auto',
           frameSize: frameSize,
           hwDecode: Boolean(cfg.encoder.hwDecode),
-          overlayPipe: cfg.encoder.overlayPipe !== false,
+          overlayPipe: cfg.encoder.overlayPipe === 'always'
+            ? 'always' : cfg.encoder.overlayPipe !== false,
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
       }
@@ -755,7 +760,7 @@
   <div class="simplecol">
     <section class="card">
       <h3>Picture</h3>
-      <p class="lead muted small">What quality the stream aims for. Studio and library are never touched.</p>
+      <p class="lead muted small">What quality the stream aims for. Picking a lever switches all studio overlays off.</p>
       <div class="choices">
         {#each PICTURE_LEVERS as l}
           <button type="button" class="choice" class:on={pictureCurrent === l.id}
@@ -1726,16 +1731,29 @@
       loss for 8-bit H.264 on a strong one. Measure it.
     </p>
 
-    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
-      <input type="checkbox" bind:checked={cfg.encoder.overlayPipe} style="width:auto" />
-      Live overlay compositor
-    </label>
+    <label>Live overlay compositor</label>
+    <select value={cfg.encoder.overlayPipe === 'always' ? 'always'
+        : cfg.encoder.overlayPipe !== false ? 'auto' : 'off'}
+      onchange={(e) => {
+        cfg.encoder.overlayPipe = e.currentTarget.value === 'always' ? 'always'
+          : e.currentTarget.value === 'auto';
+      }}>
+      <option value="always">Always on — subtitle and studio changes apply live, every broadcast</option>
+      <option value="auto">When studio items exist — otherwise the classic paths run</option>
+      <option value="off">Off — the classic engine; every change restarts behind the buffer</option>
+    </select>
     <p class="muted small">
-      On: Studio changes reach the stream without restarting the encoder
-      (subtitle and overlay changes apply live). Off: the classic engine
-      from before the compositor &mdash; every Studio change restarts the
-      source behind the buffer. Takes effect from the next episode or the
-      next broadcast.
+      {#if cfg.encoder.overlayPipe === 'always'}
+        The compositor runs even with nothing to draw, so switching subtitles
+        on mid-episode is seamless instead of a rebuild. A title that cannot
+        afford the pass sheds it on its own.
+      {:else if cfg.encoder.overlayPipe !== false}
+        With no studio items enabled, a mid-episode subtitle switch takes the
+        classic rebuild. Pick Always for live subtitle switching everywhere.
+      {:else}
+        The engine from before the compositor. Takes effect from the next
+        episode or broadcast.
+      {/if}
     </p>
 
     <div class="g3" style="margin-top:6px">
