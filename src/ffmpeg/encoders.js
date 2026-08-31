@@ -311,6 +311,11 @@ export const audioArgs = (p, { trimTo = null, head = false } = {}) => [
  * reinterprets every later one in that timebase.
  */
 export const scaleFilter = (p) =>
-  `scale=${p.width}:${p.height}:force_original_aspect_ratio=decrease,`
+  // force_divisible_by=2: fitting 3836x2072 into 1920x1038 lands on
+  // 1920x1037, and an odd dimension is illegal for 4:2:0 chroma — zscale
+  // (the HDR tonemap) refuses it outright and SVT-AV1 dies with a bare
+  // -22. The pad absorbs the one-pixel difference exactly like any other
+  // letterbox remainder.
+  `scale=${p.width}:${p.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,`
   + `pad=${p.width}:${p.height}:(ow-iw)/2:(oh-ih)/2:color=black,`
   + `setsar=1,fps=${p.fps}`;

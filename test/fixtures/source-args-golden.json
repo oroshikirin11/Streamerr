@@ -559,7 +559,7 @@
   "-i",
   "/app/overlays/airfryer.png",
   "-filter_complex",
-  "[0:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=24000/1001[o];[1:v]format=rgba,scale=384:-2[img0];[o][img0]overlay=x=abs(mod((192.000*(t+29.035))\\,2*(W-w))-(W-w)):y=abs(mod((192.000*(t+29.035))\\,2*(H-h))-(H-h)):eof_action=repeat:format=auto[vi];[vi]format=nv12,hwupload[v]",
+  "[0:v:0]scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=24000/1001[o];[1:v]format=rgba,scale=384:-2[img0];[o][img0]overlay=x=abs(mod((192.000*(t+29.035))\\,2*(W-w))-(W-w)):y=abs(mod((192.000*(t+29.035))\\,2*(H-h))-(H-h)):eof_action=repeat:format=auto[vi];[vi]format=nv12,hwupload[v]",
   "-map",
   "[v]",
   "-map",
