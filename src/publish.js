@@ -101,7 +101,18 @@ export function targetUrl(protocol, creds = {}) {
     // caller: we dial out. Every hosted SRT ingest documented (Cloudflare,
     // Mux, Restream) is a listener, so this is the only mode that reaches
     // one. A self-hosted relay can be told to listen.
-    const q = ['mode=caller', `latency=${clampLatency(creds.latencyMs)}`];
+    //
+    // payload_size 1128 (6 x 188, TS-aligned), not the 1316 default: SRT
+    // never fragments its own packets, so a path whose MTU is below
+    // 1316+28 — every WireGuard/tailscale hop is 1280 — IP-fragments each
+    // one, and losing either fragment loses the whole packet OUTSIDE
+    // SRT's loss accounting. Measured on the deployment: ping -M do
+    // capped between 1252 and 1316, and the viewer showed HEVC slice
+    // smears while the encoder and the local log were provably clean.
+    // 1128 fits under every real-world tunnel MTU; the cost is ~2% more
+    // packet overhead.
+    const q = ['mode=caller', 'payload_size=1128',
+      `latency=${clampLatency(creds.latencyMs)}`];
     const sid = String(creds.streamId ?? '').trim();
     if (sid) { bad(sid, 'stream id'); q.push(`streamid=${sid}`); }
     const pass = String(creds.passphrase ?? '').trim();
