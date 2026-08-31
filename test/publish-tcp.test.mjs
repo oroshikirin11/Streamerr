@@ -4,6 +4,7 @@ import { createServer } from 'net';
 import { connect } from 'net';
 import {
   muxerFor, protocolCarries, targetUrl, destinations, publishDefaults,
+  redactPublish, restorePublishSecrets,
 } from '../src/publish.js';
 import { TcpBridge, TCP_PREAMBLE } from '../src/ffmpeg/tcp-bridge.js';
 
@@ -34,6 +35,39 @@ test('tcp protocol table', () => {
   assert.equal(dests[0].protocol, 'tcp');
 });
 
+test('tcp passphrase: preamble form, validation, creds plumbing, masking', () => {
+  // Two-token line only when a passphrase exists; single-token otherwise.
+  assert.equal(TCP_PREAMBLE('k1'), 'SGR-TS/1 k1\n');
+  assert.equal(TCP_PREAMBLE('k1', 'pass-123456'), 'SGR-TS/1 k1 pass-123456\n');
+
+  // It rides a space-delimited line: spaces and newlines are refused.
+  assert.throws(() => targetUrl('tcp',
+    { url: 'tcp://h:1', key: 'k123456', passphrase: 'has space here' }), /spaces/);
+  assert.throws(() => targetUrl('tcp',
+    { url: 'tcp://h:1', key: 'k 123456' }), /spaces/);
+
+  // The destination creds the bridge will read must CARRY the passphrase —
+  // primary and extras both.
+  const pub = { ...publishDefaults(), protocol: 'tcp' };
+  pub.tcp = { url: 'tcp://h:9711', key: 'k123456', passphrase: 'pp-1234567' };
+  pub.extras = [{ id: 'x1', enabled: true, protocol: 'tcp',
+    url: 'tcp://h2:9711', key: 'k2', passphrase: 'pp-2234567' }];
+  const dests = destinations(pub, 'hevc');
+  assert.equal(dests[0].creds.passphrase, 'pp-1234567');
+  assert.equal(dests[1].creds.passphrase, 'pp-2234567');
+
+  // Round trip: masked on the way out, restored from the sentinel on the
+  // way back — a saved passphrase must survive an unrelated settings save.
+  const masked = redactPublish(pub);
+  assert.equal(masked.tcp.key, '__SET__');
+  assert.equal(masked.tcp.passphrase, '__SET__');
+  assert.equal(masked.extras[0].passphrase, '__SET__');
+  const restored = restorePublishSecrets(
+    JSON.parse(JSON.stringify(masked)), pub);
+  assert.equal(restored.tcp.passphrase, 'pp-1234567');
+  assert.equal(restored.extras[0].passphrase, 'pp-2234567');
+});
+
 test('tcp bridge authenticates then splices; remote death fails the local side', async () => {
   // A fake receiver that records everything it is sent.
   const got = [];
@@ -43,7 +77,7 @@ test('tcp bridge authenticates then splices; remote death fails the local side',
   const rport = receiver.address().port;
 
   const bridge = new TcpBridge(() => (
-    { url: `tcp://127.0.0.1:${rport}`, key: 'sekrit99' }
+    { url: `tcp://127.0.0.1:${rport}`, key: 'sekrit99', passphrase: 'pp-abcdef1' }
   ));
   const lport = await bridge.listen();
 
@@ -54,8 +88,8 @@ test('tcp bridge authenticates then splices; remote death fails the local side',
   await new Promise((r) => setTimeout(r, 150));
 
   const all = Buffer.concat(got).toString();
-  assert.ok(all.startsWith(TCP_PREAMBLE('sekrit99')),
-    `preamble first, got: ${JSON.stringify(all.slice(0, 30))}`);
+  assert.ok(all.startsWith(TCP_PREAMBLE('sekrit99', 'pp-abcdef1')),
+    `preamble first, got: ${JSON.stringify(all.slice(0, 40))}`);
   assert.ok(all.endsWith('AAAA-payload-BBBB'), 'payload follows the preamble');
 
   // Remote hangs up -> the local side must die so publisher supervision

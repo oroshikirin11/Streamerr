@@ -98,8 +98,10 @@ export class TcpBridge {
     remote.on('timeout', () => drop(
       `no answer from ${m[1]}:${m[2]} within 10s — port filtered, `
       + 'receiver down, or firewall closed'));
+    let connectedAt = 0;
     remote.on('connect', () => {
       remote.setTimeout(0);
+      connectedAt = Date.now();
       this.log(`[tcp-bridge] connected to ${m[1]}:${m[2]} — authenticated, splicing\n`);
       remote.write(TCP_PREAMBLE(String(key ?? ''), String(passphrase ?? '').trim()));
       local.pipe(remote);
@@ -110,7 +112,18 @@ export class TcpBridge {
     // keep the socket draining so a chatty peer cannot backpressure us.
     remote.on('data', () => {});
     remote.on('error', (err) => drop(`remote ${m[1]}:${m[2]}: ${err.message}`));
-    remote.on('close', () => drop(null));
+    /**
+     * A close seconds after the preamble is the receiver REJECTING us — it
+     * cannot say why over this contract, but the shortlist is short, so
+     * spell it out; without this the operator sees only a silent restart
+     * loop. A close later than that is an ordinary mid-stream drop and the
+     * supervision restart says everything there is to say.
+     */
+    remote.on('close', () => drop(
+      connectedAt && Date.now() - connectedAt < 3000
+        ? `${m[1]}:${m[2]} closed right after the preamble — wrong stream `
+          + 'key or passphrase, or a broadcast is already running there'
+        : null));
     local.on('error', () => drop(null));
     local.on('close', () => remote.destroy());
   }

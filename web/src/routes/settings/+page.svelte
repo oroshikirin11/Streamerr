@@ -48,7 +48,7 @@
    * anything the operator did not type into — which is exactly what the
    * server expects, and how the Owncast key field has always behaved.
    */
-  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key'] };
+  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key', 'passphrase'] };
   let publishSaved = $state({});
 
   /**
@@ -752,6 +752,10 @@
       <label>Stream key</label>
       <input type="password" bind:value={cfg.publish.tcp.key}
              placeholder={savedHint('tcp.key') ?? 'from your server'} />
+
+      <label>Passphrase <span class="muted small">optional, 10–79 characters, no spaces</span></label>
+      <input type="password" bind:value={cfg.publish.tcp.passphrase}
+             placeholder={savedHint('tcp.passphrase') ?? 'if the receiver demands one'} />
       <p class="muted small">
         Raw MPEG-TS over plain TCP: every codec, and reliable on an upload
         whose UDP loss SRT cannot ride out — lost packets retransmit instead
@@ -795,6 +799,10 @@
         {:else}
           <input type="password" bind:value={ex.key}
                  placeholder={savedHint(`x.${ex.id}.key`) ?? 'stream key'} />
+        {/if}
+        {#if ex.protocol === 'tcp'}
+          <input type="password" bind:value={ex.passphrase}
+                 placeholder={savedHint(`x.${ex.id}.passphrase`) ?? 'passphrase (if the receiver demands one)'} />
         {/if}
       </div>
     {/each}

@@ -43,7 +43,7 @@ export function publishDefaults() {
      * bridge: ffmpeg writes to 127.0.0.1, the bridge dials the real
      * target, sends `SGR-TS/1 <key>\n` and splices bytes from there.
      */
-    tcp: { url: '', key: '' },
+    tcp: { url: '', key: '', passphrase: '' },
     // Additional destinations, fanned out from the one encode.
     extras: [],
   };
@@ -330,7 +330,8 @@ export function publishOutputArgs(dests, { videoBitrate = null, codec = 'h264' }
 
 /** Secret fields on a destination, by protocol. */
 const PUBLISH_SECRETS = {
-  rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key'],
+  rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'],
+  tcp: ['key', 'passphrase'],
 };
 
 export function redactPublish(publish) {
