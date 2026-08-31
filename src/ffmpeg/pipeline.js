@@ -1095,7 +1095,14 @@ export class PipelinePlayout extends EventEmitter {
         this._ovFeed?.headPts?.() ?? 0);
       const cached = this._cachedSubs(item.srcPath);
       const overlayFile = this._overlayFile(item, 0);
-      const overlayImages = this._overlayImages(item, shift);
+      /**
+       * Timed windows are diffed against the canvas clock, which is
+       * clip-relative — NOT this swap's continuation point. Subtracting
+       * `shift` here moved every intro/outro window by the swap position,
+       * so a timed picture could reappear or vanish after a mid-clip
+       * apply. The initial spawn passes the clip offset; so must swaps.
+       */
+      const overlayImages = this._overlayImages(item, this._pipeClipOffset ?? 0);
       const spec = buildRendererSpec({
         profile: this.profile,
         selection: this.selection,
@@ -4609,12 +4616,21 @@ export function buildRendererSpec({
     ? `[0:v]setpts=PTS+${sh}/TB,${band ? band.filter : sub.filter}:alpha=1,`
       + `setpts=PTS-STARTPTS+${rebase}/TB,format=rgba`
     : `[0:v]setpts=PTS+${rebase}/TB`;
+  /**
+   * phase must complete the canvas clock back to CLIP time, and the canvas
+   * clock is rebase-based: t = clipTime - (clipOffset ?? shift). Passing
+   * `shift` here double-counted the continuation point — right at the
+   * initial spawn (where shift == clipOffset) and wrong by (shift -
+   * clipOffset) at every swap, so each show/hide teleported a bouncing
+   * picture along its path by exactly the swap position.
+   */
   const movers = canvasImageChain(movingImgs, {
-    width: rect.w, firstInput: 1, inLabel: 'sub0', outLabel: 'mv', phase: shift,
+    width: rect.w, firstInput: 1, inLabel: 'sub0', outLabel: 'mv',
+    phase: clipOffset ?? shift,
   });
   const stillsRaw = canvasImageChain(stillImgs, {
     width: rect.w, firstInput: 1 + movingImgs.length,
-    inLabel: 'sub', outLabel: 'cv', phase: shift,
+    inLabel: 'sub', outLabel: 'cv', phase: clipOffset ?? shift,
   });
   // Two chains mint img0/ov0 labels independently; keep the stills' unique.
   const imgs = {
