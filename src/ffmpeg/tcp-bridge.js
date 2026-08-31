@@ -25,8 +25,15 @@
 
 import { createConnection, createServer } from 'net';
 
-/** The receiver contract's greeting. Version first so it can ever change. */
-export const TCP_PREAMBLE = (key) => `SGR-TS/1 ${key}\n`;
+/**
+ * The receiver contract's greeting. Version first so it can ever change.
+ * With a passphrase the line is `SGR-TS/1 <key> <passphrase>` — the second
+ * token is the receiver's optional TCP passphrase; a receiver without one
+ * configured ignores it.
+ */
+export const TCP_PREAMBLE = (key, passphrase = '') => (passphrase
+  ? `SGR-TS/1 ${key} ${passphrase}\n`
+  : `SGR-TS/1 ${key}\n`);
 
 export class TcpBridge {
   /**
@@ -58,7 +65,7 @@ export class TcpBridge {
   }
 
   _bridge(local) {
-    const { url, key } = this._creds() ?? {};
+    const { url, key, passphrase } = this._creds() ?? {};
     const m = /^tcp:\/\/([^/\s:]+):(\d+)$/i.exec(String(url ?? '').trim());
     if (!m) {
       this.log('[tcp-bridge] no valid tcp:// target configured — closing\n');
@@ -94,7 +101,7 @@ export class TcpBridge {
     remote.on('connect', () => {
       remote.setTimeout(0);
       this.log(`[tcp-bridge] connected to ${m[1]}:${m[2]} — authenticated, splicing\n`);
-      remote.write(TCP_PREAMBLE(String(key ?? '')));
+      remote.write(TCP_PREAMBLE(String(key ?? ''), String(passphrase ?? '').trim()));
       local.pipe(remote);
       local.resume();
     });

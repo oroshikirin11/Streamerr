@@ -144,7 +144,12 @@ export function targetUrl(protocol, creds = {}) {
     }
     const key = String(creds.key ?? '').trim();
     if (!key) throw new Error('The stream key is empty');
-    if (/[\r\n]/.test(key)) throw new Error('The stream key cannot contain line breaks');
+    if (/[\r\n ]/.test(key)) throw new Error('The stream key cannot contain spaces or line breaks');
+    // The optional passphrase rides the same preamble line as a second
+    // token, so it has the same character rules.
+    if (/[\r\n ]/.test(String(creds.passphrase ?? '').trim())) {
+      throw new Error('A TCP passphrase cannot contain spaces or line breaks');
+    }
     /**
      * The key is deliberately NOT in this URL: ffmpeg never sees the real
      * target. The engine's bridge (tcp-bridge.js) dials it, authenticates
