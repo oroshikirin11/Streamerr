@@ -605,8 +605,8 @@
     {:else if step === 2}
       <h2>Where is your media?</h2>
       <div class="row">
-        <label class="pick"><input type="radio" bind:group={provider} value="filesystem" /> A folder</label>
-        <label class="pick"><input type="radio" bind:group={provider} value="smb" /> SMB share</label>
+        <label class="pick"><input type="radio" bind:group={provider} value="filesystem" /> A folder &mdash; recommended</label>
+        <label class="pick"><input type="radio" bind:group={provider} value="smb" /> SMB share &mdash; experimental</label>
       </div>
       {#if provider === 'smb'}
         <p class="muted small">

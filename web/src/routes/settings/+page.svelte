@@ -1156,9 +1156,11 @@
            A catalogue is chosen separately, below. -->
       <div class="segc" role="radiogroup" aria-label="Where the media is">
         <button class:on={src.provider === 'filesystem'}
-                onclick={() => (src.provider = 'filesystem')}>A folder</button>
+                onclick={() => (src.provider = 'filesystem')}>A folder
+          <span class="tag">recommended</span></button>
         <button class:on={src.provider === 'smb'}
-                onclick={() => (src.provider = 'smb')}>SMB share</button>
+                onclick={() => (src.provider = 'smb')}>SMB share
+          <span class="tag">experimental</span></button>
       </div>
 
     {#if src.provider === 'smb'}
