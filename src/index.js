@@ -1727,7 +1727,17 @@ app.post('/api/match/library', async (req, res) => {
     if (!media?.provider) return res.status(400).json({ error: 'No media source given' });
     if (!jellyfin?.url) return res.status(400).json({ error: 'No Jellyfin address given' });
 
-    const mediaLib = makeLibrary({ library: { sources: [media] } }).sources[0]?.lib;
+    /**
+     * The media half arrives with the same '__SET__' sentinels as any
+     * save — the panel never holds a real secret. Building a library
+     * straight from it probed the share with the literal sentinel as the
+     * password; the share then listed nothing, and the match reported
+     * "the source listed no files" against a perfectly healthy library —
+     * so the rules could never be derived and every paired playback died
+     * at the bridge with an ffprobe 5XX.
+     */
+    const [restored] = restoreSourceSecrets([media]);
+    const mediaLib = makeLibrary({ library: { sources: [restored] } }).sources[0]?.lib;
     if (typeof mediaLib?.allPaths !== 'function') {
       return res.status(400).json({ error: 'This media source cannot be matched yet' });
     }
@@ -2501,6 +2511,51 @@ stillSweeper = new StillSweeper({
 stillSweeper.start();
 
 scheduleAutoScan();
+
+/**
+ * Derive the path rules a paired source is missing, once, at boot.
+ *
+ * A catalogue paired with a share cannot resolve a single file without
+ * them, and the operator-facing derivation lives behind a Check button a
+ * setup can easily skip — the symptom is then an ffprobe 5XX on every
+ * play, which reads as a network fault, not a missing step. The server
+ * holds the real credentials and both halves of the comparison, so it can
+ * answer the question itself: enumerate, match, and persist the rules if
+ * the libraries agree. Detached and per-source fault-isolated — a share
+ * that is down at boot just logs and stays unhealed until next boot or a
+ * manual Check.
+ */
+(async function healPairedMappings() {
+  for (const src of config.library?.sources ?? []) {
+    if (src.metadata?.provider !== 'jellyfin' || src.provider === 'jellyfin') continue;
+    if (src.metadata.pathMap?.length) continue;
+    if (!src.metadata.url) continue;
+    try {
+      const mediaLib = makeLibrary({ library: { sources: [{ ...src, metadata: null }] } })
+        .sources[0]?.lib;
+      if (typeof mediaLib?.allPaths !== 'function') continue;
+      const jf = new JellyfinLibrary({ url: src.metadata.url, apiKey: src.metadata.apiKey });
+      const [reported, local] = await Promise.all([jf.allPaths(), mediaLib.allPaths()]);
+      if (!reported.length || !local.length) continue;
+      const result = deriveMapping(reported, local);
+      // Identity mappings derive as zero rules and need no save; only a
+      // real translation, backed by real matches, is worth persisting.
+      if (!result.rules?.length || !result.matched) continue;
+      // Re-read the live source: a Settings save may have landed while the
+      // shares were being walked, and its rules then win.
+      const cur = (config.library?.sources ?? []).find((s) => s.id === src.id);
+      if (!cur || cur.metadata?.pathMap?.length) continue;
+      const sources = config.library.sources.map((s) => (s.id === src.id
+        ? { ...s, metadata: { ...s.metadata, pathMap: result.rules } } : s));
+      saveConfig({ library: { ...config.library, sources } });
+      refreshLibrary();
+      dpush('info', `[library] "${src.name}": derived ${result.rules.length} path rule(s) `
+        + `automatically — ${result.matched}/${result.total} files matched`);
+    } catch (err) {
+      dpush('warn', `[library] "${src.name}": could not derive path rules — ${err.message}`);
+    }
+  }
+}()).catch((err) => dpush('warn', `[library] mapping heal failed: ${err?.message ?? err}`));
 
 const { port, host } = config.server;
 server.listen(port, host, () => {
