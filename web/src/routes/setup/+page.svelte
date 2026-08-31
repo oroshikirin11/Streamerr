@@ -21,11 +21,25 @@
    * than the legacy owncast fields — otherwise a new install could only ever
    * be set up for RTMP and had to go and find Settings to use anything else.
    */
-  const PROTOCOLS = [{ id: 'rtmp', label: 'RTMP' }, { id: 'rtmps', label: 'RTMPS' }, { id: 'srt', label: 'SRT' }];
+  const PROTOCOLS = [
+    { id: 'tcp', label: 'TCP' }, { id: 'rtmp', label: 'RTMP' },
+    { id: 'rtmps', label: 'RTMPS' }, { id: 'srt', label: 'SRT' },
+  ];
+  const MODERN_CARRIERS = ['srt', 'tcp'];
   let protocol = $state('rtmp');
+  /**
+   * The codec is part of the connection: it decides which protocols can
+   * carry the stream, so it is chosen here and the buttons below follow.
+   */
+  let codec = $state('h264');
+  function chooseCodec(c) {
+    codec = c;
+    if (c !== 'h264' && !MODERN_CARRIERS.includes(protocol)) protocol = 'tcp';
+  }
   let srtUrl = $state('');
   let srtStreamId = $state('');
   let srtPassphrase = $state('');
+  let tcpPassphrase = $state('');
 
   function publishPatch() {
     const slot = {};
@@ -34,8 +48,11 @@
       if (srtStreamId.trim()) slot.streamId = srtStreamId.trim();
       if (srtPassphrase.trim()) slot.passphrase = srtPassphrase.trim();
     } else {
+      // rtmp, rtmps and tcp all speak "address + stream key"; tcp adds an
+      // optional passphrase on top.
       if (rtmpUrl.trim()) slot.url = rtmpUrl.trim();
       if (streamKey.trim()) slot.key = streamKey.trim();
+      if (protocol === 'tcp' && tcpPassphrase.trim()) slot.passphrase = tcpPassphrase.trim();
     }
     // Nothing typed: record the choice of protocol and touch no credentials.
     if (!Object.keys(slot).length) return { publish: { protocol } };
@@ -55,6 +72,22 @@
   let width = $state(1920);
   let height = $state(1080);
   let fps = $state(30);
+  // The same presets the settings page offers — a bare width/height pair
+  // asks a newcomer to know broadcast dimensions by heart.
+  const RES_PRESETS = [
+    { key: '2160p', label: '2160p (4K)', w: 3840, h: 2160 },
+    { key: '1440p', label: '1440p', w: 2560, h: 1440 },
+    { key: '1080p', label: '1080p — recommended', w: 1920, h: 1080 },
+    { key: '720p', label: '720p — weak hardware', w: 1280, h: 720 },
+    { key: '480p', label: '480p', w: 854, h: 480 },
+  ];
+  let resSel = $state('1080p');
+  function chooseRes() {
+    const r = RES_PRESETS.find((x) => x.key === resSel);
+    if (r) { width = r.w; height = r.h; }
+  }
+  const FPS_PRESETS = [24, 25, 30, 48, 50, 60];
+  let fpsSel = $state('30');
   let videoBitrate = $state('4500k');
   /**
    * Presets with a Custom escape, the same shape the settings page uses.
@@ -217,6 +250,7 @@
       // only the legacy one showed an empty box for an install configured
       // the new way — and step one then wrote that emptiness back.
       protocol = cfg.publish?.protocol || 'rtmp';
+      codec = cfg.encoder?.codec || 'h264';
       rtmpUrl = cfg.publish?.[protocol]?.url || cfg.owncast.rtmpUrl || '';
       srtUrl = cfg.publish?.srt?.url || '';
       keyStored = cfg.owncast.streamKey === '__SET__';
@@ -224,6 +258,8 @@
       backend = cfg.encoder.backend;
       width = cfg.encoder.width; height = cfg.encoder.height;
       fps = cfg.encoder.fps; videoBitrate = cfg.encoder.videoBitrate;
+      resSel = RES_PRESETS.find((r) => r.w === +width && r.h === +height)?.key ?? 'custom';
+      fpsSel = FPS_PRESETS.includes(+fps) ? String(+fps) : 'custom';
       vbrSel = VBR_PRESETS.includes(String(videoBitrate)) ? String(videoBitrate) : 'custom';
       if (cfg.encoder.device) device = cfg.encoder.device;
       /**
@@ -349,7 +385,8 @@
          * conditional for the same reason; the address needed to be too.
          */
         ...publishPatch(),
-        encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate, device },
+        encoder: { backend, width: +width, height: +height, fps: +fps, videoBitrate, device,
+          codec },
         library: libraryPayload(),
         tracks: cfgTracks,
       };
@@ -382,14 +419,25 @@
     {#if step === 0}
       <h2>Where does the stream go?</h2>
       <p class="muted">
-        Owncast speaks RTMP. Pick RTMPS if your server requires TLS, or SRT for
-        a relay or a link that drops packets. You can change this later and add
-        more destinations in Settings.
+        Owncast speaks RTMP; pick RTMPS if your server requires TLS. SRT and
+        TCP carry every codec (H.265, AV1) — SRT for relays, TCP for a link
+        whose packet loss shows up as picture artifacts. You can change this
+        later and add more destinations in Settings.
       </p>
+      <label>Codec</label>
+      <select bind:value={codec} onchange={() => chooseCodec(codec)}>
+        <option value="h264">H.264 — universal; every protocol and player</option>
+        <option value="hevc">H.265 — 2/3 the bandwidth; needs TCP or SRT</option>
+        <option value="av1">AV1 — half the bandwidth; patchy; software encode</option>
+      </select>
+
       <label>Protocol</label>
       <div class="protos">
         {#each PROTOCOLS as pr}
           <button type="button" class="proto" class:on={protocol === pr.id}
+                  disabled={codec !== 'h264' && !MODERN_CARRIERS.includes(pr.id)}
+                  title={codec !== 'h264' && !MODERN_CARRIERS.includes(pr.id)
+                    ? `${pr.label} cannot carry this codec` : undefined}
                   onclick={() => (protocol = pr.id)}>{pr.label}</button>
         {/each}
       </div>
@@ -409,7 +457,9 @@
       {:else}
       <label>Server address</label>
       <input bind:value={rtmpUrl} spellcheck="false"
-             placeholder={protocol === 'rtmps' ? 'rtmps://stream.example.com:443/live' : 'rtmp://192.168.1.10:1935/live'} />
+             placeholder={protocol === 'rtmps' ? 'rtmps://stream.example.com:443/live'
+               : protocol === 'tcp' ? 'tcp://ingest.example.com:9711'
+                 : 'rtmp://192.168.1.10:1935/live'} />
       <label>Stream key</label>
       <div class="row">
         {#if showKey}
@@ -427,8 +477,13 @@
       {#if keyStored && !streamKey}
         <p class="muted small">A key is saved. It is never sent back to the browser.</p>
       {/if}
+      {#if protocol === 'tcp'}
+        <label>Passphrase <span class="muted small">optional, 10–79 characters, no spaces</span></label>
+        <input type="password" bind:value={tcpPassphrase}
+               placeholder="if the receiver demands one" />
       {/if}
-      {#if protocol !== 'srt'}
+      {/if}
+      {#if protocol !== 'srt' && protocol !== 'tcp'}
       <div class="row">
         <button onclick={() => testOwncast(false)} disabled={!!testing || !rtmpUrl}>
           {testing === 'quick' ? 'Checking…' : 'Test connection'}
@@ -481,9 +536,27 @@
         <p class="muted small">ffmpeg {encoders.ffmpeg}{encoders.recursionDepth ? '' : ' — no recursion_depth, playlists are capped at 10 clips'}</p>
       {/if}
       <div class="grid4">
-        <div><label>Width</label><input type="number" bind:value={width} /></div>
-        <div><label>Height</label><input type="number" bind:value={height} /></div>
-        <div><label>FPS</label><input type="number" bind:value={fps} /></div>
+        <div>
+          <label>Resolution</label>
+          <select bind:value={resSel} onchange={chooseRes}>
+            {#each RES_PRESETS as r}<option value={r.key}>{r.label}</option>{/each}
+            <option value="custom">Custom</option>
+          </select>
+          {#if resSel === 'custom'}
+            <input type="number" bind:value={width} aria-label="Width" placeholder="width" style="margin-top:6px" />
+            <input type="number" bind:value={height} aria-label="Height" placeholder="height" style="margin-top:6px" />
+          {/if}
+        </div>
+        <div>
+          <label>Framerate</label>
+          <select bind:value={fpsSel} onchange={() => { if (fpsSel !== 'custom') fps = Number(fpsSel); }}>
+            {#each FPS_PRESETS as f}<option value={String(f)}>{f} fps</option>{/each}
+            <option value="custom">Custom</option>
+          </select>
+          {#if fpsSel === 'custom'}
+            <input type="number" min="1" max="240" bind:value={fps} aria-label="Exact framerate" style="margin-top:6px" />
+          {/if}
+        </div>
         <div>
           <label>Video bitrate</label>
           <select bind:value={vbrSel}

@@ -15,10 +15,10 @@
   let streamKey = $state('');
 
   const PROTOCOL_INFO = [
+    { id: 'tcp', label: 'TCP' },
     { id: 'rtmp', label: 'RTMP' },
     { id: 'rtmps', label: 'RTMPS' },
     { id: 'srt', label: 'SRT' },
-    { id: 'tcp', label: 'TCP' },
   ];
   // Protocols that can carry a non-H.264 codec — mirror of the server's
   // protocolCarries(): container-honest transports only.

@@ -11,7 +11,7 @@
  */
 
 /** Protocols that can be published to, in the order the UI offers them. */
-export const PROTOCOLS = ['rtmp', 'rtmps', 'srt', 'tcp'];
+export const PROTOCOLS = ['tcp', 'rtmp', 'rtmps', 'srt'];
 
 /** Fields that must never be logged, echoed to a client, or put in an error. */
 export const SECRET_FIELDS = ['key', 'passphrase', 'streamId'];
