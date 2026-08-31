@@ -1742,21 +1742,23 @@
         cfg.encoder.overlayPipe = e.currentTarget.value === 'always' ? 'always'
           : e.currentTarget.value === 'auto';
       }}>
-      <option value="always">Always on — subtitle and studio changes apply live, every broadcast</option>
-      <option value="auto">When studio items exist — otherwise the classic paths run</option>
-      <option value="off">Off — the classic engine; every change restarts behind the buffer</option>
+      <option value="off">Off — the classic engine; every change lands behind the buffer</option>
+      <option value="auto">When studio items exist — experimental; otherwise the classic engine runs</option>
+      <option value="always">Always on — experimental; the compositor arms on every broadcast</option>
     </select>
     <p class="muted small">
       {#if cfg.encoder.overlayPipe === 'always'}
-        The compositor runs even with nothing to draw, so switching subtitles
-        on mid-episode is seamless instead of a rebuild. A title that cannot
-        afford the pass sheds it on its own.
+        Experimental. The compositor runs even with nothing to draw, so studio
+        applies are live from the first show. A title that cannot afford the
+        pass sheds it on its own.
       {:else if cfg.encoder.overlayPipe !== false}
-        With no studio items enabled, a mid-episode subtitle switch takes the
-        classic rebuild. Pick Always for live subtitle switching everywhere.
+        Experimental. Studio changes apply live while items exist; without
+        any, the classic engine runs. Subtitle and audio switches land behind
+        the buffer in every mode.
       {:else}
-        The engine from before the compositor. Takes effect from the next
-        episode or broadcast.
+        The proven engine. Subtitle, audio and studio changes apply behind
+        the buffer — viewers never see a seam; the change surfaces as the
+        cushion drains.
       {/if}
     </p>
 

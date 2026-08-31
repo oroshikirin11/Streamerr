@@ -1046,11 +1046,28 @@ export class PipelinePlayout extends EventEmitter {
       this._detached(this._extract(item).finally(() => {
         if (this._stopping || this._selToken !== tok) return;
         if (this.current?.item !== item || this.status !== 'running') return;
-        // Flush first — it rewinds the playhead to the last aired moment —
-        // then read the position, so the new track picks up exactly where
-        // the picture is rather than where the encoder had run ahead to.
-        this._bankFlush();
-        this._play(item, this.position, { duration: dur });
+        // The bank SURVIVES a track change — the same trade the classic
+        // overlay apply makes, for the same reason. Flushing put the new
+        // track on air instantly but left the publisher with nothing to
+        // send for the whole respawn: a cover card locally, a buffering
+        // spinner for every viewer. Keeping the cushion, the new track
+        // appends behind the buffer and surfaces when it drains — a
+        // forward seam the publisher's pacer tolerates, and no seam at
+        // all for viewers. `applySeconds` bounds the wait, as it does
+        // for overlays.
+        const rewound = this._bankTrimTo(this.applySeconds ?? this.bufferSeconds);
+        const gop = this._bankTrimToAccessPoint();
+        // Never behind what has already gone out: those bytes are spent.
+        const resume = Math.max(this.aired ?? 0, this.position - rewound - gop);
+        const ahead = Math.max(0, resume - (this.aired ?? resume));
+        this.emit('log', `[tracks] applied — on air in ~${ahead.toFixed(1)}s `
+          + (rewound > 0.05
+            ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
+            : gop > 0
+              ? `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`
+              : '(cushion kept)')
+          + '\n');
+        this._play(item, resume, { duration: dur });
       }), 'changing tracks');
     }
     this.emit('selection', selection);
