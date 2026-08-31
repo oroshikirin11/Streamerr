@@ -34,6 +34,64 @@
   const BUFFER_PRESETS = [5, 10, 15, 30, 45, 60];
   let bufferSel = $state('15');
 
+  /**
+   * Simple mode: two orthogonal levers instead of the full page. A lever
+   * writes the same config Advanced edits and saves immediately — there is
+   * no second source of truth. Which view you were in last is remembered.
+   */
+  let viewMode = $state('simple');
+  function setView(m) {
+    viewMode = m;
+    try { localStorage.setItem('jsr-settings-mode', m); } catch { /* private mode */ }
+  }
+  const PICTURE_LEVERS = [
+    { id: 'best', name: 'Best',
+      desc: 'H.265, HDR kept, originals ship untouched when they fit the link.' },
+    { id: 'compat', name: 'Compatible',
+      desc: 'H.264 — plays on every device, ~1.5× the bandwidth.' },
+  ];
+  const TIMING_LEVERS = [
+    { id: 30, name: 'Smooth', desc: '30 s cushion. Nothing interrupts the show.' },
+    { id: 15, name: 'Balanced', desc: '15 s cushion. The default trade.' },
+    { id: 5, name: 'Snappy', desc: '5 s cushion. Chat and stream feel close.' },
+  ];
+  const pictureCurrent = $derived.by(() => {
+    if (!cfg) return null;
+    const c = cfg.encoder?.codec || 'h264';
+    if (c === 'hevc' && cfg.encoder?.hdrOutput) return 'best';
+    if (c === 'h264') return 'compat';
+    return null;
+  });
+  const timingCurrent = $derived.by(() => (cfg
+    && TIMING_LEVERS.some((t) => t.id === cfg.buffer?.seconds) ? cfg.buffer.seconds : null));
+  async function applyPicture(id) {
+    if (id === 'best') {
+      cfg.encoder.codec = 'hevc';
+      cfg.encoder.hdrOutput = true;
+      // Passthrough is half the point of Best; a limit below the default
+      // would silently keep re-encoding, so it is lifted — never lowered.
+      if (+cfg.encoder.copyLimitKbps < 30000) cfg.encoder.copyLimitKbps = 30000;
+    } else {
+      cfg.encoder.codec = 'h264';
+    }
+    syncPickers();
+    await save('encoder');
+  }
+  async function applyTiming(n) {
+    setBuffer(n);
+    // The lever sets the whole timing posture, not just the depth: apply
+    // point at the full cushion is the shipped default (seamless applies),
+    // and without this a trip through Snappy would pin it low forever.
+    cfg.buffer.applySeconds = n;
+    bufferSel = String(n);
+    await save('timing');
+  }
+  /** The lever's diff, shown under "what this sets". */
+  const pictureDiff = (id) => (id === 'best'
+    ? [['Codec', 'H.265'], ['HDR output', 'on'],
+      ['Passthrough limit', 'at least 30 Mbps']]
+    : [['Codec', 'H.264']]);
+
   function setBuffer(n) {
     const secs = Math.min(60, Math.max(1, Math.round(Number(n) || 15)));
     cfg.buffer.seconds = secs;
@@ -189,6 +247,10 @@
   const VBR_PRESETS = ['2000k', '3000k', '4500k', '6000k', '8000k', '12000k', '16000k'];
   const ABR_PRESETS = ['96k', '128k', '160k', '192k', '256k'];
   const SCAN_PRESETS = [6, 12, 24, 48, 168];
+  // Passthrough-limit choices, labeled in Mbps: the number is really "how
+  // much of the link a raw file may claim", so it reads in link units.
+  const CLIM_PRESETS = [10000, 15000, 20000, 26000, 30000, 40000, 50000];
+  const CHUNK_PRESETS = [10, 20, 30, 60];
   const scanLabel = (h) => (h === 168 ? 'Weekly' : h === 24 ? 'Daily' : `Every ${h} hours`);
 
   /** Server-supplied choices: the language table and the real /dev/dri nodes. */
@@ -200,6 +262,8 @@
   let vbrSel = $state('6000k');
   let abrSel = $state('160k');
   let scanSel = $state('12');
+  let climSel = $state('30000');
+  let chunkSel = $state('20');
   let devSel = $state('/dev/dri/renderD128');
   /**
    * A render node's path says nothing about which GPU it is — the numbering
@@ -269,6 +333,8 @@
     syncVbr();
     abrSel = pick(ABR_PRESETS, brKey(cfg.encoder.audioBitrate));
     scanSel = pick(SCAN_PRESETS, cfg.library.autoRefresh.hours);
+    climSel = pick(CLIM_PRESETS, +cfg.encoder.copyLimitKbps || 30000);
+    chunkSel = pick(CHUNK_PRESETS, +cfg.encoder.chunkSeconds || 20);
     const devs = options?.renderDevices ?? [];
     devSel = devs.includes(cfg.encoder.device) ? cfg.encoder.device : 'custom';
     const offered = new Set((options?.languages ?? []).map((l) => l.code));
@@ -343,7 +409,11 @@
     if (r) { cfg.encoder.width = r.w; cfg.encoder.height = r.h; }
   }
 
-  onMount(load);
+  onMount(() => {
+    try { viewMode = localStorage.getItem('jsr-settings-mode') ?? 'simple'; }
+    catch { /* private mode */ }
+    load();
+  });
 
   async function load() {
     try {
@@ -558,6 +628,14 @@
       // Two cards write to the same block; the server merges, so each sends
       // only the keys it owns and neither can clobber the other's.
       if (section === 'buffer') patch.buffer = { seconds: cfg.buffer.seconds };
+      // The Simple Timing lever: depth and the studio apply point move
+      // together (setBuffer clamps), so both keys ride one save.
+      if (section === 'timing') {
+        patch.buffer = {
+          seconds: cfg.buffer.seconds,
+          applySeconds: cfg.buffer.applySeconds,
+        };
+      }
       if (section === 'studio') {
         patch.buffer = {
           applySeconds: cfg.buffer.applySeconds,
@@ -648,17 +726,81 @@
 
 
 <div class="wrap">
-<h1>Settings</h1>
+<div class="pagehead">
+  <h1>Settings</h1>
+  <div class="segc" role="radiogroup" aria-label="Settings view">
+    <button type="button" class:on={viewMode === 'simple'}
+            onclick={() => setView('simple')}>Simple</button>
+    <button type="button" class:on={viewMode !== 'simple'}
+            onclick={() => setView('advanced')}>Advanced</button>
+  </div>
+</div>
 
 {#if !cfg}
   <p class="muted">Loading…</p>
 {:else}
   {#if error}<p class="err">{error}</p>{/if}
 
+  {#if viewMode === 'simple'}
+  <div class="simplecol">
+    <section class="card">
+      <h3>Picture</h3>
+      <p class="lead muted small">What quality the stream aims for. Studio and library are never touched.</p>
+      <div class="choices">
+        {#each PICTURE_LEVERS as l}
+          <button type="button" class="choice" class:on={pictureCurrent === l.id}
+                  onclick={() => applyPicture(l.id)}>
+            <span class="cname">{l.name}</span>
+            <span class="cdesc">{l.desc}</span>
+          </button>
+        {/each}
+      </div>
+      <details class="diff">
+        <summary>what this sets</summary>
+        <ul>
+          {#each pictureDiff(pictureCurrent ?? 'best') as [k, v]}
+            <li>{k} → <b>{v}</b></li>
+          {/each}
+        </ul>
+      </details>
+      {#if pictureCurrent === null}
+        <p class="driftline">Picture is <b>customized</b> in Advanced — it stays yours until you
+          pick a lever.</p>
+      {/if}
+      {#if saved === 'encoder'}<p class="ok small">Saved</p>{/if}
+    </section>
+
+    <section class="card">
+      <h3>Timing</h3>
+      <p class="lead muted small">How much safety cushion the broadcast keeps between encoder and air.</p>
+      <div class="choices">
+        {#each TIMING_LEVERS as l}
+          <button type="button" class="choice" class:on={timingCurrent === l.id}
+                  onclick={() => applyTiming(l.id)}>
+            <span class="cname">{l.name}</span>
+            <span class="cdesc">{l.desc}</span>
+          </button>
+        {/each}
+      </div>
+      {#if timingCurrent === null}
+        <p class="driftline">Timing is <b>customized</b> in Advanced ({cfg.buffer.seconds} s) — it
+          stays yours until you pick a lever.</p>
+      {/if}
+      {#if saved === 'timing'}<p class="ok small">Saved</p>{/if}
+    </section>
+
+    <p class="muted small">A lever writes the same settings Advanced shows and saves right away.
+      Everything else — connection, library, studio — lives in Advanced.</p>
+  </div>
+  {:else}
   <div class="cols">
-  <!-- Broadcast destination -->
-  <section class="card">
+
+  <!-- ===== Broadcast: connection, receivers, metadata ===== -->
+  <section class="card group">
     <h3>Broadcast</h3>
+    <p class="lead muted small">Where the stream goes and what carries it.</p>
+  <!-- Broadcast destination -->
+  <section class="subcard">
 
     <!-- The codec is part of the connection — it decides which protocol
          can carry the stream — so it lives here and the protocol follows
@@ -817,78 +959,82 @@
     </div>
   </section>
 
-  <!-- Buffer -->
-  <section class="card">
-    <h3>Buffer</h3>
-    <p class="muted small" style="margin-top:0">
-      Encoded video held ahead of air. Deeper survives a title that cannot keep
-      up; shallower applies changes sooner and wastes less on a skip. GPU path only.
-    </p>
-
-    <label>Depth</label>
-    <div style="max-width: 260px;">
-      <select bind:value={bufferSel} onchange={() => {
-        if (bufferSel !== 'custom') setBuffer(Number(bufferSel));
-      }}>
-        {#each BUFFER_PRESETS as n}<option value={String(n)}>{n} seconds</option>{/each}
-        <option value="custom">Custom</option>
-      </select>
-      {#if bufferSel === 'custom'}
-        <label class="row" style="margin-top:8px;">
-          <input type="number" min="1" max="60" step="1" value={cfg.buffer.seconds}
-                 oninput={(e) => setBuffer(+e.currentTarget.value)} style="width:80px" />
-          <span>seconds</span>
-        </label>
-      {/if}
-    </div>
-    <div class="row" style="margin-top:12px">
-      <button class="primary" onclick={() => save('buffer')}>Save</button>
-      {#if saved === 'buffer'}<span class="ok small">Saved</span>{/if}
-    </div>
-  </section>
-
-  <!-- Studio -->
-  <section class="card">
-    <h3>Studio</h3>
-
-    <label>
-      Overlay changes go on air
-      <span class="muted small">
-        {cfg.buffer.applySeconds < 1
-          ? 'immediately'
-          : `after about ${cfg.buffer.applySeconds}s`}
-      </span>
-    </label>
-    <input type="range" min="0" max={cfg.buffer.seconds} step="1"
-           value={cfg.buffer.applySeconds}
-           oninput={(e) => { cfg.buffer.applySeconds = +e.currentTarget.value; }} />
+  <!-- Streamingestarr -->
+  <section class="subcard">
+    <h3>Now-playing &amp; artwork push</h3>
     <p class="muted small">
-      {#if cfg.buffer.applySeconds >= cfg.buffer.seconds}
-        Nothing discarded, no interruption. Safest.
-      {:else if cfg.buffer.applySeconds < 1}
-        Cushion dropped &mdash; viewers re-buffer while the encoder catches up.
-      {:else}
-        Part of the cushion is re-encoded. Fine while the encoder stays ahead.
-      {/if}
-      Maximum is the buffer depth, {cfg.buffer.seconds}s.
+      Our own receiver. Beyond the video, it takes structured
+      now&#8209;playing, up&#8209;next and schedule metadata &mdash; the
+      theater page shows real titles with a live progress ring instead of a
+      stream title. Works alongside the Owncast integration.
     </p>
 
-    <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
-      <input type="checkbox" bind:checked={cfg.buffer.studioWarnings} style="width:auto" />
-      Show encoder cost warnings in Studio
+    <label style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" style="width:auto"
+             checked={cfg.streamingestarr?.enabled !== false}
+             onchange={(e) => { cfg.streamingestarr = { ...(cfg.streamingestarr ?? {}), enabled: e.target.checked }; }} />
+      Push metadata to a Streamingestarr receiver
     </label>
-    <p class="muted small">
-      The red notes in Studio about moving pictures and GIFs. The console report
-      is unaffected.
-    </p>
-    <div class="row" style="margin-top:12px">
-      <button class="primary" onclick={() => save('studio')}>Save</button>
-      {#if saved === 'studio'}<span class="ok small">Saved</span>{/if}
+
+    {#if cfg.streamingestarr?.enabled !== false}
+      {#each cfg.streamingestarr?.receivers ?? [] as rc (rc.id)}
+        <div class="extra">
+          <div class="extrahead">
+            <label style="display:flex; align-items:center; gap:8px; margin:0;">
+              <input type="checkbox" bind:checked={rc.enabled} style="width:auto" />
+              <input bind:value={rc.name} spellcheck="false" maxlength="40"
+                     placeholder="nickname — e.g. VPS theater" style="width:auto" />
+            </label>
+            <button type="button" class="danger" onclick={() => {
+              cfg.streamingestarr.receivers = cfg.streamingestarr.receivers.filter((x) => x.id !== rc.id);
+            }}>Remove</button>
+          </div>
+          <input bind:value={rc.url} spellcheck="false" placeholder="https://stream.example.com" />
+          <input type="password" bind:value={rc.accessToken}
+                 placeholder={sgSaved[rc.id] && !rc.accessToken ? 'leave blank to keep the saved token' : 'access token (system-messages scope)'} />
+          <div class="actions" style="margin-top:2px;">
+            <button onclick={async () => {
+              sgTests = { ...sgTests, [rc.id]: null };
+              try {
+                sgTests = { ...sgTests, [rc.id]: await api.post('/api/check/streamingestarr', {
+                  url: rc.url,
+                  ...(rc.accessToken ? { accessToken: rc.accessToken }
+                    : sgSaved[rc.id] ? {} : {}),
+                  ...(rc.accessToken ? {} : { receiverId: rc.id }),
+                }) };
+              } catch (err) { sgTests = { ...sgTests, [rc.id]: { ok: false, error: err.message } }; }
+            }} disabled={!!testing}>Test</button>
+          </div>
+          {#if sgTests[rc.id]}
+            <div class="result" class:bad={!sgTests[rc.id].ok}>
+              {#if sgTests[rc.id].ok}
+                {@const c = sgTests[rc.id].caps}
+                Connected &mdash; apiVersion {c.apiVersion}.
+                Ingest: RTMP :{c.ingest?.rtmpPort}{c.ingest?.srtEnabled ? `, SRT :${c.ingest?.srtPort}` : ''}.
+                Metadata: {[c.metadata?.nowPlaying && 'now playing', c.metadata?.schedule && 'schedule', c.metadata?.artwork && 'artwork'].filter(Boolean).join(' + ')}.
+              {:else}
+                {sgTests[rc.id].error}
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/each}
+      <button type="button" onclick={() => {
+        cfg.streamingestarr.receivers = [...(cfg.streamingestarr?.receivers ?? []), {
+          id: 'r' + Math.random().toString(36).slice(2, 8),
+          name: '', url: '', accessToken: '', enabled: true,
+        }];
+      }}>Add a receiver</button>
+    {/if}
+
+    <div class="actions">
+      <button class="primary" onclick={() => save('streamingestarr')}>Save</button>
+      {#if saved === 'streamingestarr'}<span class="ok small">Saved</span>{/if}
     </div>
   </section>
 
   <!-- Owncast -->
-  <section class="card">
+  <section class="subcard">
     <h3>Owncast title sync</h3>
 
     <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
@@ -964,83 +1110,15 @@
     {/if}
   </section>
 
-  <!-- Streamingestarr -->
-  <section class="card">
-    <h3>Streamingestarr</h3>
-    <p class="muted small">
-      Our own receiver. Beyond the video, it takes structured
-      now&#8209;playing, up&#8209;next and schedule metadata &mdash; the
-      theater page shows real titles with a live progress ring instead of a
-      stream title. Works alongside the Owncast integration.
-    </p>
-
-    <label style="display:flex; align-items:center; gap:8px;">
-      <input type="checkbox" style="width:auto"
-             checked={cfg.streamingestarr?.enabled !== false}
-             onchange={(e) => { cfg.streamingestarr = { ...(cfg.streamingestarr ?? {}), enabled: e.target.checked }; }} />
-      Push metadata to a Streamingestarr receiver
-    </label>
-
-    {#if cfg.streamingestarr?.enabled !== false}
-      {#each cfg.streamingestarr?.receivers ?? [] as rc (rc.id)}
-        <div class="extra">
-          <div class="extrahead">
-            <label style="display:flex; align-items:center; gap:8px; margin:0;">
-              <input type="checkbox" bind:checked={rc.enabled} style="width:auto" />
-              <input bind:value={rc.name} spellcheck="false" maxlength="40"
-                     placeholder="nickname — e.g. VPS theater" style="width:auto" />
-            </label>
-            <button type="button" class="danger" onclick={() => {
-              cfg.streamingestarr.receivers = cfg.streamingestarr.receivers.filter((x) => x.id !== rc.id);
-            }}>Remove</button>
-          </div>
-          <input bind:value={rc.url} spellcheck="false" placeholder="https://stream.example.com" />
-          <input type="password" bind:value={rc.accessToken}
-                 placeholder={sgSaved[rc.id] && !rc.accessToken ? 'leave blank to keep the saved token' : 'access token (system-messages scope)'} />
-          <div class="actions" style="margin-top:2px;">
-            <button onclick={async () => {
-              sgTests = { ...sgTests, [rc.id]: null };
-              try {
-                sgTests = { ...sgTests, [rc.id]: await api.post('/api/check/streamingestarr', {
-                  url: rc.url,
-                  ...(rc.accessToken ? { accessToken: rc.accessToken }
-                    : sgSaved[rc.id] ? {} : {}),
-                  ...(rc.accessToken ? {} : { receiverId: rc.id }),
-                }) };
-              } catch (err) { sgTests = { ...sgTests, [rc.id]: { ok: false, error: err.message } }; }
-            }} disabled={!!testing}>Test</button>
-          </div>
-          {#if sgTests[rc.id]}
-            <div class="result" class:bad={!sgTests[rc.id].ok}>
-              {#if sgTests[rc.id].ok}
-                {@const c = sgTests[rc.id].caps}
-                Connected &mdash; apiVersion {c.apiVersion}.
-                Ingest: RTMP :{c.ingest?.rtmpPort}{c.ingest?.srtEnabled ? `, SRT :${c.ingest?.srtPort}` : ''}.
-                Metadata: {[c.metadata?.nowPlaying && 'now playing', c.metadata?.schedule && 'schedule', c.metadata?.artwork && 'artwork'].filter(Boolean).join(' + ')}.
-              {:else}
-                {sgTests[rc.id].error}
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/each}
-      <button type="button" onclick={() => {
-        cfg.streamingestarr.receivers = [...(cfg.streamingestarr?.receivers ?? []), {
-          id: 'r' + Math.random().toString(36).slice(2, 8),
-          name: '', url: '', accessToken: '', enabled: true,
-        }];
-      }}>Add a receiver</button>
-    {/if}
-
-    <div class="actions">
-      <button class="primary" onclick={() => save('streamingestarr')}>Save</button>
-      {#if saved === 'streamingestarr'}<span class="ok small">Saved</span>{/if}
-    </div>
   </section>
 
-  <!-- Encoder -->
-  <section class="card">
+  <!-- ===== Output: encoder, picture, cushion ===== -->
+  <section class="card group">
     <h3>Output</h3>
+    <p class="lead muted small">What the encoder produces, and the cushion behind it.
+      Encoder choices apply from the next broadcast; the buffer applies live.</p>
+  <!-- Encoder -->
+  <section class="subcard">
     <div class="g3">
       <div>
         <label>Resolution</label>
@@ -1142,9 +1220,18 @@
       </p>
     {/if}
 
-    <label>Passthrough limit <span class="muted small">kbps</span></label>
-    <input class="exact" type="number" min="1000" max="200000" step="1000"
-           bind:value={cfg.encoder.copyLimitKbps} aria-label="Passthrough limit in kbps" />
+    <label>Passthrough limit</label>
+    <select bind:value={climSel} onchange={() => {
+      if (climSel !== 'custom') cfg.encoder.copyLimitKbps = Number(climSel);
+    }}>
+      {#each CLIM_PRESETS as k}<option value={String(k)}>{k / 1000} Mbps</option>{/each}
+      <option value="custom">Custom</option>
+    </select>
+    {#if climSel === 'custom'}
+      <input class="exact" type="number" min="1000" max="200000" step="1000"
+             bind:value={cfg.encoder.copyLimitKbps} aria-label="Passthrough limit in kbps"
+             placeholder="kbps" />
+    {/if}
     <p class="muted small">
       HEVC files under this rate ship untouched (zero encode cost); denser
       ones are re-encoded at the bitrate above. Set it to what the LINK to
@@ -1337,8 +1424,17 @@
     <div class="g3" style="margin-top:6px">
       <div></div>
       <div>
-        <label>Chunk length (s)</label>
-        <input type="number" min="4" max="120" bind:value={cfg.encoder.chunkSeconds} />
+        <label>Chunk length</label>
+        <select bind:value={chunkSel} onchange={() => {
+          if (chunkSel !== 'custom') cfg.encoder.chunkSeconds = Number(chunkSel);
+        }}>
+          {#each CHUNK_PRESETS as c}<option value={String(c)}>{c} seconds</option>{/each}
+          <option value="custom">Custom</option>
+        </select>
+        {#if chunkSel === 'custom'}
+          <input class="exact" type="number" min="4" max="120"
+                 bind:value={cfg.encoder.chunkSeconds} aria-label="Exact chunk length" />
+        {/if}
       </div>
     </div>
     <p class="muted small">
@@ -1360,9 +1456,83 @@
     </div>
   </section>
 
-  <!-- Library -->
-  <section class="card">
+  <!-- Buffer -->
+  <section class="subcard">
+    <h3>Buffer</h3>
+    <p class="muted small" style="margin-top:0">
+      Encoded video held ahead of air. Deeper survives a title that cannot keep
+      up; shallower applies changes sooner and wastes less on a skip. GPU path only.
+    </p>
+
+    <label>Depth</label>
+    <div style="max-width: 260px;">
+      <select bind:value={bufferSel} onchange={() => {
+        if (bufferSel !== 'custom') setBuffer(Number(bufferSel));
+      }}>
+        {#each BUFFER_PRESETS as n}<option value={String(n)}>{n} seconds</option>{/each}
+        <option value="custom">Custom</option>
+      </select>
+      {#if bufferSel === 'custom'}
+        <label class="row" style="margin-top:8px;">
+          <input type="number" min="1" max="60" step="1" value={cfg.buffer.seconds}
+                 oninput={(e) => setBuffer(+e.currentTarget.value)} style="width:80px" />
+          <span>seconds</span>
+        </label>
+      {/if}
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('buffer')}>Save</button>
+      {#if saved === 'buffer'}<span class="ok small">Saved</span>{/if}
+    </div>
+  </section>
+
+  <!-- Run-ahead cache -->
+  <section class="subcard">
+    <h3>Run-ahead cache</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.runAhead.enabled} style="width:auto" />
+      Build a deep cushion in RAM when there is spare horsepower
+    </label>
+    <p class="muted small" style="margin-top:6px;">
+      How much encoded video may wait in RAM ahead of air. Off does not stop
+      encoding ahead &mdash; CPU clips still build the head start they need to
+      start at all.
+    </p>
+    {#if cfg.runAhead.enabled}
+      <div style="margin-top:10px; max-width: 320px;">
+        <label>RAM limit (MB)</label>
+        <input type="number" min="64" step="64"
+               placeholder={`auto — recommended ${cfg.recommendedCacheMB ?? '?'} MB`}
+               value={cfg.runAhead.ramMB === 'auto' ? '' : cfg.runAhead.ramMB}
+               onchange={(e) => {
+                 const v = e.currentTarget.value.trim();
+                 cfg.runAhead.ramMB = v === '' ? 'auto' : Number(v);
+               }} />
+        <p class="muted small" style="margin-top:6px;">
+          Empty for auto: {cfg.recommendedCacheMB ?? '?'} MB here. RAM only; if
+          /dev/shm cannot hold it, caching switches off. Applies next broadcast.
+        </p>
+        <p class="muted small" style="margin-top:6px;">
+          Only CPU clips use it &mdash; working ahead is what makes their seeking
+          instant. GPU clips restart in under a second anyway.
+        </p>
+      </div>
+    {/if}
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('runahead')}>Save</button>
+      {#if saved === 'runahead'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
+
+  </section>
+
+  <!-- ===== Library: sources, metadata, languages, browsing ===== -->
+  <section class="card group">
     <h3>Library</h3>
+    <p class="lead muted small">Where media comes from and how it is presented.</p>
+  <!-- Library -->
+  <section class="subcard">
+    <h3>Sources</h3>
     <!-- One row per place media lives. Hidden entirely while there is only
          one, so a setup that never wants a second never sees the concept. -->
     {#if cfg.library.sources.length > 1 || sel > 0}
@@ -1487,7 +1657,7 @@
 
   <!-- Titles and artwork -->
   {#if src}
-    <section class="card">
+    <section class="subcard">
       <h3>Titles and artwork</h3>
       <p class="muted small" style="margin-top:0">
         Optional. Without it we use the filenames.
@@ -1543,7 +1713,7 @@
   {/if}
 
   <!-- Languages -->
-  <section class="card">
+  <section class="subcard">
     <h3>Languages</h3>
     <p class="muted small">
       Chosen automatically, like Jellyfin. Change audio or subtitles any time,
@@ -1603,64 +1773,9 @@
     </div>
   </section>
 
-  <!-- Run-ahead cache -->
-  <section class="card">
-    <h3>Run-ahead cache</h3>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.runAhead.enabled} style="width:auto" />
-      Build a deep cushion in RAM when there is spare horsepower
-    </label>
-    <p class="muted small" style="margin-top:6px;">
-      How much encoded video may wait in RAM ahead of air. Off does not stop
-      encoding ahead &mdash; CPU clips still build the head start they need to
-      start at all.
-    </p>
-    {#if cfg.runAhead.enabled}
-      <div style="margin-top:10px; max-width: 320px;">
-        <label>RAM limit (MB)</label>
-        <input type="number" min="64" step="64"
-               placeholder={`auto — recommended ${cfg.recommendedCacheMB ?? '?'} MB`}
-               value={cfg.runAhead.ramMB === 'auto' ? '' : cfg.runAhead.ramMB}
-               onchange={(e) => {
-                 const v = e.currentTarget.value.trim();
-                 cfg.runAhead.ramMB = v === '' ? 'auto' : Number(v);
-               }} />
-        <p class="muted small" style="margin-top:6px;">
-          Empty for auto: {cfg.recommendedCacheMB ?? '?'} MB here. RAM only; if
-          /dev/shm cannot hold it, caching switches off. Applies next broadcast.
-        </p>
-        <p class="muted small" style="margin-top:6px;">
-          Only CPU clips use it &mdash; working ahead is what makes their seeking
-          instant. GPU clips restart in under a second anyway.
-        </p>
-      </div>
-    {/if}
-      <div class="row" style="margin-top:12px">
-      <button class="primary" onclick={() => save('runahead')}>Save</button>
-      {#if saved === 'runahead'}<span class="ok small">Saved</span>{/if}
-    </div>
-</section>
-
-  <!-- Live preview -->
-  <section class="card">
-    <h3>Live preview</h3>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
-      <input type="checkbox" bind:checked={cfg.preview.enabled} style="width:auto" />
-      Floating preview window while broadcasting
-    </label>
-    <p class="muted small">
-      The exact stream Owncast receives, straight from the encoder. No extra
-      encoding, just its bitrate to each viewer.
-    </p>
-      <div class="row" style="margin-top:12px">
-      <button class="primary" onclick={() => save('preview')}>Save</button>
-      {#if saved === 'preview'}<span class="ok small">Saved</span>{/if}
-    </div>
-</section>
-
   <!-- Automatic scan -->
-  <section class="card">
-    <h3>Automatic library scan</h3>
+  <section class="subcard">
+    <h3>Automatic scan</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
       <input type="checkbox" bind:checked={cfg.library.autoRefresh.enabled} style="width:auto"
  />
@@ -1696,8 +1811,8 @@
 </section>
 
   <!-- Library display -->
-  <section class="card">
-    <h3>Library display</h3>
+  <section class="subcard">
+    <h3>Display</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
       <input type="checkbox" bind:checked={cfg.ui.lazyImages} style="width:auto" />
       Load artwork only as it scrolls into view
@@ -1712,8 +1827,76 @@
     </div>
 </section>
 
+  </section>
+
+  <!-- ===== Studio: the engine behind the Studio tab ===== -->
+  <section class="card group">
+    <h3>Studio</h3>
+    <p class="lead muted small">The engine behind the Studio tab — items themselves are placed there.</p>
+  <!-- Studio -->
+  <section class="subcard">
+
+    <label>
+      Overlay changes go on air
+      <span class="muted small">
+        {cfg.buffer.applySeconds < 1
+          ? 'immediately'
+          : `after about ${cfg.buffer.applySeconds}s`}
+      </span>
+    </label>
+    <input type="range" min="0" max={cfg.buffer.seconds} step="1"
+           value={cfg.buffer.applySeconds}
+           oninput={(e) => { cfg.buffer.applySeconds = +e.currentTarget.value; }} />
+    <p class="muted small">
+      {#if cfg.buffer.applySeconds >= cfg.buffer.seconds}
+        Nothing discarded, no interruption. Safest.
+      {:else if cfg.buffer.applySeconds < 1}
+        Cushion dropped &mdash; viewers re-buffer while the encoder catches up.
+      {:else}
+        Part of the cushion is re-encoded. Fine while the encoder stays ahead.
+      {/if}
+      Maximum is the buffer depth, {cfg.buffer.seconds}s.
+    </p>
+
+    <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+      <input type="checkbox" bind:checked={cfg.buffer.studioWarnings} style="width:auto" />
+      Show encoder cost warnings in Studio
+    </label>
+    <p class="muted small">
+      The red notes in Studio about moving pictures and GIFs. The console report
+      is unaffected.
+    </p>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('studio')}>Save</button>
+      {#if saved === 'studio'}<span class="ok small">Saved</span>{/if}
+    </div>
+  </section>
+
+  </section>
+
+  <!-- ===== System ===== -->
+  <section class="card group">
+    <h3>System</h3>
+    <p class="lead muted small">Panel access and diagnostics.</p>
+  <!-- Live preview -->
+  <section class="subcard">
+    <h3>Live preview</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" bind:checked={cfg.preview.enabled} style="width:auto" />
+      Floating preview window while broadcasting
+    </label>
+    <p class="muted small">
+      The exact stream Owncast receives, straight from the encoder. No extra
+      encoding, just its bitrate to each viewer.
+    </p>
+      <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('preview')}>Save</button>
+      {#if saved === 'preview'}<span class="ok small">Saved</span>{/if}
+    </div>
+</section>
+
   <!-- Developer -->
-  <section class="card">
+  <section class="subcard">
     <h3>Developer</h3>
     <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
       <input type="checkbox" bind:checked={cfg.devMode} style="width:auto" />
@@ -1729,7 +1912,7 @@
 </section>
 
   <!-- Account -->
-  <section class="card">
+  <section class="subcard">
     <h3>Password</h3>
     <label>Current password</label>
     <input type="password" bind:value={pwCurrent} autocomplete="current-password" />
@@ -1744,8 +1927,10 @@
     </div>
     {#if pwMsg}<p class="small">{pwMsg}</p>{/if}
   </section>
-  </div>
+  </section>
 
+  </div>
+  {/if}
   {#if browsing}
     <DirBrowser start={parseList(fsRoots)[0] ?? '/'}
                 onpick={addRoot} onclose={() => (browsing = false)} />
@@ -1763,18 +1948,43 @@
   .wrap { max-width: 1120px; margin: 0 auto; }
   section { margin-bottom: 16px; }
 
-  /* Two columns, packed. Multi-column rather than grid because the cards are
-     wildly different heights — a grid aligns them into rows and leaves a
-     ragged gap under every short one. The browser balances the two column
-     heights itself, so the page ends flat instead of trailing off. */
-  .cols { columns: 2; column-gap: 16px; }
-  /* Without this a card is sliced in half across the column break. */
-  .cols > section { break-inside: avoid; }
-  /* One column when there is no room for two readable ones. 680px was the
-     old single-column width — a lone column should not stretch past it. */
+  /* One centered column of five group cards. The old sixteen-card page used
+     a two-column masonry; five tall groups read better stacked, and the
+     grouping already gives the page its structure. */
+  .cols { max-width: 760px; margin: 0 auto; }
+  .simplecol { max-width: 640px; margin: 0 auto; }
+  .pagehead { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+              max-width: 760px; margin: 0 auto 6px; }
+  .pagehead h1 { margin: 0; flex: 1; }
+  .pagehead .segc { margin-top: 0; }
+
+  /* A group card holds the old cards as quiet subsections. */
+  .group > .lead { margin: 0 0 2px; }
+  .subcard { margin: 20px 0 0; padding: 16px 0 0; border-top: 1px solid var(--border); }
+  .subcard:first-of-type { border-top: 0; padding-top: 4px; margin-top: 10px; }
+  .subcard h3 {
+    font-size: 13px; color: var(--muted); font-weight: 600;
+    border-bottom: 0; padding-bottom: 0; margin-bottom: 2px;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+
+  /* Simple mode levers. */
+  .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+             gap: 10px; margin-top: 10px; }
+  .choice { text-align: left; padding: 12px 14px; display: flex; flex-direction: column;
+            gap: 2px; background: var(--surface); width: auto; }
+  .choice.on { border-color: var(--accent);
+               box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+  .choice .cname { font-weight: 500; font-size: 14px; }
+  .choice .cdesc { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+  .diff { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  .diff summary { cursor: pointer; user-select: none; }
+  .diff b { color: var(--text); font-weight: 500; }
+  .driftline { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+  .driftline b { color: var(--text); }
+
   @media (max-width: 900px) {
     .wrap { max-width: 680px; }
-    .cols { columns: 1; }
   }
   section h3 {
     margin: 0 0 4px; padding-bottom: 10px;

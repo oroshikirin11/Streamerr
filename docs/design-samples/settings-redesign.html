@@ -1,0 +1,657 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jellystreamerr — Settings redesign v4</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --surface-2: #f0efec;
+    --text: #1d1d1b; --muted: #6b6b66; --border: #dededa;
+    --accent: #2f6fd0; --danger: #c0392b; --success: #2b8a5f;
+    --warn: #9a6a12; --warn-bg: #f6ecd7;
+    --radius: 8px;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg: #17171a; --surface: #202024; --surface-2: #2a2a2f;
+    --text: #ececeb; --muted: #9a9a95; --border: #34343a;
+    --accent: #6ba3f0; --danger: #e8705f; --success: #5fc493;
+    --warn: #e0a458; --warn-bg: #38301f;
+  } }
+  :root[data-theme="dark"] {
+    --bg: #17171a; --surface: #202024; --surface-2: #2a2a2f;
+    --text: #ececeb; --muted: #9a9a95; --border: #34343a;
+    --accent: #6ba3f0; --danger: #e8705f; --success: #5fc493;
+    --warn: #e0a458; --warn-bg: #38301f;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f7f5; --surface: #ffffff; --surface-2: #f0efec;
+    --text: #1d1d1b; --muted: #6b6b66; --border: #dededa;
+    --accent: #2f6fd0; --danger: #c0392b; --success: #2b8a5f;
+    --warn: #9a6a12; --warn-bg: #f6ecd7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 400 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1, h3, h4 { font-weight: 500; margin: 0 0 .5rem; }
+  h1 { font-size: 20px; } h3 { font-size: 17px; }
+  h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--muted); margin: 22px 0 2px; }
+  button, select, input[type=text], input[type=search] {
+    font: inherit; color: inherit; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface); padding: 7px 11px;
+  }
+  button { cursor: pointer; background: var(--surface-2);
+           transition: border-color .15s, background .15s, transform .06s; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:active:not(:disabled) { transform: scale(.97); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 20px 20px 80px; }
+
+  /* header */
+  .top { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  .top h1 { margin: 0; }
+  .top .sub { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius);
+         overflow: hidden; background: var(--surface); }
+  .seg button { border: 0; border-radius: 0; background: transparent; padding: 7px 16px; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .demo { font-size: 12px; color: var(--muted); display: inline-flex; gap: 8px; align-items: center;
+          border: 1px dashed var(--border); border-radius: var(--radius); padding: 5px 10px; }
+  .demo b { color: var(--text); font-weight: 500; }
+
+  /* cards */
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px; }
+  .card > p.lead { color: var(--muted); font-size: 13.5px; margin: -4px 0 4px; }
+
+  /* badges & chips */
+  .badge { display: inline-block; font-size: 10.5px; text-transform: uppercase;
+           letter-spacing: .08em; border-radius: 20px; padding: 1px 9px 2px; vertical-align: 2px; }
+  .b-live { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+  .b-next { color: var(--muted); background: var(--surface-2); }
+  .b-inert { color: var(--muted); background: var(--surface-2); }
+  .chip { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--muted);
+          border: 1px solid var(--border); border-radius: 20px; padding: 1px 10px 2px;
+          background: var(--surface); cursor: pointer; }
+  .chip:hover { border-color: var(--accent); color: var(--text); }
+  .chip::before { content: "↔"; color: var(--accent); font-size: 12px; }
+  .tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
+         border-radius: 20px; padding: 1px 8px 2px; background: var(--surface-2);
+         color: var(--muted); }
+  .tag.inuse { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+  /* simple levers */
+  .lever { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+           padding: 18px 20px; margin-bottom: 14px; }
+  .lever h3 { margin-bottom: 2px; }
+  .lever .tagline { color: var(--muted); font-size: 13.5px; margin-bottom: 12px; }
+  .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+  .choice { text-align: left; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px;
+            background: var(--surface); }
+  .choice.on { border-color: var(--accent);
+               box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+  .choice .cname { font-weight: 500; }
+  .choice .cdesc { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+  .lever details { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  .lever summary { cursor: pointer; user-select: none; }
+  .lever li b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .lever .drift { color: var(--warn); font-size: 12.5px; margin-top: 8px; }
+  .lever .drift button { font-size: 12px; padding: 2px 10px; margin-left: 8px; }
+
+  /* fields */
+  .findrow { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+  .findrow input { flex: 1; max-width: 340px; }
+  .results { background: var(--surface); border: 1px solid var(--border);
+             border-radius: var(--radius); margin-bottom: 14px; }
+  .results button { display: flex; width: 100%; border: 0; border-bottom: 1px solid var(--border);
+                    border-radius: 0; background: transparent; gap: 10px; align-items: baseline;
+                    padding: 9px 14px; text-align: left; }
+  .results button:last-child { border-bottom: 0; }
+  .results .rcat { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+                   color: var(--accent); min-width: 70px; }
+  .results .rlabel { font-weight: 500; }
+  .results .rsum { font-size: 12.5px; color: var(--muted); }
+  .field { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .field:last-child { border-bottom: 0; }
+  .field > label { display: flex; gap: 8px; align-items: baseline; font-weight: 500;
+                 margin-bottom: 3px; flex-wrap: wrap; }
+  .field .why { font-size: 13px; color: var(--muted); max-width: 62ch; }
+  .field .ctl { margin-top: 7px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .field.inert { opacity: .55; }
+  .field.inert .ctl { pointer-events: none; }
+  .field.hit { background: color-mix(in srgb, var(--accent) 8%, transparent);
+               border-radius: var(--radius); padding-left: 10px; padding-right: 10px; }
+  .consequences { display: flex; gap: 16px; font-size: 12.5px; color: var(--muted);
+                  margin-top: 6px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+  .consequences span b { color: var(--text); font-weight: 500; }
+  .measured { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .measured b { color: var(--text); font-weight: 500; }
+  .quickset { font-size: 12px; padding: 3px 10px; }
+  .switch { appearance: none; width: 40px; height: 22px; border-radius: 20px; margin: 0;
+            background: var(--surface-2); border: 1px solid var(--border); position: relative;
+            cursor: pointer; transition: background .15s; flex-shrink: 0; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+                   border-radius: 50%; background: var(--muted); transition: left .15s, background .15s; }
+  .switch:checked { background: var(--accent); border-color: var(--accent); }
+  .switch:checked::after { left: 20px; background: #fff; }
+  .dest { display: flex; gap: 10px; align-items: center; padding: 9px 12px;
+          border: 1px solid var(--border); border-radius: var(--radius); margin-top: 8px;
+          background: var(--surface); flex-wrap: wrap; }
+  .dest .dname { font-weight: 500; }
+  .dest .dmeta { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .dest .dspacer { flex: 1; }
+  .dest.sitout { opacity: .55; }
+  .note { margin-top: 26px; border-top: 1px solid var(--border); padding-top: 14px;
+          font-size: 13px; color: var(--muted); max-width: 72ch; }
+</style>
+
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>Settings</h1>
+      <div class="sub">Jellystreamerr — redesign mockup, v4</div>
+    </div>
+    <div class="spacer"></div>
+    <label class="demo"><b>Demo:</b> broadcast
+      <input type="checkbox" id="liveToggle" class="switch" checked></label>
+    <div class="seg" role="tablist" aria-label="Mode">
+      <button id="mSimple" class="on">Simple</button>
+      <button id="mAdv">Advanced</button>
+    </div>
+  </div>
+
+  <!-- ============ SIMPLE ============ -->
+  <div id="simple">
+    <div class="lever">
+      <h3>Picture</h3>
+      <div class="tagline">What quality the stream aims for. Studio and library are never touched.</div>
+      <div class="choices" id="pictureChoices"></div>
+      <details id="pictureDiff"><summary>what this sets</summary></details>
+      <div class="drift" id="pictureDrift" hidden></div>
+    </div>
+    <div class="lever">
+      <h3>Timing</h3>
+      <div class="tagline">How much safety cushion the broadcast keeps between encoder and air.</div>
+      <div class="choices" id="timingChoices"></div>
+      <details id="timingDiff"><summary>what this sets</summary></details>
+      <div class="drift" id="timingDrift" hidden></div>
+    </div>
+    <p class="note">Two independent choices instead of preset scenarios — every combination is
+    valid. A choice writes the same settings Advanced shows; values are computed for this machine
+    (encoder probe, measured upload). Change any of them in Advanced and the affected choice shows
+    <i>customized</i> with a one-click way back — it never snaps back on its own.</p>
+  </div>
+
+  <!-- ============ ADVANCED ============ -->
+  <div id="advanced" hidden>
+    <div class="findrow">
+      <input type="search" id="find" placeholder="Find a setting… (try: hdr, latency, key)">
+    </div>
+    <div class="results" id="results" hidden></div>
+    <div id="cards"></div>
+    <p class="note">The sixteen boxes of the old page, unified into five. Field states:
+      <span class="badge b-live">live</span> applies immediately ·
+      <span class="badge b-next">at next broadcast</span> appears only while a stream runs, as a
+      quiet reminder that the running one keeps its values ·
+      <span class="badge b-inert">not used</span> is greyed with the reason.
+      Relation chips (<span class="chip">codec</span>) jump to the setting they depend on.</p>
+  </div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ */
+const HW = { name: 'Intel N100', vdenc: true, main10: true, uploadNow: 24.1, uploadDay: 52.7 };
+const cfg = {
+  codec: 'hevc', protocol: 'tcp', target: 'stream.livinginasimulation.de',
+  bitrateAnchor: 12000, copyLimit: 26000, hdrOutput: true,
+  buffer: 15, gop: 1, srtLatency: 500,
+  subsBurn: true, audioMode: 'original', subtitleMode: 'auto',
+  backend: 'auto', resolution: '1080p', frameSize: 'native', fpsMode: 'auto',
+  audioBitrate: 160, tonemap: 'auto', tonemapCurve: 'hable',
+  applySeconds: 15, runAhead: true, previewOn: true, syncTitle: true,
+  autoScan: true, scanHours: 12, lazyImages: false, stills: false,
+  overlayPipe: true, studioWarnings: true, devMode: false, overlayEnabled: false,
+  saved: { rtmp: true, rtmps: false, srt: true, tcp: true },
+  extras: [
+    { name: 'Cinema receiver', protocol: 'rtmp', enabled: true, saved: true },
+    { name: 'Backup relay', protocol: 'srt', enabled: false, saved: true },
+  ],
+  nowPlaying: { title: 'Backrooms', kbps: 25261, codec: 'hevc', hdr: true },
+};
+let broadcastLive = true;
+let mode = 'simple';
+
+function derive() {
+  const np = cfg.nowPlaying;
+  const carrier = (cfg.codec === 'h264') ? cfg.protocol
+    : (['srt','tcp'].includes(cfg.protocol) ? cfg.protocol : 'srt');
+  const drawing = cfg.overlayEnabled || cfg.subsBurn;
+  const passthrough = cfg.codec === 'hevc' && np.codec === 'hevc' && !drawing
+    && np.kbps <= cfg.copyLimit && (!np.hdr || cfg.hdrOutput);
+  const hdrOut = np.hdr && cfg.hdrOutput && cfg.codec === 'hevc' && HW.main10 && !drawing;
+  const bitrate = cfg.codec === 'hevc' ? Math.round(cfg.bitrateAnchor * 2/3)
+    : cfg.codec === 'av1' ? Math.round(cfg.bitrateAnchor / 2) : cfg.bitrateAnchor;
+  const carries = (proto) => cfg.codec === 'h264' || ['srt','tcp'].includes(proto);
+  const activeExtras = cfg.extras.filter(e => e.enabled && carries(e.protocol));
+  const sitOuts = cfg.extras.filter(e => e.enabled && !carries(e.protocol));
+  return { carrier, drawing, passthrough, hdrOut, bitrate, carries, activeExtras, sitOuts };
+}
+
+/* ---------------- simple levers ------------------------------------ */
+const PICTURE = [
+  { id: 'best', name: 'Best', desc: 'H.265, HDR kept, originals ship untouched when they fit the line.',
+    patch: () => ({ codec: 'hevc', hdrOutput: true,
+      copyLimit: Math.floor(HW.uploadDay * 1000 * 0.9 / 500) * 500 }) },
+  { id: 'compat', name: 'Compatible', desc: 'H.264 — plays on every device, ~1.5× the bandwidth.',
+    patch: () => ({ codec: 'h264' }) },
+];
+const TIMING = [
+  { id: 'smooth', name: 'Smooth', desc: '30 s cushion. Nothing interrupts the show.',
+    patch: () => ({ buffer: 30 }) },
+  { id: 'balanced', name: 'Balanced', desc: '15 s cushion. The default trade.',
+    patch: () => ({ buffer: 15 }) },
+  { id: 'snappy', name: 'Snappy', desc: '5 s cushion. Chat and stream feel close.',
+    patch: () => ({ buffer: 5 }) },
+];
+const LABELS = { codec: 'Codec', hdrOutput: 'HDR output', copyLimit: 'Copy limit', buffer: 'Buffer' };
+function fmt(k, v) {
+  if (k === 'copyLimit' || k === 'bitrateAnchor') return (v/1000) + ' Mbps';
+  if (k === 'buffer' || k === 'gop') return v + ' s';
+  if (typeof v === 'boolean') return v ? 'on' : 'off';
+  return String(v).toUpperCase();
+}
+function matchChoice(list) {
+  return list.find(c => Object.entries(c.patch()).every(([k, v]) => cfg[k] === v))?.id ?? null;
+}
+function renderLever(rootId, diffId, driftId, list, title) {
+  const current = matchChoice(list);
+  const root = document.getElementById(rootId);
+  root.innerHTML = list.map(c => `
+    <button class="choice ${current === c.id ? 'on' : ''}" data-c="${c.id}">
+      <span class="cname">${c.name}</span><span class="cdesc">${c.desc}</span>
+    </button>`).join('');
+  root.querySelectorAll('[data-c]').forEach(b => b.addEventListener('click', () => {
+    Object.assign(cfg, list.find(c => c.id === b.dataset.c).patch());
+    renderAll();
+  }));
+  const active = list.find(c => c.id === current) ?? list[0];
+  document.getElementById(diffId).innerHTML = '<summary>what this sets</summary><ul>'
+    + Object.entries(active.patch()).map(([k, v]) =>
+        `<li>${LABELS[k] ?? k} → <b>${fmt(k, v)}</b></li>`).join('')
+    + (broadcastLive ? '</ul><span class="badge b-next">at next broadcast</span>' : '</ul>');
+  const drift = document.getElementById(driftId);
+  drift.hidden = current !== null;
+  if (current === null) {
+    drift.innerHTML = `${title} is <b>customized</b> in Advanced — keep it, or
+      <button data-reset>use “${list[0].name}”</button>`;
+    drift.querySelector('[data-reset]').addEventListener('click', () => {
+      Object.assign(cfg, list[0].patch()); renderAll(); });
+  }
+}
+
+/* ---------------- advanced: five cards ------------------------------ */
+const badge = (k) => k === 'live' ? '<span class="badge b-live">live</span>'
+  : k === 'next' ? (broadcastLive ? '<span class="badge b-next">at next broadcast</span>' : '')
+  : '<span class="badge b-inert">not used</span>';
+const applyNow = () => '';
+const chip = (target, label) => `<span class="chip" data-jump="${target}">${label}</span>`;
+
+function bitrateOptions() {
+  const ceiling = Math.floor(HW.uploadNow * 0.6);
+  return [
+    { v: 6000,  hint: 'SD / talking heads' },
+    { v: 8000,  hint: '1080p · calm content' },
+    { v: 12000, hint: '1080p · film grain, action — recommended' },
+    { v: 16000, hint: '1080p · very high motion' },
+    { v: 20000, hint: 'above most 1080p sources' },
+  ].map(o => ({ ...o, over: o.v/1000 > ceiling }));
+}
+
+/* Five categories replace sixteen boxes:
+   Broadcast · Output · Library · Studio · System */
+const CATS = [
+  { id: 'broadcast', title: 'Broadcast',
+    lead: 'Where the stream goes and what carries it.' },
+  { id: 'output', title: 'Output',
+    lead: 'What the encoder produces, and the cushion behind it.' },
+  { id: 'library', title: 'Library',
+    lead: 'Where media comes from and how it is presented.' },
+  { id: 'studio', title: 'Studio',
+    lead: 'The overlay engine. Items themselves live on the Studio tab.' },
+  { id: 'system', title: 'System',
+    lead: 'Panel access and diagnostics.' },
+];
+
+const FIELDS = [
+  /* --------------------------- BROADCAST ---------------------------- */
+  { cat: 'broadcast', id: 'codec', label: 'Codec', kw: 'codec h264 h265 hevc av1',
+    sum: () => cfg.codec.toUpperCase(),
+    html: () => `
+      <label>Codec ${badge('next')} ${chip('bitrateAnchor', 'bitrate')} ${chip('protocol', 'protocol')}</label>
+      <div class="why">Decides which protocols can carry the stream. H.265 = same picture at ⅔
+        the bandwidth${HW.vdenc ? ', and cheaper to encode on this box (VDENC)' : ''}.</div>
+      <div class="ctl"><select data-bind="codec">
+        <option value="h264" ${cfg.codec==='h264'?'selected':''}>H.264 — universal</option>
+        <option value="hevc" ${cfg.codec==='hevc'?'selected':''}>H.265 — ⅔ bandwidth</option>
+        <option value="av1" ${cfg.codec==='av1'?'selected':''}>AV1 — ½ bandwidth, patchy</option>
+      </select>${applyNow()}</div>` },
+  { cat: 'broadcast', id: 'protocol', label: 'Protocol', kw: 'protocol rtmp srt tcp transport',
+    sum: () => derive().carrier.toUpperCase(),
+    html: () => `
+      <label>Protocol ${badge('next')} ${chip('codec', 'codec')}</label>
+      <div class="why">${cfg.codec === 'h264'
+        ? 'H.264 rides any of these. Slots keep their saved credentials — switching away never loses them.'
+        : cfg.codec.toUpperCase() + ' needs SRT or TCP — the others are greyed, not hidden.'}</div>
+      <div class="ctl">${['rtmp','rtmps','srt','tcp'].map(pr => {
+        const dis = !derive().carries(pr);
+        const inUse = derive().carrier === pr;
+        return `<button data-proto="${pr}" ${dis ? 'disabled title="cannot carry ' + cfg.codec.toUpperCase() + '"' : ''}
+          style="${inUse ? 'border-color:var(--accent);color:var(--accent)' : ''}">${pr.toUpperCase()}
+          ${inUse ? '<span class="tag inuse">in use</span>' : cfg.saved[pr] ? '<span class="tag">saved</span>' : ''}</button>`;
+      }).join('')}</div>` },
+  { cat: 'broadcast', id: 'server', label: 'Server & stream key', kw: 'server address key passphrase url target nickname',
+    sum: () => cfg.target.split('.')[0],
+    html: () => `
+      <label>Server ${badge('next')}</label>
+      <div class="ctl"><input type="text" value="tcp://${cfg.target}:9711" size="32" readonly>
+        <span class="measured">key <b>set</b> · passphrase <b>set</b></span></div>` },
+  { cat: 'broadcast', id: 'srtLatency', label: 'SRT latency', kw: 'srt latency window retransmit',
+    sum: () => derive().carrier === 'srt' ? cfg.srtLatency + ' ms' : 'not used',
+    html: () => {
+      const on = derive().carrier === 'srt';
+      return `
+      <label>SRT latency ${on ? badge('next') : badge('inert')}</label>
+      <div class="why">${on ? 'Time allowed to re-request lost packets. Rule of thumb: 4× your ping; 500 ms fits most links.'
+        : 'Not used: publishing over ' + derive().carrier.toUpperCase() + '.'}</div>
+      <div class="ctl"><input type="text" value="${cfg.srtLatency} ms" size="8" readonly></div>`; },
+    inert: () => derive().carrier !== 'srt' },
+  { cat: 'broadcast', id: 'destinations', label: 'Also send to', kw: 'destinations extras fan out multiple outputs',
+    sum: () => `+${derive().activeExtras.length} active`,
+    html: () => {
+      const d = derive();
+      return `
+      <label>Also send to ${badge('next')}</label>
+      <div class="why">One encode, several destinations. An unreachable one is skipped; the rest
+        keep streaming.</div>
+      ${cfg.extras.map((e, i) => {
+        const sitout = e.enabled && !d.carries(e.protocol);
+        return `<div class="dest ${sitout ? 'sitout' : ''}">
+          <input type="checkbox" class="switch" data-extra="${i}" ${e.enabled ? 'checked' : ''}>
+          <span class="dname">${e.name}</span>
+          <span class="dmeta">${e.protocol.toUpperCase()}${e.saved ? ' · key saved' : ''}</span>
+          <span class="dspacer"></span>
+          ${sitout ? `<span class="tag" title="rejoins on H.264">sits out — cannot carry ${cfg.codec.toUpperCase()}</span>`
+            : e.enabled ? '<span class="tag inuse">active</span>' : '<span class="tag">off</span>'}</div>`;
+      }).join('')}
+      <div class="ctl"><button onclick="alert('(mock) add destination dialog')">Add a destination</button></div>`;
+    } },
+  { cat: 'broadcast', id: 'metadataPush', label: 'Now-playing & artwork push', kw: 'streamingestarr metadata now playing artwork push owncast title sync',
+    sum: '1 receiver · on',
+    html: () => `
+      <label>Now-playing &amp; artwork push ${badge('live')}</label>
+      <div class="why">Sends title, poster and progress to the theater page. The legacy Owncast
+        title sync lives here too, for Owncast receivers.</div>
+      <div class="dest"><span class="dname">stream.livinginasimulation.de</span>
+        <span class="dmeta">token set</span>
+        <span class="dspacer"></span><span class="tag inuse">active</span></div>
+      <div class="ctl"><span class="measured">Owncast title sync</span>
+        <input type="checkbox" class="switch" data-bind="syncTitle" ${cfg.syncTitle ? 'checked' : ''}></div>` },
+
+  /* ----------------------------- OUTPUT ----------------------------- */
+  { cat: 'output', id: 'backend', label: 'Encoder', kw: 'encoder backend vaapi gpu hardware software x264 decode',
+    sum: 'GPU (VAAPI)',
+    html: () => `
+      <label>Encoder ${badge('next')}</label>
+      <div class="why">Auto probes the machine and picks the best working path — this box:
+        <b>GPU via VAAPI on ${HW.name}</b>${HW.vdenc ? ', fixed-function HEVC (VDENC)' : ''}.</div>
+      <div class="ctl"><select><option selected>Auto (recommended)</option>
+        <option>GPU — VAAPI</option><option>Software — x264</option></select>
+        <button class="quickset" onclick="alert('(mock) runs the encoder probe')">test encoders</button>
+        ${applyNow()}</div>` },
+  { cat: 'output', id: 'resolution', label: 'Resolution & frame rate', kw: 'resolution 1080p 720p fps frame size pillarbox native',
+    sum: () => cfg.resolution + ' · fps ' + cfg.fpsMode,
+    html: () => `
+      <label>Resolution &amp; frame rate ${badge('next')}</label>
+      <div class="why">Output size, how non-16:9 content sits in it, and whether the rate follows
+        each file (film stays 23.976) or is forced.</div>
+      <div class="ctl"><select data-bind="resolution">
+          <option ${cfg.resolution==='1080p'?'selected':''}>1080p</option>
+          <option ${cfg.resolution==='720p'?'selected':''}>720p</option></select>
+        <select data-bind="frameSize">
+          <option value="native" ${cfg.frameSize==='native'?'selected':''}>Native shape</option>
+          <option value="pillarbox" ${cfg.frameSize==='pillarbox'?'selected':''}>Always 16:9</option></select>
+        <select data-bind="fpsMode">
+          <option value="auto" ${cfg.fpsMode==='auto'?'selected':''}>fps: follow the source</option>
+          <option value="fixed" ${cfg.fpsMode==='fixed'?'selected':''}>fps: fixed 30</option></select>
+        ${applyNow()}</div>` },
+  { cat: 'output', id: 'bitrateAnchor', label: 'Video bitrate', kw: 'bitrate quality mbps',
+    sum: () => (derive().bitrate/1000).toFixed(1) + ' Mbps on air',
+    html: () => `
+      <label>Video bitrate ${badge('next')} ${chip('codec', 'codec')}</label>
+      <div class="why">Pick for the hardest content you stream — the anchor is the H.264 rate,
+        and each codec derives its own from it.</div>
+      <div class="ctl"><select data-bind-num-k="bitrateAnchor">
+        ${bitrateOptions().map(o => `<option value="${o.v}" ${cfg.bitrateAnchor===o.v?'selected':''}
+          ${o.over ? 'disabled' : ''}>${o.v/1000} Mbps — ${o.hint}${o.over ? ' (over your line)' : ''}</option>`).join('')}
+      </select>${applyNow()}</div>
+      <div class="consequences">
+        <span>on air as ${cfg.codec.toUpperCase()}: <b>${(derive().bitrate/1000).toFixed(1)} Mbps</b></span>
+        <span>audio: <b>${cfg.audioBitrate} kbps</b> AAC</span>
+        <span>your upload, worst hour: <b>${HW.uploadNow} Mbps</b></span></div>` },
+  { cat: 'output', id: 'gop', label: 'Keyframes', kw: 'keyframes gop segments interval',
+    sum: () => 'every ' + cfg.gop + ' s',
+    html: () => `
+      <label>Keyframes ${badge('next')}</label>
+      <div class="why">Points where a viewer can join or seek. Also sets the receiver's segment
+        grain — shorter keyframes, lower viewer latency.</div>
+      <div class="ctl"><select data-bind-num-plain="gop">
+        ${[1,2].map(n => `<option ${cfg.gop===n?'selected':''}>${n}</option>`).join('')}
+      </select><span class="measured">seconds</span>${applyNow()}</div>` },
+  { cat: 'output', id: 'hdrOutput', label: 'HDR output', kw: 'hdr colors tone map dolby pq curve',
+    sum: () => cfg.hdrOutput ? 'on' : 'off',
+    html: () => `
+      <label>HDR output ${badge('next')} ${chip('codec', 'codec')} ${chip('subs', 'subtitles')}</label>
+      <div class="why">${cfg.codec !== 'hevc' ? 'Needs H.265 — switch the codec to enable.'
+        : derive().drawing && cfg.nowPlaying.hdr
+          ? '<span style="color:var(--warn)">Currently demoted to SDR: something is drawn on the picture (subtitles or a studio item).</span>'
+          : 'HDR titles keep their colours instead of being tone-mapped down.'}</div>
+      <div class="ctl"><input type="checkbox" class="switch" data-bind="hdrOutput"
+          ${cfg.hdrOutput ? 'checked' : ''} ${cfg.codec !== 'hevc' ? 'disabled' : ''}>
+        <span class="measured">tone mapping when SDR: <b>${cfg.tonemap}</b> · ${cfg.tonemapCurve}</span></div>` },
+  { cat: 'output', id: 'copyLimit', label: 'Copy limit', kw: 'copy passthrough limit untouched original',
+    sum: () => '≤ ' + cfg.copyLimit/1000 + ' Mbps untouched',
+    html: () => `
+      <label>Copy limit ${badge('next')} ${chip('subs', 'subtitles')} ${chip('hdrOutput', 'HDR')}</label>
+      <div class="why">Files under this rate ship <b>untouched</b> — zero encode, source quality —
+        when nothing must be drawn on them. Above it they re-encode.</div>
+      <div class="ctl"><input type="text" data-bind-num-k="copyLimit"
+          value="${cfg.copyLimit/1000} Mbps" size="9">
+        <button class="quickset" data-quickset="copyLimit:${Math.floor(HW.uploadDay*0.9)*1000}">
+          fit to line (${Math.floor(HW.uploadDay*0.9)} Mbps)</button>
+        <span class="measured">upload: <b>${HW.uploadNow}</b> tonight · <b>${HW.uploadDay}</b> daytime</span>
+        ${applyNow()}</div>` },
+  { cat: 'output', id: 'buffer', label: 'Buffer', kw: 'buffer cushion delay stall apply run ahead cache ram',
+    sum: () => cfg.buffer + ' s cushion',
+    html: () => `
+      <label>Buffer ${badge('live')}</label>
+      <div class="why">Encoded video held ahead of air — one number, three consequences. The
+        run-ahead cache extends it in RAM so seeks inside it are instant.</div>
+      <div class="ctl"><select data-bind-num-plain="buffer">${[5,10,15,30,45].map(n =>
+        `<option ${cfg.buffer===n?'selected':''}>${n}</option>`).join('')}</select>
+        <span class="measured">seconds</span>
+        <span class="measured">Run-ahead cache</span>
+        <input type="checkbox" class="switch" data-bind="runAhead" ${cfg.runAhead ? 'checked' : ''}>
+        <span class="measured">RAM: <b>auto</b></span></div>
+      <div class="consequences">
+        <span>stall insurance <b>${cfg.buffer} s</b></span>
+        <span>overlay changes reach air in <b>~${Math.min(cfg.applySeconds, cfg.buffer)} s</b></span>
+        <span>skips re-encode up to <b>${cfg.buffer} s</b></span></div>` },
+
+  /* ----------------------------- LIBRARY ---------------------------- */
+  { cat: 'library', id: 'sources', label: 'Libraries', kw: 'smb jellyfin filesystem library source share',
+    sum: 'SMB share · connected',
+    html: () => `
+      <label>Libraries ${badge('live')}</label>
+      <div class="dest"><span class="dname">SMB share</span>
+        <span class="dmeta">//192.168.178.100/media · Jellyfin metadata</span>
+        <span class="dspacer"></span><span class="tag inuse">connected</span></div>
+      <div class="ctl"><button onclick="alert('(mock) add library dialog')">Add a library</button></div>` },
+  { cat: 'library', id: 'tracks', label: 'Tracks & languages', kw: 'language subtitle audio track dub original',
+    sum: () => `audio ${cfg.audioMode} · subs ${cfg.subtitleMode}`,
+    html: () => `
+      <label>Tracks &amp; languages ${badge('live')} ${chip('subs', 'burned subtitles')}</label>
+      <div class="why">Which audio and subtitle track each clip plays with — remembered as
+        language + kind, never as a track number.</div>
+      <div class="ctl">
+        <span class="measured">Audio</span>
+        <select data-bind="audioMode">
+          <option value="original" ${cfg.audioMode==='original'?'selected':''}>Original language</option>
+          <option value="dub" ${cfg.audioMode==='dub'?'selected':''}>Dub in English</option></select>
+        <span class="measured">Subtitles</span>
+        <select data-bind="subtitleMode">
+          <option value="auto" ${cfg.subtitleMode==='auto'?'selected':''}>Auto — on for foreign audio</option>
+          <option value="always" ${cfg.subtitleMode==='always'?'selected':''}>Always</option>
+          <option value="off" ${cfg.subtitleMode==='off'?'selected':''}>Off</option></select>
+        <span class="measured">in <b>English</b></span>
+        <button class="quickset" onclick="alert('(mock) language picker')">change…</button></div>` },
+  { cat: 'library', id: 'artwork', label: 'Artwork & browsing', kw: 'metadata artwork stills thumbnails lazy images scan refresh',
+    sum: () => `stills ${cfg.stills ? 'on' : 'off'} · scan every ${cfg.scanHours} h`,
+    html: () => `
+      <label>Artwork &amp; browsing ${badge('live')}</label>
+      <div class="why">Posters come from Jellyfin; stills can be generated for episodes without
+        art (slow over a network share). The scan picks up new files on its own.</div>
+      <div class="ctl">
+        <span class="measured">Generated stills</span>
+        <input type="checkbox" class="switch" data-bind="stills" ${cfg.stills ? 'checked' : ''}>
+        <span class="measured">Lazy images</span>
+        <input type="checkbox" class="switch" data-bind="lazyImages" ${cfg.lazyImages ? 'checked' : ''}>
+        <span class="measured">Scan every</span>
+        <select data-bind-num-plain="scanHours">
+          ${[6,12,24].map(h => `<option ${cfg.scanHours===h?'selected':''}>${h}</option>`).join('')}
+        </select><span class="measured">hours</span></div>` },
+
+  /* ----------------------------- STUDIO ----------------------------- */
+  { cat: 'studio', id: 'subs', label: 'Burned subtitles', kw: 'subtitles subs burn band',
+    sum: () => cfg.subsBurn ? 'auto' : 'off',
+    html: () => `
+      <label>Burned subtitles ${badge('live')} ${chip('tracks', 'languages')} ${chip('copyLimit', 'copy limit')}</label>
+      <div class="why">Drawn into the picture — a subtitled clip always re-encodes, even under
+        the copy limit.</div>
+      <div class="ctl"><input type="checkbox" class="switch" data-bind="subsBurn"
+        ${cfg.subsBurn ? 'checked' : ''}></div>` },
+  { cat: 'studio', id: 'overlayPipe', label: 'Overlay engine', kw: 'overlay pipe engine restart classic seamless warnings',
+    sum: () => cfg.overlayPipe ? 'seamless applies' : 'classic (restarts)',
+    html: () => `
+      <label>Overlay engine ${badge('next')}</label>
+      <div class="why">Seamless: overlay changes reach air without restarting the stream.
+        Classic: every Apply restarts the source — the proven old path, for troubleshooting.
+        Overlay items themselves are placed on the Studio tab.</div>
+      <div class="ctl"><select data-bind="overlayPipeSel">
+          <option value="on" ${cfg.overlayPipe ? 'selected' : ''}>Seamless (recommended)</option>
+          <option value="off" ${cfg.overlayPipe ? '' : 'selected'}>Classic</option></select>
+        <span class="measured">Studio warnings</span>
+        <input type="checkbox" class="switch" data-bind="studioWarnings"
+          ${cfg.studioWarnings ? 'checked' : ''}>${applyNow()}</div>` },
+
+  /* ----------------------------- SYSTEM ------------------------------ */
+  { cat: 'system', id: 'previewOn', label: 'Live preview', kw: 'preview monitor pip window',
+    sum: () => cfg.previewOn ? 'on' : 'off',
+    html: () => `
+      <label>Live preview ${badge('live')}</label>
+      <div class="why">The floating monitor mirrors exactly what leaves the encoder, ~one buffer
+        behind air.</div>
+      <div class="ctl"><input type="checkbox" class="switch" data-bind="previewOn"
+        ${cfg.previewOn ? 'checked' : ''}></div>` },
+  { cat: 'system', id: 'password', label: 'Password & developer', kw: 'password auth login security developer debug logs',
+    sum: () => 'auth on · dev ' + (cfg.devMode ? 'on' : 'off'),
+    html: () => `
+      <label>Password &amp; developer ${badge('live')}</label>
+      <div class="why">One password guards the panel. Developer mode shows the console page and
+        raw ffmpeg commands.</div>
+      <div class="ctl"><button onclick="alert('(mock) change password dialog')">Change password…</button>
+        <span class="measured">Developer mode</span>
+        <input type="checkbox" class="switch" data-bind="devMode" ${cfg.devMode ? 'checked' : ''}></div>` },
+];
+
+function renderCards(highlightId) {
+  const cardsEl = document.getElementById('cards');
+  cardsEl.innerHTML = CATS.map(c => `
+    <section class="card" id="cat-${c.id}">
+      <h3>${c.title}</h3><p class="lead">${c.lead}</p>
+      ${FIELDS.filter(f => f.cat === c.id).map(f =>
+        `<div class="field ${f.inert?.() ? 'inert' : ''} ${highlightId === f.id ? 'hit' : ''}"
+          id="fld-${f.id}">${f.html()}</div>`).join('')}
+    </section>`).join('');
+  wire(cardsEl);
+  if (highlightId) document.getElementById('fld-' + highlightId)?.scrollIntoView({ block: 'center' });
+}
+function wire(p) {
+  p.querySelectorAll('[data-bind]').forEach(el => el.addEventListener('change', () => {
+    const k = el.dataset.bind;
+    cfg[k] = el.type === 'checkbox' ? el.checked : el.value;
+    if (k === 'subtitleMode') cfg.subsBurn = cfg.subtitleMode !== 'off';
+    if (k === 'overlayPipeSel') cfg.overlayPipe = cfg.overlayPipeSel === 'on';
+    renderAll();
+  }));
+  p.querySelectorAll('[data-bind-num-k]').forEach(el => el.addEventListener('change', () => {
+    cfg[el.dataset.bindNumK] = el.tagName === 'SELECT' ? +el.value
+      : Math.round(parseFloat(el.value) * 1000) || cfg[el.dataset.bindNumK];
+    renderAll();
+  }));
+  p.querySelectorAll('[data-bind-num-plain]').forEach(el => el.addEventListener('change', () => {
+    cfg[el.dataset.bindNumPlain] = +el.value; renderAll();
+  }));
+  p.querySelectorAll('[data-proto]').forEach(b => b.addEventListener('click', () => {
+    cfg.protocol = b.dataset.proto; renderAll(); }));
+  p.querySelectorAll('[data-extra]').forEach(el => el.addEventListener('change', () => {
+    cfg.extras[+el.dataset.extra].enabled = el.checked; renderAll(); }));
+  p.querySelectorAll('[data-quickset]').forEach(b => b.addEventListener('click', () => {
+    const [k, v] = b.dataset.quickset.split(':');
+    cfg[k] = +v; renderAll();
+  }));
+  p.querySelectorAll('[data-jump]').forEach(c => c.addEventListener('click', () => {
+    renderCards(c.dataset.jump);
+  }));
+}
+
+function renderFind() {
+  const q = document.getElementById('find').value.trim().toLowerCase();
+  const box = document.getElementById('results');
+  if (!q) { box.hidden = true; return; }
+  const hits = FIELDS.filter(f => f.label.toLowerCase().includes(q) || f.kw.includes(q));
+  box.hidden = false;
+  box.innerHTML = hits.length ? hits.map(f => `
+    <button data-hit="${f.id}"><span class="rcat">${f.cat}</span>
+      <span class="rlabel">${f.label}</span>
+      <span class="rsum">${typeof f.sum === 'function' ? f.sum() : f.sum}</span></button>`).join('')
+    : '<button disabled><span class="rsum">nothing matches</span></button>';
+  box.querySelectorAll('[data-hit]').forEach(b => b.addEventListener('click', () => {
+    document.getElementById('find').value = '';
+    box.hidden = true;
+    renderCards(b.dataset.hit);
+  }));
+}
+
+/* ---------------- glue --------------------------------------------- */
+function setMode(m) {
+  mode = m;
+  document.getElementById('simple').hidden = m !== 'simple';
+  document.getElementById('advanced').hidden = m !== 'adv';
+  document.getElementById('mSimple').classList.toggle('on', m === 'simple');
+  document.getElementById('mAdv').classList.toggle('on', m === 'adv');
+  renderAll();
+}
+function renderAll() {
+  if (mode === 'simple') {
+    renderLever('pictureChoices', 'pictureDiff', 'pictureDrift', PICTURE, 'Picture');
+    renderLever('timingChoices', 'timingDiff', 'timingDrift', TIMING, 'Timing');
+  } else renderCards();
+}
+document.getElementById('mSimple').addEventListener('click', () => setMode('simple'));
+document.getElementById('mAdv').addEventListener('click', () => setMode('adv'));
+document.getElementById('liveToggle').addEventListener('change', e => {
+  broadcastLive = e.target.checked; renderAll(); });
+document.getElementById('find').addEventListener('input', renderFind);
+renderAll();
+</script>
