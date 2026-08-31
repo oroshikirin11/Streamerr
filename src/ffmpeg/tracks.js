@@ -74,7 +74,7 @@ export function probeTracks(path) {
       '-show_streams',
       '-show_entries',
       'stream=index,codec_name,codec_type,channels,channel_layout,width,height,sample_aspect_ratio,display_aspect_ratio,r_frame_rate,color_transfer,pix_fmt,profile,field_order:'
-      + 'stream_tags=language,title:stream_disposition=default,forced,hearing_impaired',
+      + 'stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,original',
       '-of', 'json',
       path,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -121,6 +121,7 @@ function groupStreams(streams) {
       default: disp.default === 1,
       forced: disp.forced === 1,
       hearingImpaired: disp.hearing_impaired === 1,
+      original: disp.original === 1,
     };
 
     if (type === 'audio') {
@@ -256,7 +257,12 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
       if (audio) break;
     }
   }
-  audio ??= tracks.audio.find((a) => a.default) ?? tracks.audio[0] ?? null;
+  // "Original audio" arrives here as an empty language list. The file's
+  // default track is NOT a safe proxy for the original — WEBDL anime
+  // routinely ships with the dub as track 1/default — so believe the
+  // container's own `original` disposition first, where it exists.
+  audio ??= tracks.audio.find((a) => a.original)
+    ?? tracks.audio.find((a) => a.default) ?? tracks.audio[0] ?? null;
 
   // ── subtitles ──
   let subtitle = null;

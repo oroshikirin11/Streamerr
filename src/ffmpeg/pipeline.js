@@ -2651,6 +2651,25 @@ export class PipelinePlayout extends EventEmitter {
     this._demoted = { ...(this._demoted ?? {}), ...fields };
   }
 
+  /**
+   * The promotion counterpart of _demote: adopt freshly probed capability
+   * flags mid-broadcast. Needed for the very reason _demote writes the
+   * box — _play rebuilds the profile from it, so a re-tune written to the
+   * profile alone is erased by the exact respawn it was meant to steer.
+   * That is how a broadcast started without subtitles (which never probed
+   * the subtitle path, leaving gpuSubs=false in the box) sent its first
+   * switch onto a subtitle into the chunk fallback, while a broadcast
+   * started WITH subtitles switched between them on the GPU all day.
+   *
+   * Demotions outrank promotions: what this broadcast learned by failing
+   * is not un-learned by a probe's promise.
+   */
+  retune(fields) {
+    const upheld = { ...fields, ...(this._demoted ?? {}) };
+    Object.assign(this._box, upheld);
+    if (this.profile) Object.assign(this.profile, upheld);
+  }
+
   _shapeFor(video) {
     const box = { width: this._box.width, height: this._box.height };
     const mode = this._box.frameSize ?? 'fixed';

@@ -51,6 +51,15 @@
     : 'No destination configured');
   let toast = $state(null);
   let tracks = $state(null);
+  // The panel lives in the layout, so it would otherwise survive
+  // navigation and greet you already-open on the next page.
+  let trackPanelPath = page.url.pathname;
+  $effect(() => {
+    if (page.url.pathname !== trackPanelPath) {
+      trackPanelPath = page.url.pathname;
+      tracks = null;
+    }
+  });
   let busyCtl = $state(false);
   /** Fraction of the seek strip under the cursor, for the time bubble. */
   let hoverFrac = $state(null);

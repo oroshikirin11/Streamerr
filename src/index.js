@@ -299,6 +299,26 @@ async function tuneProfile(profile, selection, srcPath = null) {
   if (!profile.barsGraph) profile.gpuSubs = false;
 }
 
+/**
+ * The flags tuneProfile decides, in one place. Everything a live re-tune
+ * must carry into the engine's box — writing them to a profile object
+ * alone is not enough, because _play rebuilds the profile from the box
+ * (see retune in pipeline.js).
+ */
+function tunedFields(p) {
+  return {
+    tonemap: p.tonemap,
+    tonemapForced: p.tonemapForced,
+    hdrOut: p.hdrOut,
+    hdrWanted: p.hdrWanted,
+    gpuFull: p.gpuFull,
+    gpuSubs: p.gpuSubs,
+    barsGraph: p.barsGraph,
+    overlayPipe: p.overlayPipe,
+    overlayAlways: p.overlayAlways,
+  };
+}
+
 /** Track preferences for one clip, honouring any live switch. */
 function trackPrefs() {
   const prefs = { ...(config.tracks ?? {}) };
@@ -319,7 +339,13 @@ async function selectionFor(item, profile = null) {
   const subs = await listSubtitles(item.srcPath, tracks);
   const selection = selectTracks(tracks, subs, trackPrefs());
   selection.video = tracks.video[0] ?? null;
-  if (profile) await tuneProfile(profile, selection, item.srcPath);
+  if (profile) {
+    await tuneProfile(profile, selection, item.srcPath);
+    // Into the box, or the tune dies at the next _play. Also rescues the
+    // advance path after a reshape, which orphans the closure's profile
+    // object entirely.
+    engine?.retune?.(tunedFields(profile));
+  }
   return selection;
 }
 
@@ -2315,7 +2341,10 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
    * be what sends a clip there. The probes are process-cached, so this
    * is cheap on every switch after the first.
    */
-  if (engine.profile) await tuneProfile(engine.profile, selection, playing.srcPath);
+  if (engine.profile) {
+    await tuneProfile(engine.profile, selection, playing.srcPath);
+    engine.retune?.(tunedFields(engine.profile));
+  }
 
   // Only the source restarts; the publisher keeps the connection open, so
   // this is near-instant rather than an interruption.
