@@ -1476,6 +1476,37 @@ export class PipelinePlayout extends EventEmitter {
         return;
       }
 
+      /**
+       * The receiver went away MID-broadcast — a restart, an update, a
+       * blip. A publisher that streamed healthily for minutes and then
+       * hit I/O death is not a broken config; it is the other end
+       * rebooting, and the show should not die for that (operator-hit:
+       * an ingest restart six minutes into a clean 1x broadcast ended
+       * it). Open a generous reconnect window and knock: the knock
+       * branch above owns the retries, the bank head-trim gives the
+       * replacement an enterable stream, and the source resumes at what
+       * had actually AIRED so viewers lose nothing but the outage
+       * itself. Only when the window closes without a receiver does the
+       * broadcast end the old way.
+       */
+      if (!this._stopping && this.current && ranMs >= PUBLISH_FAIL_MS) {
+        this._reconnectUntil = Date.now() + 120_000;
+        this._lastReshape = {
+          item: this.current.item,
+          offset: Math.max(0, this.aired ?? this.position ?? 0),
+          duration: this.current.duration,
+          at: Date.now(),
+        };
+        this.emit('warn', 'the receiver dropped mid-broadcast — reconnecting '
+          + 'for up to 2 minutes while it comes back');
+        this._reshaping = this._lastReshape;
+        const t = setTimeout(() => {
+          if (!this._stopping) this._finishReshape(); else this._reshaping = null;
+        }, 3000);
+        t.unref?.();
+        return;
+      }
+
       const wasStopping = this._stopping;
       this.status = 'stopped';
       this.current = null;
