@@ -4398,11 +4398,15 @@ export function planOverlayPipe({
     || (profile.overlay ?? []).some((i) => i?.enabled !== false)
     // Configured-but-hidden arms the pipe too — measured armed-idle at
     // ~20% source CPU on a 1080p title, against a full source respawn
-    // (splice + re-encode) for the first "show" without it. noIdleArm is
-    // the escape hatch: a title that cannot afford the idle composite
-    // pass (4K HDR measured 1.02x -> 0.78x from the pass alone) sheds it
-    // via the slow handler, and falls back to the old first-show respawn.
-    || (Boolean(profile.overlayConfigured) && !profile.noIdleArm);
+    // (splice + re-encode) for the first "show" without it. overlayAlways
+    // goes further — OBS semantics, the compositor rides every eligible
+    // clip so even a first add from an EMPTY studio is a swap. noIdleArm
+    // is the escape hatch for both: a title that cannot afford the idle
+    // composite pass (4K HDR measured 1.02x -> 0.78x from the pass
+    // alone) sheds it via the slow handler and falls back to the old
+    // first-show respawn.
+    || ((Boolean(profile.overlayConfigured) || Boolean(profile.overlayAlways))
+      && !profile.noIdleArm);
   if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);
 

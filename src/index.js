@@ -251,6 +251,17 @@ async function tuneProfile(profile, selection, srcPath = null) {
         { width: profile.width, height: profile.height });
     }
     profile.overlayPipe = globalThis.__alphaOk;
+    /**
+     * "always" is OBS semantics: the compositor is part of the output
+     * graph on every eligible clip, empty studio included, so even the
+     * FIRST add of a broadcast is a renderer swap rather than a splice.
+     * The cost is the always-on composite pass, which is why it is an
+     * opt-in for boxes with headroom — the default arms on studio
+     * content only, and the slow handler's noIdleArm shed still guards
+     * a title that cannot afford the pass either way.
+     */
+    profile.overlayAlways = config.encoder.overlayPipe === 'always'
+      && profile.overlayPipe;
   }
 
   if (!selection?.subtitle) return;
@@ -1305,7 +1316,10 @@ app.put('/api/config', (req, res) => {
     patch.encoder.fps = clamp(patch.encoder.fps, 1, 240, config.encoder.fps);
   }
   if (patch.encoder?.overlayPipe !== undefined) {
-    patch.encoder.overlayPipe = Boolean(patch.encoder.overlayPipe);
+    // Tri-state: false (off), true (arm on studio content), 'always'
+    // (OBS semantics — the compositor rides every eligible clip).
+    patch.encoder.overlayPipe = patch.encoder.overlayPipe === 'always'
+      ? 'always' : Boolean(patch.encoder.overlayPipe);
   }
   if (patch.encoder?.tonemap !== undefined) {
     // An unknown value must not silently become a filter graph.

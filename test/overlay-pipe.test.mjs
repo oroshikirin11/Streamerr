@@ -93,6 +93,14 @@ check('noIdleArm wins over overlayConfigured when nothing is visible',
 check('noIdleArm never blocks VISIBLE studio content',
   planFor({ ...cases['no subtitles, still picture on gpu'] },
     { noIdleArm: true }) !== null, true);
+// overlayAlways is OBS semantics: the compositor rides every eligible
+// clip, empty studio included, so a first add is a swap, not a splice.
+check('overlayAlways arms with a completely empty studio',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
+    { overlay: [], overlayConfigured: false, overlayAlways: true }) !== null, true);
+check('noIdleArm sheds overlayAlways too',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
+    { overlay: [], overlayAlways: true, noIdleArm: true }), null);
 check('probed pillarbox with subtitles + a picture is eligible',
   planFor({ ...cases['subtitled pillarbox, pad-overlay'],
     overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }] }) !== null, true);
