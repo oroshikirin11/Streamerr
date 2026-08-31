@@ -242,8 +242,35 @@ export class FilesystemLibrary {
    */
   resolveMapped(mapped) {
     const p = String(mapped ?? '');
-    if (!p || !existsSync(p)) throw new Error(`Cannot open ${p || '(empty path)'}`);
-    return p;
+    if (p && existsSync(p)) return p;
+    /**
+     * The catalogue's path can go stale WITHOUT anyone touching anything:
+     * Sonarr quality-upgrades an episode ("... HDTV-1080p.mkv" becomes
+     * "... Bluray-1080p.mkv") and Jellyfin reports the deleted name until
+     * its next scan — measured live, a whole season unplayable at once.
+     * The SxxEyy token survives every upgrade, so when the exact file is
+     * gone, a UNIQUE same-episode file in the same directory is the same
+     * media in better clothes. Movies have no token; there a directory
+     * holding exactly one video file is equally unambiguous. Anything
+     * ambiguous still refuses — substituting a guess would be worse.
+     */
+    const stale = () => new Error(`Cannot open ${p || '(empty path)'}`);
+    if (!p) throw stale();
+    const dir = dirname(p);
+    let entries = [];
+    try {
+      entries = readdirSync(dir)
+        .filter((n) => VIDEO_EXTS.has(extname(n).toLowerCase()));
+    } catch { throw stale(); }
+    const code = basename(p).match(/S\d{1,3}E\d{1,4}/i)?.[0]?.toLowerCase();
+    const hits = code
+      ? entries.filter((n) => n.toLowerCase().includes(code))
+      : (entries.length === 1 ? entries : []);
+    if (hits.length !== 1) throw stale();
+    console.warn(`[library] catalogue path is stale (quality upgrade?) — `
+      + `playing "${hits[0]}" instead of "${basename(p)}". `
+      + `A Jellyfin rescan will settle it.`);
+    return join(dir, hits[0]);
   }
 
   async allPaths({ limit = 5000 } = {}) {
