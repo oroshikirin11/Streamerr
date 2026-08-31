@@ -72,6 +72,15 @@ export class TcpBridge {
 
     const remote = createConnection({ host: m[1], port: Number(m[2]) });
     remote.setNoDelay(true);
+    /**
+     * A filtered port drops the SYN and answers NOTHING — without a dial
+     * deadline the connect hangs forever, the local socket backpressures,
+     * and the publisher freezes at ~0x with no error anywhere (measured on
+     * the first live attempt: firewall closed, 40s of silent stall). Ten
+     * seconds is generous for a WAN dial; then fail loudly and let
+     * supervision retry.
+     */
+    remote.setTimeout(10_000);
     const drop = (why) => {
       // Closing the LOCAL side is the whole failure model: the publisher
       // gets EPIPE, exits, and supervision restarts with backoff.
@@ -79,7 +88,12 @@ export class TcpBridge {
       local.destroy();
       remote.destroy();
     };
+    remote.on('timeout', () => drop(
+      `no answer from ${m[1]}:${m[2]} within 10s — port filtered, `
+      + 'receiver down, or firewall closed'));
     remote.on('connect', () => {
+      remote.setTimeout(0);
+      this.log(`[tcp-bridge] connected to ${m[1]}:${m[2]} — authenticated, splicing\n`);
       remote.write(TCP_PREAMBLE(String(key ?? '')));
       local.pipe(remote);
       local.resume();
