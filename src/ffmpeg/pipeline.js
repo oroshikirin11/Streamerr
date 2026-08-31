@@ -1091,8 +1091,10 @@ export class PipelinePlayout extends EventEmitter {
        * within half a second. The old byte-counting clock died with the
        * rawvideo pipe.
        */
+      // headPts is SOURCE-LOCAL (the canvas clock is 0-based per source);
+      // shift is clip-absolute, so the offset goes back on before the max.
       const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0,
-        this._ovFeed?.headPts?.() ?? 0);
+        (this._ovFeed?.headPts?.() ?? 0) + (this._pipeClipOffset ?? 0));
       const cached = this._cachedSubs(item.srcPath);
       const overlayFile = this._overlayFile(item, 0);
       /**
@@ -3845,7 +3847,16 @@ export class PipelinePlayout extends EventEmitter {
         }
         // Consumption-paced canvas: hold the renderer's lead near the
         // encode head so an Apply's continuation point is always close.
-        this._ovFeed?.pace?.(this.position);
+        //
+        // SOURCE-LOCAL time, not clip-absolute: the canvas clock restarts
+        // with each source (-ss makes the video 0-based, NUT carries those
+        // pts). Feeding clip-absolute position here after a SEEK made the
+        // reaper believe every canvas byte was ~600s consumed — it punched
+        // the whole file to zeros under the reader and the broadcast froze
+        // at the seek point (measured live on the N100, pos pinned for 98s
+        // while the source idled). clipOffset 0 hid this on every unseeked
+        // clip.
+        this._ovFeed?.pace?.(this.position - (this._pipeClipOffset ?? 0));
       }
 
       const wall = Date.now();
