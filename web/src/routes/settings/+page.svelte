@@ -57,6 +57,10 @@
   ];
   const pictureCurrent = $derived.by(() => {
     if (!cfg) return null;
+    // Simple's posture includes the classic overlay engine: the armed
+    // compositor is an advanced trade (it can demote HDR and cost a 4K
+    // title its realtime margin), so a config running it is "customized".
+    if (cfg.encoder?.overlayPipe !== false) return null;
     const c = cfg.encoder?.codec || 'h264';
     if (c === 'hevc' && cfg.encoder?.hdrOutput) return 'best';
     if (c === 'h264') return 'compat';
@@ -74,6 +78,10 @@
     } else {
       cfg.encoder.codec = 'h264';
     }
+    // Every Simple posture runs the classic overlay engine: an armed
+    // compositor is what demoted HDR and drained a 4K title tonight —
+    // exactly the class of surprise Simple exists to rule out.
+    cfg.encoder.overlayPipe = false;
     syncPickers();
     await save('encoder');
   }
@@ -89,8 +97,10 @@
   /** The lever's diff, shown under "what this sets". */
   const pictureDiff = (id) => (id === 'best'
     ? [['Codec', 'H.265'], ['HDR output', 'on'],
-      ['Passthrough limit', 'at least 30 Mbps']]
-    : [['Codec', 'H.264']]);
+      ['Passthrough limit', 'at least 30 Mbps'],
+      ['Overlay engine', 'classic — applies restart behind the buffer']]
+    : [['Codec', 'H.264'],
+      ['Overlay engine', 'classic — applies restart behind the buffer']]);
 
   function setBuffer(n) {
     const secs = Math.min(60, Math.max(1, Math.round(Number(n) || 15)));
