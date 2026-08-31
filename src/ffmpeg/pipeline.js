@@ -46,6 +46,7 @@ import {
   splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
 } from './overlay-image.js';
 import { publishOutputArgs, targetUrl, SECRET_FIELDS } from '../publish.js';
+import { TcpBridge } from './tcp-bridge.js';
 import { OverlayFeed } from './overlay-feed.js';
 import { rendererArgs, pipeInputArgs } from './overlay-renderer.js';
 
@@ -563,6 +564,10 @@ export class PipelinePlayout extends EventEmitter {
     // first 10s, and a cold Bluray over SMB can take longer than that to
     // open. Reading the head first means the source starts hot.
     await this._warm(first);
+    // Raw-TCP destinations publish through a loopback bridge that owns the
+    // real connection (see tcp-bridge.js). Listeners are created once here
+    // and survive publisher restarts; only the remote dial is per-session.
+    await this._prepareTcpBridges();
     // A chunked clip produces nothing until its first chunk has finished
     // encoding, and then nothing again until the second one does. Opening
     // the RTMP session before that cushion exists put the encode latency
@@ -771,6 +776,8 @@ export class PipelinePlayout extends EventEmitter {
     // stall on a fifo nobody reads.
     try { this._ovFeed?.stopSync(); } catch { /* already down */ }
     this._ovFeed = null;
+    this._tcpBridges?.forEach((b) => { try { b.close(); } catch { /* down */ } });
+    this._tcpBridges = null;
     // Stopping during an off-air break: no publisher exists, so the close
     // handler that normally finishes a broadcast will never run.
     if (this._break) {
@@ -1370,6 +1377,39 @@ export class PipelinePlayout extends EventEmitter {
 
   // ── publisher ────────────────────────────────────────────────────────
 
+  /**
+   * One loopback bridge per raw-TCP destination, created before the first
+   * publisher spawn and kept for the broadcast's life. The bridge reads
+   * creds through a closure, so a settings edit reaches the next dial
+   * without a rebuild.
+   */
+  async _prepareTcpBridges() {
+    const tcp = this.destinations.filter((d) => d.protocol === 'tcp');
+    if (!tcp.length) return;
+    this._tcpBridges ??= new Map();
+    for (const d of tcp) {
+      if (this._tcpBridges.has(d)) continue;
+      const bridge = new TcpBridge(() => d.creds, (m) => this.emit('log', m));
+      await bridge.listen();
+      this._tcpBridges.set(d, bridge);
+    }
+  }
+
+  /**
+   * The destination set as the publisher's ffmpeg sees it: raw-TCP targets
+   * swapped for their loopback bridge. The real address and the stream key
+   * stay on this side of the process boundary.
+   */
+  _publishDests() {
+    if (!this._tcpBridges?.size) return this.destinations;
+    return this.destinations.map((d) => {
+      const bridge = this._tcpBridges.get(d);
+      return bridge?.port
+        ? { ...d, creds: { ...d.creds, url: `tcp://127.0.0.1:${bridge.port}` } }
+        : d;
+    });
+  }
+
   _spawnPublisher() {
     /**
      * BEFORE the byte counter resets: a replacement publisher must start
@@ -1421,7 +1461,7 @@ export class PipelinePlayout extends EventEmitter {
        * and the tee. One destination produces exactly the argument list this
        * used to hardcode; several produce a tee.
        */
-      ...publishOutputArgs(this.destinations, {
+      ...publishOutputArgs(this._publishDests(), {
         codec: this.profile?.codec ?? 'h264',
         videoBitrate: this.profile?.videoBitrate ?? null,
       }),

@@ -18,7 +18,11 @@
     { id: 'rtmp', label: 'RTMP' },
     { id: 'rtmps', label: 'RTMPS' },
     { id: 'srt', label: 'SRT' },
+    { id: 'tcp', label: 'TCP' },
   ];
+  // Protocols that can carry a non-H.264 codec — mirror of the server's
+  // protocolCarries(): container-honest transports only.
+  const MODERN_CARRIERS = ['srt', 'tcp'];
   const uid = () => Math.random().toString(36).slice(2, 10);
 
   /**
@@ -44,7 +48,7 @@
    * anything the operator did not type into — which is exactly what the
    * server expects, and how the Owncast key field has always behaved.
    */
-  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'] };
+  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key'] };
   let publishSaved = $state({});
 
   /**
@@ -88,7 +92,7 @@
   }
   function unmaskPublish(pub) {
     const seen = {};
-    for (const proto of ['rtmp', 'rtmps', 'srt']) {
+    for (const proto of ['rtmp', 'rtmps', 'srt', 'tcp']) {
       for (const f of SECRET_OF[proto]) {
         if (pub?.[proto]?.[f] === '__SET__') { seen[`${proto}.${f}`] = true; pub[proto][f] = ''; }
       }
@@ -103,7 +107,7 @@
   }
   function maskPublish(pub) {
     const out = JSON.parse(JSON.stringify(pub));
-    for (const proto of ['rtmp', 'rtmps', 'srt']) {
+    for (const proto of ['rtmp', 'rtmps', 'srt', 'tcp']) {
       for (const f of SECRET_OF[proto]) {
         if (!out[proto][f] && publishSaved[`${proto}.${f}`]) out[proto][f] = '__SET__';
       }
@@ -120,9 +124,14 @@
   // anything newer needs SRT — the server routes the primary to its SRT
   // slot automatically. These helpers let the card say what will happen.
   const codecLabel = () => ({ hevc: 'H.265', av1: 'AV1' }[cfg.encoder.codec] ?? 'H.264');
-  const effProto = () => ((cfg.encoder.codec || 'h264') !== 'h264' ? 'srt' : cfg.publish.protocol);
+  const effProto = () => {
+    if ((cfg.encoder.codec || 'h264') === 'h264') return cfg.publish.protocol;
+    // A modern codec keeps a carrier that can hold it; otherwise the
+    // server routes to the SRT slot, so show that.
+    return MODERN_CARRIERS.includes(cfg.publish.protocol) ? cfg.publish.protocol : 'srt';
+  };
   const sitOuts = () => (cfg.publish.extras ?? [])
-    .filter((e) => e.enabled !== false && e.protocol !== 'srt')
+    .filter((e) => e.enabled !== false && !MODERN_CARRIERS.includes(e.protocol))
     .map((e) => e.name || e.protocol);
   function addExtra() {
     cfg.publish.extras = [...(cfg.publish.extras ?? []),
@@ -663,11 +672,12 @@
     </select>
     {#if (cfg.encoder.codec || 'h264') !== 'h264'}
       <p class="muted small">
-        {codecLabel()} travels over SRT, so the stream uses the SRT slot below
-        automatically. Your RTMP setup is kept and comes back with H.264.
-        {#if !cfg.publish.srt?.url}
-          <strong>No SRT server is configured yet — fill the slot or the
-          stream will refuse to start.</strong>
+        {codecLabel()} needs SRT or TCP. Pick either below — with RTMP
+        selected the stream uses the SRT slot automatically, and your RTMP
+        setup is kept and comes back with H.264.
+        {#if !cfg.publish[effProto()]?.url}
+          <strong>No {effProto().toUpperCase()} server is configured yet —
+          fill the slot or the stream will refuse to start.</strong>
         {/if}
         {#if sitOuts().length}
           Sitting out: {sitOuts().join(', ')} — RTMP cannot carry
@@ -691,15 +701,16 @@
              obvious at a glance that switching away from one will not lose
              it — and that the one in use is genuinely configured. -->
         <button type="button" class:on={effProto() === pr.id}
-                disabled={(cfg.encoder.codec || 'h264') !== 'h264' && pr.id !== 'srt'}
-                title={(cfg.encoder.codec || 'h264') !== 'h264' && pr.id !== 'srt'
-                  ? `${pr.label} cannot carry ${codecLabel()} — the codec picked the protocol`
+                disabled={(cfg.encoder.codec || 'h264') !== 'h264' && !MODERN_CARRIERS.includes(pr.id)}
+                title={(cfg.encoder.codec || 'h264') !== 'h264' && !MODERN_CARRIERS.includes(pr.id)
+                  ? `${pr.label} cannot carry ${codecLabel()} — pick SRT or TCP`
                   : undefined}
                 onclick={() => {
-                  // The click edits the H.264 memory; with another codec the
-                  // choice is not the operator's to make (SRT carries it),
-                  // so the buttons for impossible carriers are disabled.
-                  if ((cfg.encoder.codec || 'h264') === 'h264') cfg.publish.protocol = pr.id;
+                  // With H.264 any protocol is choosable; with a modern
+                  // codec only the carriers that can hold it are, and the
+                  // impossible ones are disabled above.
+                  if ((cfg.encoder.codec || 'h264') === 'h264'
+                    || MODERN_CARRIERS.includes(pr.id)) cfg.publish.protocol = pr.id;
                 }}>
           <strong>{pr.label}</strong>
           {#if cfg.publish[pr.id]?.url}
@@ -733,6 +744,19 @@
       upload) go to 2000+: burst loss at the line&rsquo;s edge needs a deep
       window or it surfaces as picture artifacts at the viewer.
     </p>
+    {:else if effProto() === 'tcp'}
+      <label>Server address</label>
+      <input bind:value={cfg.publish.tcp.url} spellcheck="false"
+             placeholder="tcp://ingest.example.com:9711" />
+
+      <label>Stream key</label>
+      <input type="password" bind:value={cfg.publish.tcp.key}
+             placeholder={savedHint('tcp.key') ?? 'from your server'} />
+      <p class="muted small">
+        Raw MPEG-TS over plain TCP: every codec, and reliable on an upload
+        whose UDP loss SRT cannot ride out — lost packets retransmit instead
+        of becoming picture artifacts, and the buffer absorbs the delay.
+      </p>
     {:else}
       <label>Server address</label>
       <input bind:value={cfg.publish[cfg.publish.protocol].url} spellcheck="false"

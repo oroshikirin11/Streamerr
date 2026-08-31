@@ -11,7 +11,7 @@
  */
 
 /** Protocols that can be published to, in the order the UI offers them. */
-export const PROTOCOLS = ['rtmp', 'rtmps', 'srt'];
+export const PROTOCOLS = ['rtmp', 'rtmps', 'srt', 'tcp'];
 
 /** Fields that must never be logged, echoed to a client, or put in an error. */
 export const SECRET_FIELDS = ['key', 'passphrase', 'streamId'];
@@ -34,6 +34,16 @@ export function publishDefaults() {
     rtmp: { url: '', key: '' },
     rtmps: { url: '', key: '' },
     srt: { url: '', streamId: '', passphrase: '', latencyMs: 200 },
+    /**
+     * Raw MPEG-TS over plain TCP — for lines whose UDP loss no SRT
+     * latency window survives (measured on the deployment: evening
+     * upstream bursts corrupted every UDP stream while TCP + the bank
+     * stayed clean). TCP has nowhere to carry a stream key, and ffmpeg
+     * cannot send bytes before its own, so the engine runs a local
+     * bridge: ffmpeg writes to 127.0.0.1, the bridge dials the real
+     * target, sends `SGR-TS/1 <key>\n` and splices bytes from there.
+     */
+    tcp: { url: '', key: '' },
     // Additional destinations, fanned out from the one encode.
     extras: [],
   };
@@ -42,12 +52,13 @@ export function publishDefaults() {
 /** The container each protocol carries. */
 export function muxerFor(protocol, codec = 'h264') {
   // AV1 cannot ride mpegts (measured on the receiver: demuxes as
-  // bin_data) — over SRT it goes in matroska, per the receiver contract.
-  if (protocol === 'srt' && codec === 'av1') return 'matroska';
+  // bin_data) — over SRT/TCP it goes in matroska, per the receiver
+  // contract (the ingest probes the container, it never assumes TS).
+  if ((protocol === 'srt' || protocol === 'tcp') && codec === 'av1') return 'matroska';
   return muxerForBase(protocol);
 }
 function muxerForBase(protocol) {
-  return protocol === 'srt' ? 'mpegts' : 'flv';
+  return protocol === 'srt' || protocol === 'tcp' ? 'mpegts' : 'flv';
 }
 
 const clampLatency = (v) => {
@@ -127,6 +138,23 @@ export function targetUrl(protocol, creds = {}) {
     return `${url}${sep}${q.join('&')}`;
   }
 
+  if (protocol === 'tcp') {
+    if (!/^tcp:\/\/[^/\s:]+:\d+$/i.test(url)) {
+      throw new Error('The server address must look like tcp://host:port');
+    }
+    const key = String(creds.key ?? '').trim();
+    if (!key) throw new Error('The stream key is empty');
+    if (/[\r\n]/.test(key)) throw new Error('The stream key cannot contain line breaks');
+    /**
+     * The key is deliberately NOT in this URL: ffmpeg never sees the real
+     * target. The engine's bridge (tcp-bridge.js) dials it, authenticates
+     * with the preamble line and splices; what ffmpeg gets is the bridge's
+     * 127.0.0.1 address, already substituted by the engine. nodelay:
+     * never let Nagle sit on a live broadcast's writes.
+     */
+    return `${url}?tcp_nodelay=1`;
+  }
+
   throw new Error(`Unknown protocol: ${protocol}`);
 }
 
@@ -140,6 +168,7 @@ export function redactUrl(protocol, creds = {}) {
     if (String(creds.passphrase ?? '').trim()) bits.push('passphrase=********');
     return `${url}?mode=caller&${bits.join('&')}`;
   }
+  if (protocol === 'tcp') return `${url} (key=********, via local bridge)`;
   return `${url}/${'*'.repeat(8)}`;
 }
 
@@ -149,9 +178,12 @@ export function redactUrl(protocol, creds = {}) {
  * failures by slave index, and the one the operator configured first should
  * be the one they can find in the log.
  */
-/** Can this protocol carry this codec to the receivers we deploy to? */
+/** Can this protocol carry this codec to the receivers we deploy to?
+ *  H.264 rides anything; HEVC/AV1 need a container-honest transport —
+ *  SRT or raw TCP. RTMP stays H.264-only because the receiver's RTMP
+ *  stack has no Enhanced RTMP. */
 export const protocolCarries = (protocol, codec = 'h264') => (
-  codec === 'h264' ? true : protocol === 'srt'
+  codec === 'h264' ? true : protocol === 'srt' || protocol === 'tcp'
 );
 
 export function destinations(publish, codec = 'h264') {
@@ -292,7 +324,9 @@ export function publishOutputArgs(dests, { videoBitrate = null, codec = 'h264' }
 }
 
 /** Secret fields on a destination, by protocol. */
-const PUBLISH_SECRETS = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'] };
+const PUBLISH_SECRETS = {
+  rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key'],
+};
 
 export function redactPublish(publish) {
   const pub = { ...publishDefaults(), ...(publish ?? {}) };
@@ -307,6 +341,7 @@ export function redactPublish(publish) {
     rtmp: mask('rtmp', pub.rtmp),
     rtmps: mask('rtmps', pub.rtmps),
     srt: mask('srt', pub.srt),
+    tcp: mask('tcp', pub.tcp),
     extras: (pub.extras ?? []).map((e) => ({ ...mask(e.protocol, e), protocol: e.protocol })),
   };
 }
@@ -319,7 +354,7 @@ export function redactPublish(publish) {
  */
 export function restorePublishSecrets(patch, publish) {
   const stored = { ...publishDefaults(), ...(publish ?? {}) };
-  for (const proto of ['rtmp', 'rtmps', 'srt']) {
+  for (const proto of ['rtmp', 'rtmps', 'srt', 'tcp']) {
     if (!patch[proto]) continue;
     for (const f of PUBLISH_SECRETS[proto]) {
       if (patch[proto][f] === '__SET__') patch[proto][f] = stored[proto]?.[f] ?? '';
