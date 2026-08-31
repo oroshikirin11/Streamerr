@@ -56,6 +56,32 @@ export class JellyfinLibrary {
     return res.json();
   }
 
+  /**
+   * Ask Jellyfin to rescan its libraries — the proper reconciliation when
+   * a catalogued path turns out stale (Sonarr upgraded a file and nothing
+   * told Jellyfin). Debounced hard: one stale EPISODE means the whole
+   * season probably moved, and 25 rescan requests help nobody. Fire and
+   * forget — the substitution already kept the broadcast running; this
+   * just repairs the source of truth in the background.
+   */
+  requestRescan() {
+    const now = Date.now();
+    if ((this._rescanAt ?? 0) > now - 10 * 60 * 1000) return;
+    this._rescanAt = now;
+    const u = new URL(`${this.url}/Library/Refresh`);
+    fetch(u, {
+      method: 'POST',
+      headers: { Authorization: authHeader(this.apiKey) },
+      signal: AbortSignal.timeout(20_000),
+    }).then((res) => {
+      console.warn(res.ok
+        ? '[library] stale catalogue path — asked Jellyfin to rescan; listings refresh as it finishes'
+        : `[library] asked Jellyfin to rescan but it answered ${res.status}`);
+    }).catch((err) => {
+      console.warn(`[library] could not ask Jellyfin to rescan: ${err.message}`);
+    });
+  }
+
   /** Verify credentials and report who we are talking to. */
   async test() {
     const info = await this._get('/System/Info');

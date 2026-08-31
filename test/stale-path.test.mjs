@@ -44,5 +44,18 @@ let threw2 = false;
 try { lib.resolveMapped(join(d1, 'Berserk - S01E09 - Missing.mkv')); } catch { threw2 = true; }
 check('no candidate -> refuses', threw2);
 
+// The proper route: substitution notifies, the paired catalogue rescans.
+{
+  const { PairedLibrary } = await import('../src/library/paired.js');
+  let rescans = 0;
+  const catalogue = { requestRescan: () => { rescans += 1; }, configured: true };
+  const paired = new PairedLibrary(catalogue, lib, []);
+  void paired;
+  lib.resolveMapped(join(d1, 'Berserk - S01E02 - Band of the Hawk HDTV-1080p.mkv'));
+  check('stale substitution asks the catalogue to rescan', rescans === 1);
+  lib.resolveMapped(got);
+  check('a healthy open does not', rescans === 1);
+}
+
 console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');
 process.exit(failures ? 1 : 0);

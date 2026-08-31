@@ -270,6 +270,8 @@ export class FilesystemLibrary {
     console.warn(`[library] catalogue path is stale (quality upgrade?) — `
       + `playing "${hits[0]}" instead of "${basename(p)}". `
       + `A Jellyfin rescan will settle it.`);
+    // The paired catalogue subscribes here to trigger that rescan itself.
+    try { this.onStalePath?.(p, join(dir, hits[0])); } catch { /* advisory */ }
     return join(dir, hits[0]);
   }
 

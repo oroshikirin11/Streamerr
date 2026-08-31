@@ -27,6 +27,16 @@ export class PairedLibrary {
     this.media = media;
     this.rules = rules ?? [];
     this.map = makeMapper(this.rules);
+    /**
+     * The proper route for a stale path, not just the workaround: when the
+     * media half substitutes an upgraded file, the CATALOGUE is what is
+     * wrong — so ask it to rescan itself (debounced inside requestRescan).
+     * Listings are queried live, so they heal as soon as Jellyfin's scan
+     * lands; the substitution only ever bridges the gap.
+     */
+    if (this.media && typeof this.catalogue?.requestRescan === 'function') {
+      this.media.onStalePath = () => this.catalogue.requestRescan();
+    }
   }
 
   /**
