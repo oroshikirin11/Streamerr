@@ -615,6 +615,15 @@ const visibleOverlay = () => (config.overlay?.hidden
   ? []
   : (config.overlay?.items ?? []).filter((i) => i?.enabled !== false));
 
+/**
+ * Whether the studio has anything the operator might SHOW — hidden or not.
+ * The overlay pipe arms on this, not on visibility: a broadcast that spawns
+ * with the studio hidden must still carry the pipe, or the first "show"
+ * needs a source respawn — a splice, and at sub-1x titles a visible stall.
+ */
+const overlayConfigured = () => (config.overlay?.items ?? [])
+  .some((i) => i?.enabled !== false);
+
 function streamStatus() {
   if (!engine) {
     return { status: 'stopped', playing: null, queue: [], preview: previewEnabled() };
@@ -1412,6 +1421,9 @@ app.put('/api/config', (req, res) => {
     // air until the next broadcast. The engine decides whether the change is
     // worth restarting the source for.
     if (patch.overlay !== undefined && engine) {
+      // Arming state first: setOverlay may respawn, and the spawn must
+      // already know whether the pipe stays armed for later toggles.
+      engine.setOverlayConfigured(overlayConfigured());
       engine.setOverlay(visibleOverlay());
     }
     // Turning the preview off mid-broadcast takes effect immediately: every
@@ -2074,6 +2086,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     // hardware the moment it is selected again.
     ...config.encoder, backend: softwareCodec ? 'x264' : sel.backend,
     overlay: visibleOverlay(),
+    overlayConfigured: overlayConfigured(),
     // The H.264 anchor bitrate never changes; other codecs derive their
     // cheaper rate from it (or an explicit hevcBitrate/av1Bitrate override).
     videoBitrate: codecBitrate(config.encoder),

@@ -74,6 +74,16 @@ check('a clip with NOTHING to draw is refused — no free composite',
 check('configured-but-hidden overlays still pipe (show/hide stays free)',
   planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
     { overlay: [{ type: 'image', file: 'x.png', enabled: true }] }) !== null, true);
+// A HIDDEN studio hands the engine an empty list; only overlayConfigured
+// says a show-toggle is possible. Without it the first "show" of every
+// broadcast paid a source respawn — splice, re-encode, and on a sub-1x
+// title a visible stall.
+check('a hidden studio arms through overlayConfigured alone',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
+    { overlay: [], overlayConfigured: true }) !== null, true);
+check('overlayConfigured false with nothing visible stays refused',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
+    { overlay: [], overlayConfigured: false }), null);
 check('probed pillarbox with subtitles + a picture is eligible',
   planFor({ ...cases['subtitled pillarbox, pad-overlay'],
     overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }] }) !== null, true);

@@ -1059,6 +1059,18 @@ export class PipelinePlayout extends EventEmitter {
    * profile from the box, and an overlay that lived only on the profile
    * would vanish the next time an episode of a different shape came up.
    */
+  /**
+   * Whether the studio holds anything the operator might show, visible or
+   * not. Arming rides on this so a hidden studio still spawns WITH the
+   * pipe and the first "show" is a renderer swap, not a source respawn.
+   * No restart here: it only steers the next planOverlayPipe decision.
+   */
+  setOverlayConfigured(configured) {
+    const v = Boolean(configured);
+    this._box.overlayConfigured = v;
+    if (this.profile) this.profile.overlayConfigured = v;
+  }
+
   setOverlay(items) {
     const next = Array.isArray(items) ? items : [];
     // Applying is a restart, so it must be worth one. The panel saves the
@@ -4332,8 +4344,10 @@ export function planOverlayPipe({
    * The first overlay on such a clip goes out through the classic
    * cushion-kept respawn — invisible to viewers, the bank covers it — and
    * from then on the pipe is armed and every apply is a free swap.
-   * Configured-but-hidden overlays count as something to draw, so the
-   * show/hide toggle stays free.
+   * Configured-but-hidden overlays count as something to draw (the
+   * overlayConfigured clause below — for a long time this sentence was
+   * an aspiration the code did not honour, and every first "show" of a
+   * broadcast paid the respawn), so the show/hide toggle stays free.
    */
   /**
    * STUDIO content only — subtitles alone never arm the pipe. Operator
@@ -4346,7 +4360,11 @@ export function planOverlayPipe({
    */
   const anythingToDraw = (overlayImages ?? []).length > 0
     || Boolean(overlayAnimated)
-    || (profile.overlay ?? []).some((i) => i?.enabled !== false);
+    || (profile.overlay ?? []).some((i) => i?.enabled !== false)
+    // Configured-but-hidden arms the pipe too — measured armed-idle at
+    // ~20% source CPU on a 1080p title, against a full source respawn
+    // (splice + re-encode) for the first "show" without it.
+    || Boolean(profile.overlayConfigured);
   if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);
 
@@ -4539,6 +4557,21 @@ export function buildRendererSpec({
   // without a theory that explains BOTH reproductions.
   const thin = `,mpdecimate=max=${beat}`;
   /**
+   * pipeTuning.moverThin — A/B knob for the paragraph above, because the
+   * constraint has MOVED since it was written: the bounce now runs the
+   * renderer at ~130% CPU on a saturated 4-core box (measured live, Code
+   * Geass 1080p23.976, one bouncing PNG, encode 0.87–0.91x), and a
+   * full-frame SAD that decides nothing — motion passes every frame — is
+   * a real suspect in that bill. false drops the thin from the MOVING
+   * chain only; the static chain keeps its heartbeat economy. Default
+   * true, i.e. shipped behaviour: the green-corruption correlation is
+   * 2-for-2 and this knob exists to finally develop the theory (live,
+   * PUT-able, no rebuild), not to bet a broadcast on its absence. A timed
+   * mover outside its window also loses the thin with it, so an off-window
+   * static canvas uploads at full rate — an A/B cost, not a shipping one.
+   */
+  const moverThin = tune.moverThin === false ? '' : thin;
+  /**
    * Thin BEFORE pad — worth ~85MB/s of renderer memcpy on a banded title:
    * SAD compares the 420px band instead of the padded 1080p frame, and the
    * full-frame pad runs only for the ~2 frames a second that survive.
@@ -4564,7 +4597,7 @@ export function buildRendererSpec({
   const filters = imgs.filters.length || movers.filters.length
     ? [`${head}${headOut}`,
       ...movers.filters,
-      `${preThin}null${thin}${pad}${imgs.filters.length ? '[sub]' : '[out]'}`,
+      `${preThin}null${movers.filters.length ? moverThin : thin}${pad}${imgs.filters.length ? '[sub]' : '[out]'}`,
       ...(imgs.filters.length ? [...imgs.filters, '[cv]null[out]'] : [])]
     : [`${head}${thin}${pad}[out]`];
   inputs.push(...movers.inputs, ...imgs.inputs);
