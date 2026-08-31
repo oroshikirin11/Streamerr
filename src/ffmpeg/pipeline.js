@@ -4547,30 +4547,20 @@ export function buildRendererSpec({
    */
   // The heartbeat tracks the cadence so framesync's pairing queue stays at
   // half a second of media either way. mpdecimate stays on the moving chain
-  // too, and this is EMPIRICAL, not caution: removing it was tried twice
-  // (63d5fe9 and again after the swap-time guard landed) and both times the
-  // live bounce showed green corruption on the N100 that the otherwise
-  // identical build did not; both times the removal also bought nothing —
-  // the bounce is GPU/upload-bound (~0.6x at ~45% renderer CPU), so the
-  // SAD it saves was never the constraint. Mechanism unknown; the
-  // correlation is 2-for-2 and the upside is zero. Do not remove it again
-  // without a theory that explains BOTH reproductions.
+  // too, and this is EMPIRICAL, not caution: removing it is now 3-for-3.
+  // Twice (63d5fe9 and again after the swap-time guard landed) the live
+  // bounce showed green corruption on the N100; the third trial — a
+  // pipeTuning knob on the append-file transport, dropped into a live
+  // swap — hung the encoder DEAD at the renderer join: position frozen at
+  // the continuation point, source and renderer both alive at 0% CPU, and
+  // a swap back to the thinned chain could not unstick it. All three
+  // failures sit at the NUT stream JOIN, not in the pixels: the reader
+  // only resyncs onto a successor stream whose framing matches what the
+  // thinned chain produces (fifo era: misread frames — the green; append
+  // era: a demuxer that never accepts the join at all). The SAD cost is
+  // real (~130% renderer CPU at full rate where nothing is ever dropped),
+  // but this filter is load-bearing for the transport. Do not remove it.
   const thin = `,mpdecimate=max=${beat}`;
-  /**
-   * pipeTuning.moverThin — A/B knob for the paragraph above, because the
-   * constraint has MOVED since it was written: the bounce now runs the
-   * renderer at ~130% CPU on a saturated 4-core box (measured live, Code
-   * Geass 1080p23.976, one bouncing PNG, encode 0.87–0.91x), and a
-   * full-frame SAD that decides nothing — motion passes every frame — is
-   * a real suspect in that bill. false drops the thin from the MOVING
-   * chain only; the static chain keeps its heartbeat economy. Default
-   * true, i.e. shipped behaviour: the green-corruption correlation is
-   * 2-for-2 and this knob exists to finally develop the theory (live,
-   * PUT-able, no rebuild), not to bet a broadcast on its absence. A timed
-   * mover outside its window also loses the thin with it, so an off-window
-   * static canvas uploads at full rate — an A/B cost, not a shipping one.
-   */
-  const moverThin = tune.moverThin === false ? '' : thin;
   /**
    * Thin BEFORE pad — worth ~85MB/s of renderer memcpy on a banded title:
    * SAD compares the 420px band instead of the padded 1080p frame, and the
@@ -4597,7 +4587,7 @@ export function buildRendererSpec({
   const filters = imgs.filters.length || movers.filters.length
     ? [`${head}${headOut}`,
       ...movers.filters,
-      `${preThin}null${movers.filters.length ? moverThin : thin}${pad}${imgs.filters.length ? '[sub]' : '[out]'}`,
+      `${preThin}null${thin}${pad}${imgs.filters.length ? '[sub]' : '[out]'}`,
       ...(imgs.filters.length ? [...imgs.filters, '[cv]null[out]'] : [])]
     : [`${head}${thin}${pad}[out]`];
   inputs.push(...movers.inputs, ...imgs.inputs);
