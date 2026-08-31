@@ -1071,6 +1071,98 @@ export class PipelinePlayout extends EventEmitter {
     if (this.profile) this.profile.overlayConfigured = v;
   }
 
+  /**
+   * The piped apply: replace only the renderer, through the same extract →
+   * spec → swap flow every live Apply runs. Shared with the crash handler
+   * below, so a renderer that dies mid-clip is rebuilt by exactly the code
+   * path that is already proven at every show/hide.
+   */
+  _pipedOverlayApply(item, dur) {
+    const tok = (this._selToken = (this._selToken ?? 0) + 1);
+    this._detached(this._extract(item).finally(() => {
+      if (this._stopping || this._selToken !== tok) return undefined;
+      if (this.current?.item !== item || this.status !== 'running') return undefined;
+      if (!this._pipedClip || !this._ovFeed?.active) return undefined;
+      /**
+       * The continuation point is simply where the encode head IS. The
+       * new renderer stamps clip-relative timestamps from here; anything
+       * already queued in framesync pairs first, a frame stamped slightly
+       * behind is dropped benignly, and the heartbeat covers any gap
+       * within half a second. The old byte-counting clock died with the
+       * rawvideo pipe.
+       */
+      const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0,
+        this._ovFeed?.headPts?.() ?? 0);
+      const cached = this._cachedSubs(item.srcPath);
+      const overlayFile = this._overlayFile(item, 0);
+      const overlayImages = this._overlayImages(item, shift);
+      const spec = buildRendererSpec({
+        profile: this.profile,
+        selection: this.selection,
+        srcPath: item.srcPath,
+        shift,
+        clipOffset: this._pipeClipOffset ?? 0,
+        duration: dur,
+        extractedPath: cached?.path ?? null,
+        fontsDir: cached?.fontsDir ?? null,
+        overlayPath: overlayFile,
+        overlayImages,
+        subBand: this._subtitleBand(
+          this.selection?.subtitle?.external
+            ? this.selection.subtitle.path ?? null
+            : cached?.path ?? null,
+          { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
+        ),
+        pin: this._pipePin ?? null,
+      });
+      if (!spec) {
+        // Eligibility changed underneath (a demotion mid-clip). The
+        // classic restart still works; use it rather than not applying.
+        const gop = this._bankTrimToAccessPoint();
+        this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
+          { duration: dur });
+        return undefined;
+      }
+      const swapArgs = rendererArgs(spec.spec);
+      this.emit('log', `[swap:overlay] ffmpeg ${this._redact(swapArgs.join(' '))}\n`);
+      return this._ovFeed.swap(swapArgs).then(() => {
+        this._rendererCrashes = 0;
+        const ahead = Math.max(0, (this.position ?? 0) - (this.aired ?? 0));
+        this.emit('log', '[overlay] applied live — no restart, reaches air '
+          + `in ~${ahead.toFixed(1)}s as the buffer plays out\n`);
+      });
+    }), 'applying overlays');
+  }
+
+  /**
+   * An unexpected renderer death used to strand the broadcast: nothing
+   * respawned the canvas, the source starved at the NUT join and the bank
+   * drained to zero (measured — an ENOSPC crash froze position with every
+   * process at 0% CPU). The feed has already cut any torn tail; respawn
+   * through the normal apply flow. Three deaths in a row means the pipe
+   * itself is sick — fall back to the classic restart, which rebuilds
+   * everything the way a track change does.
+   */
+  _rendererCrashed() {
+    if (this._stopping || this.status !== 'running' || !this.current) return;
+    if (!this._pipedClip || !this._ovFeed?.active) return;
+    const item = this.current.item;
+    const n = (this._rendererCrashes = (this._rendererCrashes ?? 0) + 1);
+    if (n > 2) {
+      this.emit('warn', 'overlay renderer keeps dying — restarting the source');
+      const gop = this._bankTrimToAccessPoint();
+      this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
+        { duration: this.current.duration });
+      return;
+    }
+    this.emit('log', `[overlay-pipe] renderer died — respawning (attempt ${n})\n`);
+    setTimeout(() => {
+      if (this._stopping || this.status !== 'running') return;
+      if (this.current?.item !== item || !this._pipedClip || !this._ovFeed?.active) return;
+      this._pipedOverlayApply(item, this.current.duration);
+    }, 500);
+  }
+
   setOverlay(items) {
     const next = Array.isArray(items) ? items : [];
     // Applying is a restart, so it must be worth one. The panel saves the
@@ -1126,59 +1218,7 @@ export class PipelinePlayout extends EventEmitter {
      * the splice, the DTS discontinuities and the re-encode.
      */
     if (this._pipedClip && this._ovFeed?.active) {
-      const tok = (this._selToken = (this._selToken ?? 0) + 1);
-      this._detached(this._extract(item).finally(() => {
-        if (this._stopping || this._selToken !== tok) return undefined;
-        if (this.current?.item !== item || this.status !== 'running') return undefined;
-        if (!this._pipedClip || !this._ovFeed?.active) return undefined;
-        /**
-         * The continuation point is simply where the encode head IS. The
-         * new renderer stamps clip-relative timestamps from here; anything
-         * already queued in framesync pairs first, a frame stamped slightly
-         * behind is dropped benignly, and the heartbeat covers any gap
-         * within half a second. The old byte-counting clock died with the
-         * rawvideo pipe.
-         */
-        const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0,
-          this._ovFeed?.headPts?.() ?? 0);
-        const cached = this._cachedSubs(item.srcPath);
-        const overlayFile = this._overlayFile(item, 0);
-        const overlayImages = this._overlayImages(item, shift);
-        const spec = buildRendererSpec({
-          profile: this.profile,
-          selection: this.selection,
-          srcPath: item.srcPath,
-          shift,
-          clipOffset: this._pipeClipOffset ?? 0,
-          duration: dur,
-          extractedPath: cached?.path ?? null,
-          fontsDir: cached?.fontsDir ?? null,
-          overlayPath: overlayFile,
-          overlayImages,
-          subBand: this._subtitleBand(
-            this.selection?.subtitle?.external
-              ? this.selection.subtitle.path ?? null
-              : cached?.path ?? null,
-            { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
-          ),
-          pin: this._pipePin ?? null,
-        });
-        if (!spec) {
-          // Eligibility changed underneath (a demotion mid-clip). The
-          // classic restart still works; use it rather than not applying.
-          const gop = this._bankTrimToAccessPoint();
-          this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
-            { duration: dur });
-          return undefined;
-        }
-        const swapArgs = rendererArgs(spec.spec);
-        this.emit('log', `[swap:overlay] ffmpeg ${this._redact(swapArgs.join(' '))}\n`);
-        return this._ovFeed.swap(swapArgs).then(() => {
-          const ahead = Math.max(0, (this.position ?? 0) - (this.aired ?? 0));
-          this.emit('log', '[overlay] applied live — no restart, reaches air '
-            + `in ~${ahead.toFixed(1)}s as the buffer plays out\n`);
-        });
-      }), 'applying overlays');
+      this._pipedOverlayApply(item, dur);
       return true;
     }
     // Same ordering as a track change, and for the same reason: extract
@@ -2752,7 +2792,9 @@ export class PipelinePlayout extends EventEmitter {
               `overlay-${process.pid}.fifo`),
             log: (m) => this.emit('log', m),
           });
+          this._ovFeed.onCrash = () => this._rendererCrashed();
           this._ovFeed.resetSync();
+          this._rendererCrashes = 0;
           const rArgs = rendererArgs(rSpec.spec);
           // The renderer spawns as visibly as the source: an entire hunt ran
           // blind on which files and filters production actually used.
@@ -4537,7 +4579,20 @@ export function buildRendererSpec({
   const chainRate = (tune.fullRate || perFrame ? plan.rate : halfRate(plan.rate)) || plan.rate;
   const beat = Number(tune.beat) > 0 ? Number(tune.beat) : 6;
   const readrate = Number(tune.readrate) > 0 ? String(tune.readrate) : '2.5';
-  const inputs = ['-f', 'lavfi', '-readrate', readrate, ...cap, '-i',
+  /**
+   * -readrate_catchup bounds the burst after a SIGSTOP. ffmpeg's readrate
+   * budget is wall-clock — stopped time counts as elapsed — so a paced
+   * renderer that sat frozen for 15s wakes up "behind" and, uncapped,
+   * sprints at machine speed to make it up. Measured on a 7800X3D: a
+   * full-rate 1080p RGBA canvas (~8.3MB/frame) flooded a 2GB /dev/shm in
+   * seconds, the writer died on ENOSPC mid-frame, and the torn tail hung
+   * the reader at the join. Capped, each CONT cycle writes at most a
+   * couple of seconds of canvas before pace() STOPs it again.
+   */
+  const catchup = Number(tune.catchup) > 0 ? String(tune.catchup)
+    : String(Math.max(Number(readrate), 3));
+  const inputs = ['-f', 'lavfi', '-readrate', readrate,
+    '-readrate_catchup', catchup, ...cap, '-i',
     `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
   /**
    * Timestamps are the continuation clock now, and they are CLIP-relative:

@@ -9,7 +9,7 @@
  */
 
 import { spawn, spawnSync } from 'child_process';
-import { closeSync, openSync, rmSync, statSync } from 'fs';
+import { closeSync, openSync, readSync, rmSync, statSync, truncateSync } from 'fs';
 import { setPriority } from 'os';
 
 export class OverlayFeed {
@@ -49,6 +49,7 @@ export class OverlayFeed {
     this._punched = 0;
     this._headPts = 0;
     this._stopped = false;
+    this._replacing = false;
     this._pacePos = null;
     this._samples = [];
     /**
@@ -174,6 +175,19 @@ export class OverlayFeed {
         // writes never block, so TERM always completes at a boundary.
         if (code !== 0 && code !== 255 && code !== null && this.active) {
           this.log(`[overlay-pipe] renderer exited ${code}: ${tail.split('\n').filter(Boolean).slice(-2).join(' | ')}\n`);
+          /**
+           * A crashed writer can leave a TORN frame at the tail — measured:
+           * an ENOSPC death mid-write left half a NUT packet, the reader's
+           * demuxer hung on it, and the broadcast froze with everyone at
+           * 0% CPU. Cut the file back to the last syncpoint so the reader
+           * only ever sees whole frame groups, then hand the engine the
+           * decision to respawn. Swap-time deaths don't come here: the
+           * engine is already replacing the renderer.
+           */
+          if (!this._replacing) {
+            this._truncateTailToSync();
+            this.onCrash?.();
+          }
         }
         resolve(code);
       });
@@ -190,9 +204,34 @@ export class OverlayFeed {
    * one is killed, its final partial frame padded, and the new one appended
    * so the reader sees one continuous stream.
    */
+  /**
+   * Cut a possibly-torn tail back to the last NUT syncpoint. Only ever
+   * called after an unexpected writer death; appends are frame-group
+   * atomic otherwise. The search window covers a few full-rate RGBA
+   * frames, which is more than one torn packet by construction.
+   */
+  _truncateTailToSync() {
+    try {
+      const size = statSync(this.path).size;
+      if (!size) return;
+      const window = Math.min(size, 64 * 1024 * 1024);
+      const start = size - window;
+      const buf = Buffer.allocUnsafe(window);
+      const fd = openSync(this.path, 'r');
+      try { readSync(fd, buf, 0, window, start); } finally { closeSync(fd); }
+      const at = buf.lastIndexOf(OverlayFeed.SYNC);
+      if (at <= 0) return;
+      const cut = start + at;
+      if (cut >= size) return;
+      truncateSync(this.path, cut);
+      this.log(`[overlay-pipe] torn tail cut at last syncpoint (-${size - cut} bytes)\n`);
+    } catch { /* file may be mid-reset */ }
+  }
+
   async swap(args) {
     if (!this.active) throw new Error('overlay feed is not active');
     const old = this._renderer;
+    this._replacing = true;
     if (old) {
       /**
        * Drain first, then TERM, KILL as escalation. beginDrain reroutes
@@ -212,7 +251,11 @@ export class OverlayFeed {
       await old.done;
       clearTimeout(grace);
     }
-    this.spawnRenderer(args);
+    try {
+      this.spawnRenderer(args);
+    } finally {
+      this._replacing = false;
+    }
   }
 
   _teardown() {
