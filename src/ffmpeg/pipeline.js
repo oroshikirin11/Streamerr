@@ -1055,10 +1055,7 @@ export class PipelinePlayout extends EventEmitter {
         // forward seam the publisher's pacer tolerates, and no seam at
         // all for viewers. `applySeconds` bounds the wait, as it does
         // for overlays.
-        const rewound = this._bankTrimTo(this.applySeconds ?? this.bufferSeconds);
-        const gop = this._bankTrimToAccessPoint();
-        // Never behind what has already gone out: those bytes are spent.
-        const resume = Math.max(this.aired ?? 0, this.position - rewound - gop);
+        const { rewound, gop, resume } = this._bankCutForApply(this.applySeconds);
         const ahead = Math.max(0, resume - (this.aired ?? resume));
         this.emit('log', `[tracks] applied — on air in ~${ahead.toFixed(1)}s `
           + (rewound > 0.05
@@ -1154,9 +1151,8 @@ export class PipelinePlayout extends EventEmitter {
       if (!spec) {
         // Eligibility changed underneath (a demotion mid-clip). The
         // classic restart still works; use it rather than not applying.
-        const gop = this._bankTrimToAccessPoint();
-        this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
-          { duration: dur });
+        const { resume } = this._bankCutForApply();
+        this._play(item, resume, { duration: dur });
         return undefined;
       }
       const swapArgs = rendererArgs(spec.spec);
@@ -1289,14 +1285,11 @@ export class PipelinePlayout extends EventEmitter {
        * none puts it on air at once and costs viewers a re-buffer, because
        * the publisher has nothing to send while the encoder catches up.
        */
-      const rewound = this._bankTrimTo(this.applySeconds ?? this.bufferSeconds);
       // GOP-aligned in every mode: the packet-aligned trim leaves a
       // truncated frame at the junction, and the decoder holds a still
       // frame until it resyncs. Ending the bank on an access point costs
       // up to one GOP of re-encode — the cushion absorbs it.
-      const gop = this._bankTrimToAccessPoint();
-      // Never behind what has already gone out: those bytes are spent.
-      const resume = Math.max(this.aired ?? 0, this.position - rewound - gop);
+      const { rewound, gop, resume } = this._bankCutForApply(this.applySeconds);
       const ahead = Math.max(0, resume - (this.aired ?? resume));
       this.emit('log', `[overlay] applied — on air in ~${ahead.toFixed(1)}s `
         + (rewound > 0.05
@@ -1919,13 +1912,25 @@ export class PipelinePlayout extends EventEmitter {
         dropped += last.data.length;
         this._bank.pop();
       } else {
-        last.data = last.data.subarray(0, last.data.length - excess);
+        this._chunkShrink(last, excess);
         dropped += excess;
         excess = 0;
       }
     }
     this._bankBytes -= dropped;
     return dropped / perSecond;
+  }
+
+  /**
+   * Truncating a banked chunk shortens the encode it represents; its
+   * pos/tl stamps mark the chunk's END at push time and must shrink with
+   * it, or a resume-from-tail lands ahead of the bytes that remain.
+   */
+  _chunkShrink(last, bytes) {
+    last.data = last.data.subarray(0, last.data.length - bytes);
+    const dt = bytes / (this._kbps * 125);
+    if (last.pos != null) last.pos -= dt;
+    if (last.tl != null) last.tl -= dt;
   }
 
   _bankTrimToPacket() {
@@ -1942,7 +1947,7 @@ export class PipelinePlayout extends EventEmitter {
       while (excess > 0 && this._bank?.length) {
         const last = this._bank[this._bank.length - 1];
         if (last.data.length <= excess) { excess -= last.data.length; this._bank.pop(); } else {
-          last.data = last.data.subarray(0, last.data.length - excess); excess = 0;
+          this._chunkShrink(last, excess); excess = 0;
         }
       }
       this._bankBytes -= dropped;
@@ -1957,7 +1962,7 @@ export class PipelinePlayout extends EventEmitter {
         excess -= last.data.length;
         this._bank.pop();
       } else {
-        last.data = last.data.subarray(0, last.data.length - excess);
+        this._chunkShrink(last, excess);
         excess = 0;
       }
     }
@@ -2007,11 +2012,84 @@ export class PipelinePlayout extends EventEmitter {
     while (excess > 0 && this._bank?.length) {
       const last = this._bank[this._bank.length - 1];
       if (last.data.length <= excess) { excess -= last.data.length; this._bank.pop(); } else {
-        last.data = last.data.subarray(0, last.data.length - excess); excess = 0;
+        this._chunkShrink(last, excess); excess = 0;
       }
     }
     this._bankBytes -= dropBytes;
     return dropBytes / perSecond;
+  }
+
+  /**
+   * The splice bookkeeping every cushion-kept apply shares: cut the
+   * cushion, GOP-align the junction, and rewind the OUTPUT timeline to
+   * the trimmed tail. The trims discard seconds that were already
+   * stamped, and a timeline left at the old frontier hands the publisher
+   * a forward pts hole exactly that large — measured 10.6s per subtitle
+   * switch with applySeconds=5. Players bridge the audio hole silently
+   * but stall video on the wall clock, so every apply froze the picture
+   * for the hole's length and banked that much A/V desync, sender's own
+   * preview included. Same rule _bankFlush documents for the flush path:
+   * the content gap and the timestamp gap are two halves of one mistake.
+   * Resume comes from the tail chunk's own stamps so the seam's content
+   * position and timeline agree with the bytes actually kept.
+   */
+  _bankCutForApply(keepSeconds = null) {
+    // Timeline-to-content delta, read at the frontier BEFORE rewinding:
+    // both advance in lockstep from the same progress reports, so their
+    // difference is exact even though each lags the encoder slightly.
+    const delta = (this.timeline ?? 0) - (this.position ?? 0);
+    const rewound = this._bankTrimTo(keepSeconds ?? this.bufferSeconds);
+    const gop = this._bankTrimToAccessPoint();
+    const tail = this._bank?.[this._bank.length - 1] ?? null;
+    // The kept bytes are the authority on where the splice really is: the
+    // last video PES pts in the tail, plus one frame, is the next stamp
+    // the publisher expects. Chunk stamps and byte/kbps arithmetic are
+    // fallbacks — both lag or drift (measured +0.8..2.5s residual hole on
+    // the flash+beep rig; the PES read brings the seam under a frame).
+    const exact = this._bankTailVideoPts();
+    let tl = exact != null ? exact + this._frameSeconds() : tail?.tl ?? null;
+    if (tl != null && tl < this.timeline) this.timeline = tl;
+    const est = Math.max(this.aired ?? 0, (this.position ?? 0) - rewound - gop);
+    // A tail from another clip (bank still carrying the previous episode)
+    // cannot anchor a position within THIS one — fall back to arithmetic.
+    const resume = tl != null && (tail == null || tail.item === this.current?.item)
+      ? Math.max(this.aired ?? 0, Math.min(tl - delta, this.position ?? tl))
+      : est;
+    return { rewound, gop, resume };
+  }
+
+  /** One output frame, in seconds, from the selected video's rate. */
+  _frameSeconds() {
+    const m = /^(\d+)\/(\d+)$/.exec(this.selection?.video?.frameRate ?? '');
+    if (m && +m[1] > 0) return +m[2] / +m[1];
+    return 1 / 24;
+  }
+
+  /**
+   * The pts of the LAST video PES in the bank, in seconds — the exact
+   * splice point, read from the kept bytes themselves. Null when the
+   * format is not TS or no video PES start survives in the tail chunks.
+   */
+  _bankTailVideoPts() {
+    if (this._fmt !== 'ts' || !this._bank?.length) return null;
+    const tail = Buffer.concat(this._bank.slice(-6).map((c) => c.data));
+    const aligned = tail.length - (tail.length % 188);
+    for (let o = aligned - 188; o >= 0; o -= 188) {
+      if (tail[o] !== 0x47) continue;
+      const pusi = (tail[o + 1] & 0x40) !== 0;
+      const pid = ((tail[o + 1] & 0x1f) << 8) | tail[o + 2];
+      if (!pusi || pid !== 0x100) continue;
+      const hasAf = (tail[o + 3] & 0x20) !== 0;
+      const p = o + 4 + (hasAf ? 1 + tail[o + 4] : 0);
+      if (p + 14 > o + 188) return null;
+      if (tail[p] !== 0 || tail[p + 1] !== 0 || tail[p + 2] !== 1) return null;
+      if (!(tail[p + 7] & 0x80)) return null;    // no PTS in this PES
+      const b = tail.subarray(p + 9, p + 14);
+      const pts = ((b[0] >> 1) & 7) * 2 ** 30
+        + (b[1] << 22) + (((b[2] >> 1) & 0x7f) << 15) + (b[3] << 7) + (b[4] >> 1);
+      return pts / 90000;
+    }
+    return null;
   }
 
   /**
@@ -4039,9 +4117,8 @@ export class PipelinePlayout extends EventEmitter {
               this._detached(this._extract(item).finally(() => {
                 if (this._stopping || this._selToken !== tok) return;
                 if (this.current?.item !== item || this.status !== 'running') return;
-                const gop = this._bankTrimToAccessPoint();
-                this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
-                  { duration: dur });
+                const { resume } = this._bankCutForApply();
+                this._play(item, resume, { duration: dur });
               }), 'shedding the idle overlay pipe');
             }
           }
