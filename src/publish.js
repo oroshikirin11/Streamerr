@@ -102,16 +102,14 @@ export function targetUrl(protocol, creds = {}) {
     // Mux, Restream) is a listener, so this is the only mode that reaches
     // one. A self-hosted relay can be told to listen.
     //
-    // payload_size 1128 (6 x 188, TS-aligned), not the 1316 default: SRT
-    // never fragments its own packets, so a path whose MTU is below
-    // 1316+28 — every WireGuard/tailscale hop is 1280 — IP-fragments each
-    // one, and losing either fragment loses the whole packet OUTSIDE
-    // SRT's loss accounting. Measured on the deployment: ping -M do
-    // capped between 1252 and 1316, and the viewer showed HEVC slice
-    // smears while the encoder and the local log were provably clean.
-    // 1128 fits under every real-world tunnel MTU; the cost is ~2% more
-    // packet overhead.
-    const q = ['mode=caller', 'payload_size=1128',
+    // The default 1316-byte payload needs a 1344-byte path MTU. That holds
+    // on the open internet but NOT through WireGuard/tailscale tunnels
+    // (MTU 1280): there every packet IP-fragments, a lost fragment drops
+    // the whole packet outside SRT's loss accounting, and the viewer sees
+    // slice smears while every sender-side log looks clean. If a tunnel
+    // ever re-enters the publish path, add payload_size=1128 (6 x 188,
+    // TS-aligned, fits under 1280) here.
+    const q = ['mode=caller',
       `latency=${clampLatency(creds.latencyMs)}`];
     const sid = String(creds.streamId ?? '').trim();
     if (sid) { bad(sid, 'stream id'); q.push(`streamid=${sid}`); }
