@@ -120,11 +120,6 @@
   // anything newer needs SRT — the server routes the primary to its SRT
   // slot automatically. These helpers let the card say what will happen.
   const codecLabel = () => ({ hevc: 'H.265', av1: 'AV1' }[cfg.encoder.codec] ?? 'H.264');
-  const codecKey = () => `${cfg.encoder.codec}Bitrate`;
-  const derivedBitrate = () => {
-    const n = parseFloat(cfg.encoder.videoBitrate) || 4500;
-    return `${Math.round(n * (cfg.encoder.codec === 'hevc' ? 2 / 3 : 1 / 2))}k`;
-  };
   const effProto = () => ((cfg.encoder.codec || 'h264') !== 'h264' ? 'srt' : cfg.publish.protocol);
   const sitOuts = () => (cfg.publish.extras ?? [])
     .filter((e) => e.enabled !== false && e.protocol !== 'srt')
@@ -221,6 +216,29 @@
   const pick = (list, value) => (list.some((x) => String(x) === String(value)) ? String(value) : 'custom');
 
   /**
+   * The bitrate SLOT the codec choice selects — the protocol-slots idea
+   * applied to bitrate. One dropdown ever shows one number: the rate of
+   * the codec that is live. Each codec remembers its own; switching
+   * codecs never loses the others. 'Auto' (non-H.264 only) keeps the slot
+   * empty so the rate keeps deriving from the H.264 anchor.
+   */
+  const bitrateSlot = $derived((cfg?.encoder?.codec ?? 'h264') === 'h264'
+    ? 'videoBitrate' : `${cfg.encoder.codec}Bitrate`);
+  const derivedKbps = $derived.by(() => {
+    const n = parseFloat(cfg?.encoder?.videoBitrate) || 6000;
+    return Math.round(n * (cfg?.encoder?.codec === 'hevc' ? 2 / 3 : 1 / 2));
+  });
+  function syncVbr() {
+    const v = cfg.encoder[bitrateSlot];
+    if (bitrateSlot !== 'videoBitrate' && (v == null || v === '')) { vbrSel = 'auto'; return; }
+    vbrSel = pick(VBR_PRESETS, brKey(v));
+  }
+  function chooseVbr(value) {
+    if (value === 'auto') { cfg.encoder[bitrateSlot] = ''; return; }
+    if (value !== 'custom') cfg.encoder[bitrateSlot] = value;
+  }
+
+  /**
    * The encoder choices: the static list straight away, replaced by the
    * probe's verdict once it has run so failures show their reason.
    */
@@ -239,7 +257,7 @@
   function syncPickers() {
     fpsSel = pick(FPS_PRESETS, cfg.encoder.fps);
     gopSel = pick(GOP_PRESETS, cfg.encoder.gopSeconds);
-    vbrSel = pick(VBR_PRESETS, brKey(cfg.encoder.videoBitrate));
+    syncVbr();
     abrSel = pick(ABR_PRESETS, brKey(cfg.encoder.audioBitrate));
     scanSel = pick(SCAN_PRESETS, cfg.library.autoRefresh.hours);
     const devs = options?.renderDevices ?? [];
@@ -300,7 +318,11 @@
     // needs 2.1-4.3 Mbps on real library files, so ~6 Mbps carries margin
     // and anything above buys nothing — the picture is bounded by the
     // source. The factor scales that anchor with resolution and rate.
-    return Math.round((w * h * f * 0.096) / 1000 / 500) * 500;
+    // The transparency point tracks the codec: HEVC reaches the same
+    // picture at ~2/3 of H.264's rate, AV1 at ~half.
+    const codecF = cfg?.encoder?.codec === 'hevc' ? 2 / 3
+      : cfg?.encoder?.codec === 'av1' ? 0.5 : 1;
+    return Math.round((w * h * f * 0.096 * codecF) / 1000 / 500) * 500;
   });
 
   function syncPresetFromCfg() {
@@ -501,6 +523,9 @@
           width: +cfg.encoder.width, height: +cfg.encoder.height,
           fps: +cfg.encoder.fps, fpsMode: cfg.encoder.fpsMode || 'auto',
           videoBitrate: cfg.encoder.videoBitrate,
+          hevcBitrate: cfg.encoder.hevcBitrate ?? '',
+          av1Bitrate: cfg.encoder.av1Bitrate ?? '',
+          copyLimitKbps: +cfg.encoder.copyLimitKbps || 30000,
           audioBitrate: cfg.encoder.audioBitrate,
           gopSeconds: +cfg.encoder.gopSeconds, device: cfg.encoder.device,
           codec: cfg.encoder.codec || 'h264',
@@ -519,11 +544,7 @@
         // The codec choice lives on this card now; it rides along so one
         // Save keeps connection and codec consistent. The server merges
         // per-key, so the encoder card's other fields are untouched.
-        patch.encoder = {
-          codec: cfg.encoder.codec || 'h264',
-          hevcBitrate: cfg.encoder.hevcBitrate ?? '',
-          av1Bitrate: cfg.encoder.av1Bitrate ?? '',
-        };
+        patch.encoder = { codec: cfg.encoder.codec || 'h264' };
       }
       // Two cards write to the same block; the server merges, so each sends
       // only the keys it owns and neither can clobber the other's.
@@ -635,7 +656,7 @@
          it. The server mirrors this: destinations() routes a non-H.264
          primary to the SRT slot on its own. -->
     <label>Codec</label>
-    <select bind:value={cfg.encoder.codec}>
+    <select bind:value={cfg.encoder.codec} onchange={syncVbr}>
       <option value="h264">H.264 — baseline bitrate; universal</option>
       <option value="hevc">H.265 — 2/3 the bitrate; most</option>
       <option value="av1">AV1 — half the bitrate; patchy; software encode, no preview</option>
@@ -653,9 +674,11 @@
           {codecLabel()}; they rejoin on H.264.
         {/if}
       </p>
-      <label>Bitrate for {codecLabel()} <span class="muted small">optional</span></label>
-      <input bind:value={cfg.encoder[codecKey()]} spellcheck="false"
-             placeholder={`auto — ${derivedBitrate()}, derived from the ${cfg.encoder.videoBitrate} H.264 rate`} />
+      <p class="muted small">
+        Its bitrate is set in the Output card — the Video bitrate dropdown
+        always shows the rate of the codec chosen here, and each codec
+        keeps its own.
+      </p>
     {/if}
 
     <!-- Credentials live in a slot per protocol, so switching here never
@@ -667,8 +690,17 @@
         <!-- A protocol that already holds credentials is marked, so it is
              obvious at a glance that switching away from one will not lose
              it — and that the one in use is genuinely configured. -->
-        <button type="button" class:on={cfg.publish.protocol === pr.id}
-                onclick={() => { cfg.publish.protocol = pr.id; }}>
+        <button type="button" class:on={effProto() === pr.id}
+                disabled={(cfg.encoder.codec || 'h264') !== 'h264' && pr.id !== 'srt'}
+                title={(cfg.encoder.codec || 'h264') !== 'h264' && pr.id !== 'srt'
+                  ? `${pr.label} cannot carry ${codecLabel()} — the codec picked the protocol`
+                  : undefined}
+                onclick={() => {
+                  // The click edits the H.264 memory; with another codec the
+                  // choice is not the operator's to make (SRT carries it),
+                  // so the buttons for impossible carriers are disabled.
+                  if ((cfg.encoder.codec || 'h264') === 'h264') cfg.publish.protocol = pr.id;
+                }}>
           <strong>{pr.label}</strong>
           {#if cfg.publish[pr.id]?.url}
             <span class="tag">{effProto() === pr.id ? 'in use' : 'saved'}</span>
@@ -677,7 +709,7 @@
       {/each}
     </div>
 
-    {#if cfg.publish.protocol === 'srt'}
+    {#if effProto() === 'srt'}
       <label>Server address</label>
       <input bind:value={cfg.publish.srt.url} spellcheck="false"
              placeholder="srt://relay.example.com:9000" />
@@ -1011,14 +1043,17 @@
         {/if}
       </div>
       <div>
-        <label>Video bitrate</label>
-        <select bind:value={vbrSel} onchange={() => choose('videoBitrate', vbrSel)}>
+        <label>Video bitrate{#if (cfg.encoder.codec || 'h264') !== 'h264'}&nbsp;&mdash; {codecLabel()}{/if}</label>
+        <select bind:value={vbrSel} onchange={() => chooseVbr(vbrSel)}>
+          {#if (cfg.encoder.codec || 'h264') !== 'h264'}
+            <option value="auto">Auto &mdash; {derivedKbps.toLocaleString()} kbps ({cfg.encoder.codec === 'hevc' ? '2/3 of' : 'half'} the H.264 rate)</option>
+          {/if}
           {#each VBR_PRESETS as b}<option value={b}>{parseInt(b, 10).toLocaleString()} kbps</option>{/each}
           <option value="custom">Custom</option>
         </select>
         {#if vbrSel === 'custom'}
-          <input class="exact" bind:value={cfg.encoder.videoBitrate} spellcheck="false"
-                 aria-label="Exact video bitrate" placeholder="4500k" />
+          <input class="exact" bind:value={cfg.encoder[bitrateSlot]} spellcheck="false"
+                 aria-label="Exact video bitrate" placeholder="8000k" />
         {/if}
       </div>
       <div>
@@ -1074,6 +1109,16 @@
         moment. Within a series that never happens.
       </p>
     {/if}
+
+    <label>Passthrough limit <span class="muted small">kbps</span></label>
+    <input class="exact" type="number" min="1000" max="200000" step="1000"
+           bind:value={cfg.encoder.copyLimitKbps} aria-label="Passthrough limit in kbps" />
+    <p class="muted small">
+      HEVC files under this rate ship untouched (zero encode cost); denser
+      ones are re-encoded at the bitrate above. Set it to what the LINK to
+      your receiver can actually carry &mdash; a lossy tunnel shows exactly
+      as picture corruption at the viewer.
+    </p>
 
     <p class="muted small">
       About {recommendedVbr.toLocaleString()} kbps is visually transparent at
