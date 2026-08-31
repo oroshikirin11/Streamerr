@@ -691,12 +691,15 @@
              placeholder={savedHint('srt.passphrase') ?? 'encrypts the link'} />
 
       <label>Latency <span class="muted small">{cfg.publish.srt.latencyMs ?? 200} ms</span></label>
-      <input type="range" min="20" max="2000" step="10"
+      <input type="range" min="20" max="8000" step="10"
              value={cfg.publish.srt.latencyMs ?? 200}
              oninput={(e) => { cfg.publish.srt.latencyMs = +e.currentTarget.value; }} />
       <p class="muted small">
       Time allowed to re-request lost packets. Higher survives a worse link,
-      at the cost of delay. Rule of thumb: four times the round trip.
+      at the cost of delay. Rule of thumb: four times the round trip — but
+      for high-bitrate passthrough (a 25 Mbps 4K film over a ~50 Mbps
+      upload) go to 2000+: burst loss at the line&rsquo;s edge needs a deep
+      window or it surfaces as picture artifacts at the viewer.
     </p>
     {:else}
       <label>Server address</label>
