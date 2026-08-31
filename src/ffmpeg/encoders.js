@@ -12,6 +12,8 @@
  * rate-control features are useless for a CBR stream.
  */
 
+import { availableParallelism } from 'os';
+
 /** Preference order for `backend: "auto"`. First one that probes clean wins. */
 export const LADDER = ['vaapi', 'qsv', 'nvenc', 'amf', 'videotoolbox', 'x264'];
 
@@ -65,6 +67,20 @@ export function codecBitrate(enc = {}) {
   const scale = codec === 'hevc' ? 2 / 3 : 1 / 2;
   return `${Math.round(parseFloat(anchor) * scale)}k`;
 }
+
+/**
+ * SVT-AV1 preset for a LIVE encode on this host. Explicit override first;
+ * otherwise sized by core count: ~8 modern cores hold preset 9 at 1080p,
+ * anything smaller gets the faster presets because a softer picture airs
+ * and a stalled one does not (an N100 measured 0.74x at 9, 3.2x at 12).
+ */
+const av1Preset = (p) => {
+  const forced = Number(p?.av1Preset);
+  if (Number.isFinite(forced) && forced >= 5 && forced <= 13) return Math.round(forced);
+  let cores = 4;
+  try { cores = availableParallelism(); } catch { /* keep the floor */ }
+  return cores >= 12 ? 9 : cores >= 6 ? 10 : 12;
+};
 
 const bufsize = (rate) => {
   // Two seconds of video at the target rate. Accepts "4500k" or a raw number.
@@ -193,10 +209,14 @@ export const BACKENDS = {
     uploadFilter: () => 'format=yuv420p',
     encoderArgs: (p) => (p.codec === 'av1' ? [
       // Software AV1 = SVT-AV1: the only AV1 path on pre-RDNA3 / N-series
-      // hosts. preset 9 holds realtime 1080p on ~8 modern cores; rate
-      // control via plain b:v/maxrate like the rest.
+      // hosts. The preset scales with the host — 9 holds realtime 1080p on
+      // ~8 modern cores, but an N100's four E-cores ran it at 0.74x under
+      // a subtitle canvas (measured live, broadcast crawled to death)
+      // while preset 12 measured 3.2x on the same box. Speed beats polish
+      // for a LIVE encode: a softer picture airs, a stalled one does not.
+      // encoder.av1Preset overrides for boxes that want it pinned.
       '-c:v', 'libsvtav1',
-      '-preset', '9',
+      '-preset', String(av1Preset(p)),
       '-b:v', p.videoBitrate,
       '-g', String(Math.round(p.gopSeconds * p.fps)),
       // SVT rejects -maxrate outside CRF and allows CBR only with the

@@ -3155,8 +3155,14 @@ export class PipelinePlayout extends EventEmitter {
     // The lever, with its current value, so it can be changed without
     // going to look it up.
     // A software encode would dwarf everything above it, so name it.
+    // Name the CODEC's actual encoder, not the backend bucket: the x264
+    // backend also runs libx265 and libsvtav1, and a perf report that says
+    // "x264" about an AV1 encode sends the reader down the wrong road.
+    const encName = p0.backend === 'x264'
+      ? ({ hevc: 'libx265', av1: 'SVT-AV1' }[p0.codec] ?? 'libx264')
+      : p0.backend ?? 'unknown';
     out.push(`output ${p0.width ?? '?'}x${p0.height ?? '?'} at ${p0.videoBitrate ?? '?'}`
-      + `, ${p0.backend ?? 'unknown'} encoder — the lever with the most headroom`);
+      + `, ${encName} encoder — the lever with the most headroom`);
 
     /**
      * The machine, because everything above is only expensive RELATIVE to it.

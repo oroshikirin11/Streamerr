@@ -97,6 +97,8 @@ const DEFAULTS = {
     // Passthrough ships the FILE's bitrate; above this it transcodes so a
     // remux cannot saturate the upload. Absolute on purpose — see pipeline.
     copyLimitKbps: 30000,
+    // SVT-AV1 preset override; empty auto-sizes by core count (encoders.js).
+    av1Preset: '',
     /**
      * How HDR sources are brought down to the SDR stream we broadcast.
      *
