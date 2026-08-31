@@ -77,8 +77,8 @@
   const RES_PRESETS = [
     { key: '2160p', label: '2160p (4K)', w: 3840, h: 2160 },
     { key: '1440p', label: '1440p', w: 2560, h: 1440 },
-    { key: '1080p', label: '1080p — recommended', w: 1920, h: 1080 },
-    { key: '720p', label: '720p — weak hardware', w: 1280, h: 720 },
+    { key: '1080p', label: '1080p', w: 1920, h: 1080 },
+    { key: '720p', label: '720p', w: 1280, h: 720 },
     { key: '480p', label: '480p', w: 854, h: 480 },
   ];
   let resSel = $state('1080p');
@@ -546,6 +546,13 @@
             <input type="number" bind:value={width} aria-label="Width" placeholder="width" style="margin-top:6px" />
             <input type="number" bind:value={height} aria-label="Height" placeholder="height" style="margin-top:6px" />
           {/if}
+          <p class="muted small" style="margin-top:6px">
+            {resSel === '1080p' ? 'The right answer for most setups.'
+              : resSel === '720p' ? 'Easier on weak hardware.'
+              : resSel === '2160p' || resSel === '1440p'
+                ? 'Heavy — few machines encode this in real time.'
+                : ''}
+          </p>
         </div>
         <div>
           <label>Framerate</label>
