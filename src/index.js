@@ -790,7 +790,10 @@ function buildEngine({ profile, selection }) {
   });
   e.on('nowplaying', () => {
     broadcast('stream', streamStatus()); syncOwncastTitle();
-    sgSync();
+    // Re-push, not just sync: the spawn emits this when the on-air colour
+    // range settles, and the receiver only learns it from a fresh push.
+    // The beat-collapse in sgQueue keeps this cheap.
+    sgSync(); sgQueue({ now: true });
   });
   e.on('queue', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true, schedule: true }); });
   e.on('seeked', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });

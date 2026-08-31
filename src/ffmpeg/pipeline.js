@@ -2928,8 +2928,13 @@ export class PipelinePlayout extends EventEmitter {
        * The metadata push reads this to tell viewers honestly.
        */
       const argStr = args.join(' ');
+      const wasHdrOnAir = Boolean(this.hdrOnAir);
       this.hdrOnAir = Boolean(this.selection?.video?.hdr)
         && (isCopy || (argStr.includes('format=p010') && !/tonemap/.test(argStr)));
+      // The nowplaying push that announces a clip fires BEFORE this spawn
+      // decides the range — announce again when the answer changes, or the
+      // receiver keeps the stale one for the whole clip.
+      if (this.hdrOnAir !== wasHdrOnAir) this.emit('nowplaying', this.snapshot());
       /**
        * COPY SEAM ALIGNMENT — the fix for the HEVC seek corruption.
        *
