@@ -2009,6 +2009,12 @@
     border-radius: var(--radius); border: 1px solid var(--border);
     background: var(--surface); padding: 8px 11px;
   }
+  /* The text-field chrome above must not apply to sliders: padding insets
+     the native track inside the border box, so the thumb visually never
+     reaches the ends — it reads as "cannot be maxed out". */
+  input[type="range"] {
+    padding: 0; border: 0; background: transparent; height: 28px;
+  }
   .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   /* The free field a "Custom" choice reveals, tucked under its own select so
      the pair never gets split across a wrapped grid row. */
