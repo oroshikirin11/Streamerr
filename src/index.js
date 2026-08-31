@@ -2305,6 +2305,18 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
   rememberIntent(selection,
     req.body?.subtitleMode ?? (req.body?.subtitleKey == null ? 'off' : undefined));
 
+  /**
+   * Re-tune the profile against the NEW selection before the respawn.
+   * tuneProfile early-returns for a subtitle-less selection, so a
+   * broadcast that started without subtitles still had gpuSubs=false —
+   * and switching subtitles on mid-episode respawned into the CPU chunk
+   * path (Loading card, cache ramp) on a box whose GPU path was proven
+   * fine. Chunking is the emergency path; a stale probe flag must never
+   * be what sends a clip there. The probes are process-cached, so this
+   * is cheap on every switch after the first.
+   */
+  if (engine.profile) await tuneProfile(engine.profile, selection, playing.srcPath);
+
   // Only the source restarts; the publisher keeps the connection open, so
   // this is near-instant rather than an interruption.
   engine.setSelection(selection);
