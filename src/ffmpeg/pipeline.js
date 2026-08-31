@@ -1032,25 +1032,10 @@ export class PipelinePlayout extends EventEmitter {
 
   /** Change audio or subtitle track, continuing from the same instant. */
   setSelection(selection) {
-    const prev = this.selection;
     this.selection = selection;
     if (this.current && this.status === 'running') {
       const item = this.current.item;
       const dur = this.current.duration;
-      /**
-       * On a piped clip, subtitles are drawn by the RENDERER, not the
-       * source — so a subtitle-only change is a renderer swap, exactly
-       * like an overlay Apply: no bank flush, no source respawn, no
-       * Loading card, and the new track rides the buffer to air. Only a
-       * change of AUDIO still needs the classic flush-respawn below,
-       * because audio genuinely lives in the source graph.
-       */
-      const audioSame = (prev?.audio?.index ?? null) === (selection?.audio?.index ?? null);
-      if (audioSame && this._pipedClip && this._ovFeed?.active) {
-        this._pipedOverlayApply(item, dur);
-        this.emit('selection', selection);
-        return;
-      }
       // Extract BEFORE swapping, while the current source keeps the pipe
       // fed. Swapping first meant the new source's subtitles filter re-read
       // the whole container at init — on an unextracted file that starved
