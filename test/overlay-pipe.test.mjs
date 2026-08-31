@@ -84,6 +84,15 @@ check('a hidden studio arms through overlayConfigured alone',
 check('overlayConfigured false with nothing visible stays refused',
   planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
     { overlay: [], overlayConfigured: false }), null);
+// The slow handler sheds the idle arming on titles that cannot afford the
+// composite pass; the demotion must actually disarm, or the shed respawn
+// rebuilds the exact graph it was trying to escape.
+check('noIdleArm wins over overlayConfigured when nothing is visible',
+  planFor({ ...cases['no subtitles, still picture on gpu'], overlayImages: [] },
+    { overlay: [], overlayConfigured: true, noIdleArm: true }), null);
+check('noIdleArm never blocks VISIBLE studio content',
+  planFor({ ...cases['no subtitles, still picture on gpu'] },
+    { noIdleArm: true }) !== null, true);
 check('probed pillarbox with subtitles + a picture is eligible',
   planFor({ ...cases['subtitled pillarbox, pad-overlay'],
     overlayImages: [{ path: '/o/still.png', size: 0.1, x: 0.9, y: 0.1 }] }) !== null, true);

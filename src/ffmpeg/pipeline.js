@@ -3858,6 +3858,37 @@ export class PipelinePlayout extends EventEmitter {
               this.emit('warn', 'Playback keeps falling behind. Details are in '
                 + 'the console — enable Developer mode in Settings to see it.');
             }
+            /**
+             * A sustained-slow clip whose pipe is compositing NOTHING is
+             * paying the idle arming pass for a studio that is hidden —
+             * headroom a marginal title (4K HDR: 1.02x -> 0.78x from the
+             * pass alone) cannot spare. Shed it: demote the idle arming
+             * for the rest of the broadcast and respawn cushion-kept at a
+             * GOP boundary, the same move an overlay apply makes. The
+             * next "show" on this broadcast pays the classic respawn —
+             * the old behaviour, on exactly the titles that always had it.
+             * Visible overlays are the operator's explicit choice and are
+             * never shed here.
+             */
+            const idleArmed = this._pipedClip && this.profile?.overlayConfigured
+              && !this.profile?.noIdleArm
+              && !(this.profile?.overlay ?? []).some((i) => i?.enabled !== false);
+            if (idleArmed && this.current && this.status === 'running') {
+              this._demote({ noIdleArm: true });
+              this.emit('log', '[overlay] idle pipe shed — this title cannot '
+                + 'afford the armed composite pass; show/hide costs a respawn '
+                + 'for the rest of the broadcast\n');
+              const item = this.current.item;
+              const dur = this.current.duration;
+              const tok = (this._selToken = (this._selToken ?? 0) + 1);
+              this._detached(this._extract(item).finally(() => {
+                if (this._stopping || this._selToken !== tok) return;
+                if (this.current?.item !== item || this.status !== 'running') return;
+                const gop = this._bankTrimToAccessPoint();
+                this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
+                  { duration: dur });
+              }), 'shedding the idle overlay pipe');
+            }
           }
         } else {
           slowSince = null;
@@ -4147,13 +4178,17 @@ export class PipelinePlayout extends EventEmitter {
     // take the decoder's surfaces is a property of the driver, not of the
     // clip, so re-arming buys one dead spawn per episode to relearn it.
     const keep = this._demoted.noGpuImages || this._demoted.noIdentitySkip
-      || this._demoted.overlayPipe === false
+      || this._demoted.overlayPipe === false || this._demoted.noIdleArm
       ? {
         ...(this._demoted.noGpuImages ? { noGpuImages: true } : null),
         ...(this._demoted.noIdentitySkip ? { noIdentitySkip: true } : null),
         // A driver that refused the piped composite once will refuse it on
         // the next clip too; re-arming would buy a dead spawn per episode.
         ...(this._demoted.overlayPipe === false ? { overlayPipe: false } : null),
+        // Shed once, shed for the broadcast: re-arming the idle pass per
+        // clip would relearn the same 30s slow verdict at every episode
+        // boundary of a heavy queue.
+        ...(this._demoted.noIdleArm ? { noIdleArm: true } : null),
       }
       : null;
     this._demoted = keep;
@@ -4363,8 +4398,11 @@ export function planOverlayPipe({
     || (profile.overlay ?? []).some((i) => i?.enabled !== false)
     // Configured-but-hidden arms the pipe too — measured armed-idle at
     // ~20% source CPU on a 1080p title, against a full source respawn
-    // (splice + re-encode) for the first "show" without it.
-    || Boolean(profile.overlayConfigured);
+    // (splice + re-encode) for the first "show" without it. noIdleArm is
+    // the escape hatch: a title that cannot afford the idle composite
+    // pass (4K HDR measured 1.02x -> 0.78x from the pass alone) sheds it
+    // via the slow handler, and falls back to the old first-show respawn.
+    || (Boolean(profile.overlayConfigured) && !profile.noIdleArm);
   if (!anythingToDraw) return null;
   const rect = contentRect(selection?.video, profile);
 
