@@ -105,17 +105,39 @@
    */
   let stills = $state({ running: false, done: 0, total: 0, failed: 0 });
   let meta = $state({ running: false, fetched: 0, matched: 0, missed: 0 });
+  /** Bumped as background work lands, so frame images retry their URL. */
+  let artVersion = $state(0);
   onMount(() => {
     let stop = false;
+    let lastDone = -1;
+    let lastFetched = -1;
+    let lastAuto = 0;
     const tick = async () => {
       if (stop) return;
       try { stills = await api.get('/api/library/stills'); } catch { /* not fatal */ }
       try { meta = await api.get('/api/library/meta/status'); } catch { /* not fatal */ }
+      // Background work landed: pull it in without asking for a refresh.
+      // Shelf data re-fetches (new TMDB titles and posters), and bumping
+      // artVersion re-requests episode stills whose earlier fetch 404'd —
+      // throttled, so a busy sweep does not turn browsing into a reload
+      // loop.
+      const grew = (lastDone >= 0 && stills.done !== lastDone)
+        || (lastFetched >= 0 && meta.fetched !== lastFetched);
+      lastDone = stills.done;
+      lastFetched = meta.fetched;
+      if (grew && Date.now() - lastAuto > 15_000) {
+        lastAuto = Date.now();
+        artVersion = Date.now();
+        loadShelves().catch(() => {});
+      }
       setTimeout(tick, stills.running || meta.running ? 2000 : 60_000);
     };
     tick();
     return () => { stop = true; };
   });
+
+  /** Frame stills get a version so a placeholder retries once work lands. */
+  const art = (u) => (u && artVersion && u.includes('-frame') ? `${u}&sv=${artVersion}` : u);
 
   /**
    * Fix artwork: the operator browses TMDB candidates and pins the right
@@ -546,7 +568,7 @@
                     : item.title}>
             <div class="art">
               {#if item.image}
-                <img src={item.image} alt="" decoding="async"
+                <img src={art(item.image)} alt="" decoding="async"
                      loading={lazyImages ? 'lazy' : 'eager'}
                      fetchpriority={i < 12 ? 'auto' : 'low'} />
               {:else}
@@ -661,7 +683,7 @@
                    the fold so it never competes with the page itself, and
                    only fall back to lazy past the point where a list is
                    long enough for that to matter. -->
-              <img src={ep.image} alt="" decoding="async"
+              <img src={art(ep.image)} alt="" decoding="async"
                    loading={!lazyImages && i < EAGER_STILLS ? 'eager' : 'lazy'}
                    fetchpriority={i < 12 ? 'auto' : 'low'}
                    onerror={() => (brokenArt = new Set([...brokenArt, ep.id]))} />

@@ -35,7 +35,7 @@ const IDLE_MS = 20_000;
  * storage down. Little and often instead: the library still completes, a
  * few dozen at a time, with a long pause between.
  */
-const BATCH = 24;
+const BATCH = 48;
 const SCAN_SERIES = 40;
 /** Between batches: none. The per-still GAP and the on-air yield are the
  *  throttles; batches follow each other straight through until the
@@ -212,6 +212,9 @@ export class StillSweeper {
     // A broadcast owns the machine. Come back later rather than competing.
     if (this.isBusy()) { this._later(); return; }
 
+    // Collecting is part of the work: SMB listings take seconds, and with
+    // the flag down the panel read the gap between batches as "stopped".
+    this._state.running = true;
     let queue;
     try { queue = await this._collect(); } catch { this._later(); return; }
     // The library can change while a scan is in flight.
