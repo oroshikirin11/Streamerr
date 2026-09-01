@@ -60,6 +60,17 @@
       tracks = null;
     }
   });
+  // ...and it describes ONE clip. When another goes on air — a manual
+  // start, an episode advance, anything — the open panel is showing the
+  // previous clip's tracks; close it rather than lie.
+  let trackPanelItem = null;
+  $effect(() => {
+    const key = stream.playing?.srcPath ?? stream.playing?.id ?? null;
+    if (key !== trackPanelItem) {
+      trackPanelItem = key;
+      tracks = null;
+    }
+  });
   let busyCtl = $state(false);
   /** Fraction of the seek strip under the cursor, for the time bubble. */
   let hoverFrac = $state(null);
