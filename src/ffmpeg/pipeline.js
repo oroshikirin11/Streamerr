@@ -508,6 +508,8 @@ export class PipelinePlayout extends EventEmitter {
      * first.
      */
     this._sentVideoPts = null;
+    /** Content position a resume returns to; set by pause, cleared by seek. */
+    this._pauseResume = null;
 
     this._stopping = false;
     /**
@@ -970,6 +972,9 @@ export class PipelinePlayout extends EventEmitter {
 
     // A fresh seek earns a fresh reconnect (see the copy-seam reshape).
     this._reshapedFor = null;
+    // A seek while paused replaces the pause point: resume() must come
+    // back at the seeked position, not where the card first appeared.
+    this._pauseResume = null;
     // Flush first: it rewinds the playhead to what has aired, and a
     // relative skip has to count from there or +30 lands a bankful further
     // ahead than the viewer expects.
@@ -1025,15 +1030,22 @@ export class PipelinePlayout extends EventEmitter {
   pause() {
     if (this.status === 'paused' || !this.current) return;
     this.status = 'paused';
-    // The flush both discards the cushion (pause means NOW, not a bankful
-    // later) and hands the hold card its -output_ts_offset: since the
-    // sent-pts fix it rewinds the timeline to the exact last video pts the
-    // publisher was given, so the card continues the published stream
-    // monotonically. It used to rewind to the chunk STAMPS, which lag the
-    // bytes — the card then started behind what was already published, a
-    // backward pts jump the receiver's offset correction turned into a
-    // per-packet discontinuity storm after hours of broadcast.
-    this._bankFlush();
+    // The cushion-kept, GOP-aligned splice — the exact machinery a track
+    // change uses. A flush here discarded the cushion and spliced the card
+    // at the on-air position, but the publisher had ALREADY been handed
+    // the cushion's bytes: the receiver saw DTS run backward by the
+    // cushion depth at every hold start ("Packet corrupt", out-of-order
+    // DTS, ~a cushion of replay for viewers). The cut trims to
+    // applySeconds, ends the kept bytes on a video access point, and
+    // rewinds the timeline to their own last pts — the card appends
+    // BEHIND the cushion and continues the published stream exactly.
+    const { resume } = this._bankCutForApply(this.applySeconds);
+    // Where the card will appear in CONTENT time, captured now: the hold
+    // card's bank stamps freeze `pos` while `tl` advances, so nothing at
+    // resume time can reconstruct this. Viewers resume at the moment the
+    // card appeared for them.
+    this._pauseResume = resume;
+    this.position = resume;
     // The scheduler SURVIVES a pause: delivery suspends, the workers keep
     // encoding ahead, and the retained window keeps the position we are
     // pausing at. Killing it here was why resuming took a minute of card —
@@ -1047,8 +1059,13 @@ export class PipelinePlayout extends EventEmitter {
 
   resume() {
     if (this.status !== 'paused' || !this.current) return;
+    // The content position the card appeared at, captured by pause().
+    // The card's own stamps cannot provide it (pos frozen, tl advancing),
+    // and a seek while paused clears it so the seek wins.
+    const at = this._pauseResume ?? this.position ?? 0;
+    this._pauseResume = null;
     // Chunked path: the paused position lives in the retained window, so
-    // resuming is a cache jump — kill the card, flush its unaired tail,
+    // resuming is a cache jump — kill the card, flush its unaired trickle,
     // and deliver from the retained chunk. Instant, no re-encode.
     if (this.scheduler) {
       if (this.holding && this.source) {
@@ -1061,9 +1078,9 @@ export class PipelinePlayout extends EventEmitter {
         try { h.kill('SIGKILL'); } catch { /* gone */ }
       }
       this._bankFlush();
-      const at = this.scheduler.jumpTo(this.position, onAudioGrid(this.timeline + 0.064));
-      if (at != null) {
-        this.position = at;
+      const jumped = this.scheduler.jumpTo(at, onAudioGrid(this.timeline + 0.064));
+      if (jumped != null) {
+        this.position = jumped;
         this.status = 'running';
         this.emit('log', '[cache] resumed from the retained window — no re-encode\n');
         this.emit('discontinuity');
@@ -1071,15 +1088,31 @@ export class PipelinePlayout extends EventEmitter {
         return;
       }
     }
-    // Classic path: flush the card's unsent trickle so the resumed clip
-    // splices directly behind the last byte the publisher actually got —
-    // the flush rewinds the timeline to that byte's own video pts, and
-    // _play hands it to -output_ts_offset. Without the flush the clip
-    // spliced behind the card's ENCODE head, whose progress-derived
-    // timeline disagrees with the sent bytes by up to a second each way.
-    this._bankFlush();
+    // Classic path. First drop the card bytes that never aired — they sit
+    // at the BACK of the bank (the card appended behind the cushion), and
+    // a card nobody saw is owed to nobody.
+    while (this._bank?.length && this._bank[this._bank.length - 1].hold) {
+      const c = this._bank.pop();
+      this._bankBytes -= c.data.length;
+    }
     this.status = 'running';
-    this._play(this.current.item, this.position, { duration: this.current.duration });
+    if (this._bank?.length) {
+      // The pause was shorter than the cushion: clip content is still
+      // queued and the card never reached the wire. Same cushion-kept,
+      // GOP-aligned splice as a track change — the resumed clip appends
+      // behind the remaining cushion, and the content position comes from
+      // the CUT (where the kept bytes end), not from the pause point:
+      // viewers never saw a card, so they must not see a skip either.
+      const { resume } = this._bankCutForApply(this.applySeconds);
+      this._play(this.current.item, resume, { duration: this.current.duration });
+    } else {
+      // The card aired (or the cushion is gone): flush pads the torn
+      // packet and rewinds the timeline to the last byte the publisher
+      // actually got, and the clip resumes at the content moment the card
+      // appeared for viewers.
+      this._bankFlush();
+      this._play(this.current.item, at, { duration: this.current.duration });
+    }
     this.emit('status', this.status);
   }
 
@@ -1757,6 +1790,10 @@ export class PipelinePlayout extends EventEmitter {
     this._bank.push({
       data: chunk, pos: this.position, tl: this.timeline,
       item: this.current?.item ?? null, gen: this._srcGen ?? 0,
+      // Card bytes carry the CLIP's item (a hold never changes `current`),
+      // so this flag is the only way resume() can tell a queued card from
+      // queued content — a card that never aired is dropped, content is not.
+      hold: this.holding === true,
     });
     this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
     // Backpressure moves from the OS pipe to here: past the cap the source
@@ -2141,24 +2178,23 @@ export class PipelinePlayout extends EventEmitter {
    */
   _bankTailVideoPts() {
     if (this._fmt !== 'ts' || !this._bank?.length) return null;
-    const tail = Buffer.concat(this._bank.slice(-6).map((c) => c.data));
-    const aligned = tail.length - (tail.length % 188);
-    for (let o = aligned - 188; o >= 0; o -= 188) {
-      if (tail[o] !== 0x47) continue;
-      const pusi = (tail[o + 1] & 0x40) !== 0;
-      const pid = ((tail[o + 1] & 0x1f) << 8) | tail[o + 2];
-      if (!pusi || pid !== 0x100) continue;
-      const hasAf = (tail[o + 3] & 0x20) !== 0;
-      const p = o + 4 + (hasAf ? 1 + tail[o + 4] : 0);
-      if (p + 14 > o + 188) return null;
-      if (tail[p] !== 0 || tail[p + 1] !== 0 || tail[p + 2] !== 1) return null;
-      if (!(tail[p + 7] & 0x80)) return null;    // no PTS in this PES
-      const b = tail.subarray(p + 9, p + 14);
-      const pts = ((b[0] >> 1) & 7) * 2 ** 30
-        + (b[1] << 22) + (((b[2] >> 1) & 0x7f) << 15) + (b[3] << 7) + (b[4] >> 1);
-      return pts / 90000;
+    // The bank continues the publisher's byte stream, so its 188-grid is
+    // known EXACTLY from `_published` — walk every chunk forward on that
+    // grid and keep the last video pts seen. The old version guessed the
+    // grid from a tail concat's END and scanned backward; on real pipe
+    // splits the guess missed the true tail by a few frames, and a card
+    // spliced on the under-read landed ~0.2s behind cushion bytes already
+    // sent (measured on the rig as an out-of-order DTS at the seam). A
+    // chunk whose grid was torn by a crashed source scans as null and is
+    // simply skipped — understating is safe, overstating never happens.
+    let streamOff = this._published ?? 0;
+    let pts = null;
+    for (const c of this._bank) {
+      const p = lastVideoPtsIn(c.data, (188 - (streamOff % 188)) % 188);
+      if (p != null) pts = p;
+      streamOff += c.data.length;
     }
-    return null;
+    return pts;
   }
 
   /**
@@ -2340,6 +2376,7 @@ export class PipelinePlayout extends EventEmitter {
     this.position = 0;
     this._spawnSource(buildCountdownArgs({
       profile: this.profile,
+      selection: this.selection,
       tsOffset: this.timeline,
       statsPeriodMs: this.statsPeriodMs,
       seconds,
@@ -3725,6 +3762,7 @@ export class PipelinePlayout extends EventEmitter {
       this.holding = true;
       this._spawnSource(buildHoldArgs({
         profile: this.profile,
+        selection: this.selection,
         tsOffset: this.timeline,
         statsPeriodMs: this.statsPeriodMs,
         label: 'Loading',
@@ -3994,6 +4032,7 @@ export class PipelinePlayout extends EventEmitter {
     this.holding = true;
     this._spawnSource(buildHoldArgs({
       profile: this.profile,
+      selection: this.selection,
       tsOffset: this.timeline,
       statsPeriodMs: this.statsPeriodMs,
       label,
@@ -5835,26 +5874,50 @@ function fontArg() {
 
 /** Card encoder: software x264 so cards work even when hardware encoding is
  *  what broke, matched to the profile so the publisher never sees a seam. */
-function cardEncodeArgs(profile) {
-  const gop = String((profile.gopSeconds ?? 2) * (profile.fps ?? 30));
-  // An AV1 broadcast is one NUT/AV1 stream end to end — an H.264 card
-  // spliced into it would change codec mid-stream. SVT at preset 12 on a
-  // static card costs next to nothing (cards are software anyway).
-  if (profile.codec === 'av1') {
-    return [
-      '-c:v', 'libsvtav1', '-preset', '12', '-pix_fmt', 'yuv420p',
-      '-b:v', profile.videoBitrate,
-      '-g', gop, '-svtav1-params', 'rc=2:pred-struct=1',
-      '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
-    ];
-  }
-  return [
-    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
-    '-b:v', profile.videoBitrate, '-maxrate', profile.videoBitrate,
-    '-bufsize', profile.videoBitrate,
-    '-g', gop, '-keyint_min', gop, '-sc_threshold', '0', '-bf', '0',
-    '-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2',
-  ];
+/**
+ * How a card (hold or countdown) is encoded: from the SAME template as the
+ * clip spawn — the broadcast's own backend entry supplies -c:v, the encoder
+ * flags, and the upload filter, so the card is bitstream-compatible with
+ * any broadcast BY CONSTRUCTION (a codec, bit-depth or cadence flip
+ * mid-stream is fatal downstream: an H.264 card in an HEVC broadcast
+ * flooded the receiver with per-packet NALU parse errors, and
+ * fMP4/Matroska paths tolerate no mid-stream parameter change at all).
+ *
+ * Three deliberate deltas from a clip, none of which touch the bitstream
+ * class: the input is a generated still (drawn on the CPU and pushed up
+ * through the backend's own uploadFilter — the same canvas→hwupload shape
+ * the subtitle chain uses); the rate is the CLIP's effective rate rather
+ * than the profile cap (a 30fps card against a 23.976 stream changes the
+ * cadence at both seams); and a software-AV1 card pins the fast preset —
+ * clips scale the preset to the host, but a static frame has nothing to
+ * polish. When the broadcast is HDR the card uploads p010 and tags
+ * BT.2020/PQ, so Main10 stays Main10 and the VUI does not flip either.
+ */
+function cardVideoPlan(profile, selection = null) {
+  const eff = effectiveFps(selection?.video, profile);
+  const audio = ['-c:a', 'aac', '-b:a', profile.audioBitrate ?? '160k', '-ar', '48000', '-ac', '2'];
+  const be = BACKENDS[profile.backend] ?? BACKENDS.x264;
+  const p = {
+    ...profile,
+    fps: eff.fps,
+    ...(profile.codec === 'av1' ? { av1Preset: 12 } : {}),
+  };
+  const hdr = Boolean(profile.hdrOut);
+  const upload = be.uploadFilter();
+  return {
+    rate: eff.rate,
+    deviceArgs: be.deviceArgs(profile),
+    vfTail: ',' + (hdr ? upload.replace(/nv12|yuv420p/, 'p010le') : upload),
+    encodeArgs: [
+      ...be.encoderArgs(p),
+      ...(hdr ? [
+        '-color_primaries', 'bt2020',
+        '-color_trc', 'smpte2084',
+        '-colorspace', 'bt2020nc',
+      ] : []),
+      ...audio,
+    ],
+  };
 }
 
 /** The stream-tail every feeder shares: TS with repeating headers, or NUT
@@ -5864,21 +5927,24 @@ const cardMuxArgs = (profile) => (profile.codec === 'av1'
   : ['-mpegts_flags', '+resend_headers', '-f', 'mpegts', 'pipe:1']);
 
 export function buildHoldArgs({
-  profile, tsOffset = 0, statsPeriodMs = 500, label = 'Paused',
+  profile, selection = null, tsOffset = 0, statsPeriodMs = 500, label = 'Paused',
 }) {
   const text = String(label).replace(/[\\':]/g, '');
+  const plan = cardVideoPlan(profile, selection);
 
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
+    ...plan.deviceArgs,
     // -re here even though pacing lives on the publisher: black frames are so
     // small that unpaced output lets MINUTES of hold-card fit in the pipe
     // buffers, and on resume all of it plays out before the episode returns.
     '-re',
-    '-f', 'lavfi', '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${profile.fps}`,
+    '-f', 'lavfi', '-i', `color=c=black:s=${profile.width}x${profile.height}:r=${plan.rate}`,
     '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
     '-vf', `drawtext=${fontArg()}text='${text}':fontcolor=white:`
-      + 'fontsize=h/18:x=(w-text_w)/2:y=(h-text_h)/2',
-    ...cardEncodeArgs(profile),
+      + 'fontsize=h/18:x=(w-text_w)/2:y=(h-text_h)/2'
+      + plan.vfTail,
+    ...plan.encodeArgs,
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-muxdelay', '0', '-muxpreload', '0',
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
@@ -5899,7 +5965,7 @@ const HOLD_FONTS = [
  * then rolls straight into the show.
  */
 export function buildCountdownArgs({
-  profile, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
+  profile, selection = null, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
   heading = 'STARTING SOON',
 }) {
   const W = profile.width;
@@ -5925,15 +5991,17 @@ export function buildCountdownArgs({
     ] : []),
   ].join(',');
 
+  const plan = cardVideoPlan(profile, selection);
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
+    ...plan.deviceArgs,
     '-re',
     '-f', 'lavfi', '-t', String(R),
-    '-i', `smptehdbars=s=${W}x${H}:r=${profile.fps}`,
+    '-i', `smptehdbars=s=${W}x${H}:r=${plan.rate}`,
     '-f', 'lavfi', '-t', String(R),
     '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-    '-vf', vf,
-    ...cardEncodeArgs(profile),
+    '-vf', vf + plan.vfTail,
+    ...plan.encodeArgs,
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-muxdelay', '0', '-muxpreload', '0',
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
