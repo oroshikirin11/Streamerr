@@ -14,8 +14,8 @@ import { makeMapper, mapAndVerify } from './pathmap.js';
  * silently, so only the modern form is used.
  */
 function authHeader(apiKey) {
-  return `MediaBrowser Token="${apiKey}", Client="Jellystreamerr", `
-    + `Device="jellystreamerr", DeviceId="jellystreamerr", Version="0.1.0"`;
+  return `MediaBrowser Token="${apiKey}", Client="Streamerr", `
+    + `Device="streamerr", DeviceId="streamerr", Version="0.1.0"`;
 }
 
 export class JellyfinLibrary {

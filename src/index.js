@@ -897,6 +897,11 @@ function buildEngine({ profile, selection }) {
 
 // ── auth ───────────────────────────────────────────────────────────────
 
+// The old JELLYSTREAMERR_* name keeps working — a compose written before
+// the rename must not silently stop trusting its proxy.
+const TRUST_PROXY_ENV = process.env.STREAMERR_TRUST_PROXY
+  || process.env.JELLYSTREAMERR_TRUST_PROXY;
+
 const passwordHash = () => config.auth?.passwordHash || null;
 const authDisabled = () => config.auth?.disabled === true;
 const auth = requireAuth(passwordHash, authDisabled);
@@ -905,7 +910,7 @@ const auth = requireAuth(passwordHash, authDisabled);
  *  panel is knowingly behind a proxy, so a direct caller cannot spoof its
  *  way out of the rate limit by inventing a header. */
 function clientIp(req) {
-  if (process.env.JELLYSTREAMERR_TRUST_PROXY) {
+  if (TRUST_PROXY_ENV) {
     const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
     if (fwd) return fwd;
   }
@@ -916,7 +921,7 @@ function clientIp(req) {
  *  Secure. Behind a TLS-terminating proxy only the forwarded header knows. */
 function isSecure(req) {
   if (req.socket.encrypted) return true;
-  return process.env.JELLYSTREAMERR_TRUST_PROXY
+  return TRUST_PROXY_ENV
     ? String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https'
     : false;
 }
@@ -1629,7 +1634,7 @@ app.post('/api/check/owncast-title', async (req, res) => {
     : config.owncast.accessToken;
   if (!apiUrl) return res.status(400).json({ ok: false, error: 'Owncast address is required' });
   if (!token) return res.status(400).json({ ok: false, error: 'Access token is required' });
-  const value = streamStatus().playing?.title ?? 'Jellystreamerr — title sync test';
+  const value = streamStatus().playing?.title ?? 'Streamerr — title sync test';
   try {
     const r = await fetch(`${apiUrl}/api/integrations/streamtitle`, {
       method: 'POST',
@@ -2543,7 +2548,7 @@ function originAllowed(req) {
   // make every legitimate handshake look cross-origin and silently kill the
   // live feed. Trust the forwarded name only when the operator has said
   // there IS a proxy — otherwise a direct caller could forge it.
-  const expected = (process.env.JELLYSTREAMERR_TRUST_PROXY
+  const expected = (TRUST_PROXY_ENV
     && String(req.headers['x-forwarded-host'] ?? '').split(',')[0].trim())
     || req.headers.host;
   try {
@@ -2682,7 +2687,7 @@ scheduleAutoScan();
 
 const { port, host } = config.server;
 server.listen(port, host, () => {
-  console.log(`jellystreamerr listening on http://${host}:${port}`);
+  console.log(`streamerr listening on http://${host}:${port}`);
   if (authDisabled()) {
     console.warn('  AUTH IS DISABLED ("auth": {"disabled": true} in config.json).');
     console.warn('  Anyone who can reach this port controls broadcasts and can read');

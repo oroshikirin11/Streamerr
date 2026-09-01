@@ -18,8 +18,11 @@ import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CONFIG_PATH = process.env.JELLYSTREAMERR_CONFIG
-  ? resolve(process.env.JELLYSTREAMERR_CONFIG)
+// The old JELLYSTREAMERR_* names keep working: a compose written before
+// the rename must not silently fall back to a fresh config.
+const configEnv = process.env.STREAMERR_CONFIG || process.env.JELLYSTREAMERR_CONFIG;
+const CONFIG_PATH = configEnv
+  ? resolve(configEnv)
   : resolve(ROOT, 'config.json');
 
 const DEFAULTS = {

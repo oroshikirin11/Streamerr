@@ -189,7 +189,7 @@ export function availableCores() {
  * output settings, so a title can be diagnosed without anyone shipping the
  * media.
  */
-const ISSUES_URL = 'http://192.168.178.180:3000/Alex/Jellystreamerr/issues';
+const ISSUES_URL = 'http://192.168.178.180:3000/Alex/Streamerr/issues';
 
 export function gpuDecodable(video) {
   if (!video) return true;
@@ -3741,7 +3741,7 @@ export class PipelinePlayout extends EventEmitter {
   _chunkPlan() {
     if (this._chunkPlanPick) return this._chunkPlanPick;
     const disk = join(this.cacheDir ?? '/tmp', `chunks-${process.pid}`);
-    const shm = `/dev/shm/jellystreamerr-${process.pid}`;
+    const shm = `/dev/shm/streamerr-${process.pid}`;
     const budget = this.runAhead?.ramBytes ?? null;
     let plan = { dir: disk, ramBytes: null };
     // The cache NEVER falls back to disk — a cushion of minutes churning

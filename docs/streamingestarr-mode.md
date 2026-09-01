@@ -4,9 +4,9 @@ Streamingestarr (the self-hosted receiver replacing Owncast,
 `~/IdeaProjects/Streamingestarr`) exposes a structured metadata channel so
 its theater page can show real now-playing/up-next/schedule information
 instead of a title string. The receiver side is **built and live**; this
-doc specs what Jellystreamerr's "Streamingestarr mode" needs. The
+doc specs what Streamerr's "Streamingestarr mode" needs. The
 authoritative contract lives in the receiver repo:
-`docs/integration-jellystreamerr.md`.
+`docs/integration-streamerr.md`.
 
 ## Settings surface
 

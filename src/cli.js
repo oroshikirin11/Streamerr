@@ -154,7 +154,7 @@ async function cmdTestConnect() {
 async function cmdSelftest() {
   if (!(await ffmpegAvailable())) die('ffmpeg is not on PATH.');
 
-  const dir = mkdtempSync(join(tmpdir(), 'jellystreamerr-selftest-'));
+  const dir = mkdtempSync(join(tmpdir(), 'streamerr-selftest-'));
   const CLIPS = 4;
   const CLIP_SECONDS = 6;
 
@@ -369,7 +369,7 @@ async function cmdBenchmark() {
   let withExtracted = null;
   let extractedPath = null;
   if (chosen.subtitle) {
-    const cacheDir = join(tmpdir(), 'jellystreamerr-subcache');
+    const cacheDir = join(tmpdir(), 'streamerr-subcache');
     const t0 = Date.now();
     extractedPath = await extractSubtitle(src, chosen.subtitle, cacheDir);
     const fontsDir = await extractFonts(src, cacheDir);
@@ -705,7 +705,7 @@ async function cmdGputest() {
 async function cmdPipetest() {
   if (!(await ffmpegAvailable())) die('ffmpeg is not on PATH.');
 
-  const dir = mkdtempSync(join(tmpdir(), 'jellystreamerr-pipe-'));
+  const dir = mkdtempSync(join(tmpdir(), 'streamerr-pipe-'));
   const CLIPS = 3;
   const CLIP_SECONDS = 20;
 
@@ -924,7 +924,7 @@ const commands = {
 
 if (!commands[cmd]) {
   console.log(`
-jellystreamerr
+streamerr
 
   probe                 test which encoders actually work on this machine
   tracks <file>         list audio/subtitle tracks and what would be picked

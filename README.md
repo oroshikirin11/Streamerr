@@ -1,8 +1,8 @@
-# Jellystreamerr
+# Streamerr
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE.md)
 
-**Turn your media library into a live TV channel.** Jellystreamerr is
+**Turn your media library into a live TV channel.** Streamerr is
 web-controlled playout for [Owncast](https://owncast.online): browse your
 library in the browser, click an episode, and it goes live — subtitles burned
 in, the right dub selected, the rest of the season following automatically.
@@ -10,7 +10,7 @@ in, the right dub selected, the rest of the season following automatically.
 Runs headless in Docker. No OBS, no desktop, no capture card.
 
 ```
-your library  →  Jellystreamerr  →  Owncast  →  viewers
+your library  →  Streamerr  →  Owncast  →  viewers
  (any format)     (one clean stream)
 ```
 
@@ -49,7 +49,7 @@ what everybody sees. A media library, meanwhile, agrees on nothing: 4K HEVC
 10-bit HDR remuxes, 1080p H.264 web releases, 1440×1080 4:3 broadcast rips,
 DTS and PCM and AAC, ASS subtitles and DVD subpictures.
 
-Jellystreamerr sits between those two facts. It takes a heterogeneous library
+Streamerr sits between those two facts. It takes a heterogeneous library
 and emits **one unbroken stream that never changes shape**, with the right
 subtitle and audio track chosen per file the way a media server would, and
 burned into the picture because that's the only thing the player can show.
@@ -84,7 +84,7 @@ live*, which is what the GPU paths below are about.
 
 ### Why the receiver lives on a VPS
 
-Jellystreamerr runs at home, next to the media. Owncast runs on a cheap VPS.
+Streamerr runs at home, next to the media. Owncast runs on a cheap VPS.
 That split is the point: your home connection carries **one** outgoing stream
 no matter how many people watch — the VPS's bandwidth fans it out to the
 viewers. Five viewers pulling directly from a home upload line would kill it;
@@ -98,17 +98,17 @@ pre-built web UI — nothing to install on the host.
 **1. Clone and enter the repo:**
 
 ```bash
-git clone <repo-url> jellystreamerr
-cd jellystreamerr
+git clone <repo-url> streamerr
+cd streamerr
 ```
 
 **2. Point it at your media.** Edit `docker-compose.yml`:
 
 ```yaml
 services:
-  jellystreamerr:
+  streamerr:
     build: .
-    container_name: jellystreamerr
+    container_name: streamerr
     restart: unless-stopped
     ports:
       - "8099:8099"                 # web UI
@@ -122,8 +122,8 @@ services:
       - "989"                       # NUMERIC gid of the render group — see below
 
     environment:
-      - JELLYSTREAMERR_CONFIG=/config/config.json
-      # - JELLYSTREAMERR_TRUST_PROXY=1   # only behind a reverse proxy
+      - STREAMERR_CONFIG=/config/config.json
+      # - STREAMERR_TRUST_PROXY=1   # only behind a reverse proxy
 
     volumes:
       - ./config:/config            # settings + your stream key
@@ -226,17 +226,17 @@ On the VPS, in this order:
 3. **Set a stream key** under *Configuration → Server Setup → Stream Keys*.
 4. **Enable video passthrough** under *Configuration → Video → Stream output*:
    edit the output entry, open *Advanced*, turn on *Video passthrough*.
-   Jellystreamerr already sends stream-ready H.264 + AAC with 2-second
+   Streamerr already sends stream-ready H.264 + AAC with 2-second
    keyframes — without passthrough the VPS re-encodes it for nothing. Leave
    the segment/latency defaults.
 5. **Optional, for title sync**: create an access token under
-   *Integrations* and put it with the server URL into Jellystreamerr's
+   *Integrations* and put it with the server URL into Streamerr's
    Owncast settings. The watch page then shows what's playing.
 6. **Network**: RTMP sends the stream key in plaintext. Keep port 1935 closed
    to the internet and send the stream over a VPN or tailnet; only the watch
    page (HTTP/S) is public.
 
-Then run the Jellystreamerr wizard — step 1 asks for the RTMP address and the
+Then run the Streamerr wizard — step 1 asks for the RTMP address and the
 key from step 3, and its *Send 30s to watch* button confirms video actually
 arrives.
 
@@ -514,8 +514,8 @@ documentation recommends; changing it can break segmenting.
   single-threaded; heavy typesetting is the expensive case. Run
   `cli.js benchmark <that file>` — if the *no-subtitles* number is also poor,
   subtitles aren't your bottleneck.
-- **The panel shows "Lost connection to Jellystreamerr".** The server isn't
-  answering. Check `docker compose logs jellystreamerr` — unhandled faults are
+- **The panel shows "Lost connection to Streamerr".** The server isn't
+  answering. Check `docker compose logs streamerr` — unhandled faults are
   logged with a stack trace rather than taking the process down.
 - **"The server address must start with rtmp:// or rtmps://".** Only those two
   schemes are accepted. ffmpeg takes its output protocol from the URL, so any
@@ -535,12 +535,12 @@ ffmpeg activity live, with stream keys redacted — safe to copy and paste.
 The same engine is available inside the container:
 
 ```bash
-docker compose exec jellystreamerr node src/cli.js probe          # which encoders work here
-docker compose exec jellystreamerr node src/cli.js tracks <file>  # what would be picked, and why
-docker compose exec jellystreamerr node src/cli.js testconnect    # does Owncast accept our key
-docker compose exec jellystreamerr node src/cli.js benchmark <file>
-docker compose exec jellystreamerr node src/cli.js pipetest       # seek/pause keep the connection alive
-docker compose exec jellystreamerr node src/cli.js stream a.mkv b.mkv
+docker compose exec streamerr node src/cli.js probe          # which encoders work here
+docker compose exec streamerr node src/cli.js tracks <file>  # what would be picked, and why
+docker compose exec streamerr node src/cli.js testconnect    # does Owncast accept our key
+docker compose exec streamerr node src/cli.js benchmark <file>
+docker compose exec streamerr node src/cli.js pipetest       # seek/pause keep the connection alive
+docker compose exec streamerr node src/cli.js stream a.mkv b.mkv
 ```
 
 `benchmark` is the useful one on a new machine: it measures the same file with
@@ -575,7 +575,7 @@ a live broadcast.
 
 ### Behind a reverse proxy
 
-Set `JELLYSTREAMERR_TRUST_PROXY=1`. Without it the panel ignores
+Set `STREAMERR_TRUST_PROXY=1`. Without it the panel ignores
 `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` — the safe
 default, since a direct caller could otherwise forge them — but that costs you
 three things:
@@ -624,13 +624,13 @@ requirement, which is the actual reason this ships as a container — no
 mainstream stable distro packages it yet.
 
 ```bash
-git clone <repo-url> jellystreamerr && cd jellystreamerr
+git clone <repo-url> streamerr && cd streamerr
 npm install
 cd web && npm install && npm run build && cd ..
 node src/index.js                 # panel on :8099
 ```
 
-`JELLYSTREAMERR_CONFIG` sets the config path (default `./config.json`).
+`STREAMERR_CONFIG` sets the config path (default `./config.json`).
 
 ## Built with AI
 
@@ -663,6 +663,6 @@ they inherit the same noncommercial terms: nobody can take this and sell it.
 (That makes it source-available rather than OSI "open source" — a deliberate
 choice.)
 
-If Jellystreamerr runs your channel and you want to say thanks:
+If Streamerr runs your channel and you want to say thanks:
 
 <a href="https://buymeacoffee.com/oroshikirin11"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60"></a>

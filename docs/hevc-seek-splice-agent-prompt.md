@@ -57,7 +57,7 @@
 > Remaining (receiver-side, Streamingestarr): session-start segment 0
 > enters mid-GOP — cosmetic for true starts, gone from seeks entirely.
 
-Copy everything below the line into the agent working on Jellystreamerr.
+Copy everything below the line into the agent working on Streamerr.
 
 ---
 
@@ -65,7 +65,7 @@ Copy everything below the line into the agent working on Jellystreamerr.
 
 Every **seek on an HEVC broadcast** corrupts the stream at the splice seam.
 Find and fix the splice damage so that seeking on HEVC (passthrough *and*
-transcode) is as clean as it is on H.264. Repo: `~/IdeaProjects/Jellystreamerr`.
+transcode) is as clean as it is on H.264. Repo: `~/IdeaProjects/Streamerr`.
 
 ## Evidence (measured 2026-08-31, live N100 → VPS Streamingestarr)
 
@@ -149,8 +149,8 @@ Measurement discipline from earlier sessions: never compare speeds across
 different positions — pin A/B tests with `/api/stream/seek` to the same
 window. Deploy loop: the user pushes to Gitea and rebuilds the container;
 for quick iterations rsync the working tree into the box's checkout
-(exclude `.git node_modules config config.json cache overlays Jellystreamerr`)
-and `docker compose up -d --build jellystreamerr` from the compose dir.
+(exclude `.git node_modules config config.json cache overlays Streamerr`)
+and `docker compose up -d --build streamerr` from the compose dir.
 
 ## Constraints
 

@@ -1,6 +1,6 @@
 # Screen capture — viability note
 
-Can Jellystreamerr capture part of the operator's desktop (or a single
+Can Streamerr capture part of the operator's desktop (or a single
 application window) in the browser and put it on the broadcast?
 
 **Short answer: yes, and the browser half is easy. The work is the ingest path

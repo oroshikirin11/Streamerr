@@ -16,7 +16,7 @@ async function request(method, path, body) {
     // The browser's own wording for this is "NetworkError when attempting
     // to fetch resource", which reads like a bug in the page rather than
     // what it is: the server is not answering.
-    const err = new Error('Lost connection to Jellystreamerr — the server is not responding.');
+    const err = new Error('Lost connection to Streamerr — the server is not responding.');
     err.offline = true;
     throw err;
   }

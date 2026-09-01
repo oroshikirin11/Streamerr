@@ -52,7 +52,7 @@ RUN npm install --omit=dev --no-audit --no-fund
 COPY src ./src
 
 # Cache and runtime state live on a volume; see docker-compose.yml.
-ENV JELLYSTREAMERR_CONFIG=/config/config.json
+ENV STREAMERR_CONFIG=/config/config.json
 # Express prints err.stack into the response body unless this is 'production'.
 # The service also carries its own terminal error handler, so this is the
 # second of two locks, not the only one.

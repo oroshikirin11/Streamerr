@@ -344,7 +344,7 @@
         ? `⏳ ${stream.playing.title}`
         : onBreak && stream.breakUntil
           ? `⏳ Back at ${clockTime(stream.breakUntil)}`
-          : 'Jellystreamerr';
+          : 'Streamerr';
   });
 
   let devMode = $state(false);
@@ -395,7 +395,7 @@
         <span class="mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
         </span>
-        <h1 style="margin: 0; font-size: 19px;">Jellystreamerr</h1>
+        <h1 style="margin: 0; font-size: 19px;">Streamerr</h1>
       </div>
       <p class="muted">
         {passwordConfigured
@@ -437,7 +437,7 @@
         <span class="mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
         </span>
-        <strong>Jellystreamerr</strong>
+        <strong>Streamerr</strong>
       </div>
       <div class="status">
         <!-- The destination list on hover. With a fan-out there is otherwise

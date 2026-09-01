@@ -16,3 +16,9 @@ run/
 web/node_modules/
 web/build/
 web/.svelte-kit/
+
+# Runtime overlay uploads
+overlays/
+
+# Local agent/session config
+.claude/

@@ -1,15 +1,15 @@
 # Standalone compose — run from inside the repo:  docker compose up -d
 #
 # If your compose file lives ALONGSIDE the checkout rather than inside it
-# (e.g. /srv/docker-compose.yml with the repo at /srv/Jellystreamerr), see
+# (e.g. /srv/docker-compose.yml with the repo at /srv/Streamerr), see
 # "Existing compose stack" in the README: the build context and every
 # relative volume path change, because they resolve from the compose file's
 # directory, not the repo's.
 services:
-  jellystreamerr:
+  streamerr:
     build: .
-    image: jellystreamerr:latest
-    container_name: jellystreamerr
+    image: streamerr:latest
+    container_name: streamerr
     restart: unless-stopped
 
     ports:
@@ -45,13 +45,13 @@ services:
       - "989"
 
     environment:
-      - JELLYSTREAMERR_CONFIG=/config/config.json
+      - STREAMERR_CONFIG=/config/config.json
       # Uncomment when this sits behind a reverse proxy. It makes the panel
       # trust X-Forwarded-For/-Proto/-Host, which it needs for a per-client
       # login rate limit, the Secure cookie flag over HTTPS, and the
       # WebSocket origin check. Only with a proxy in front — those headers
       # are forgeable by anyone who can reach the port directly.
-      # - JELLYSTREAMERR_TRUST_PROXY=1
+      # - STREAMERR_TRUST_PROXY=1
       # Leave the VAAPI driver to autodetection. Only force it if `probe`
       # reports vaapi failing on hardware you know works — iHD for Intel
       # Broadwell+, i965 for older Intel, radeonsi for AMD.
