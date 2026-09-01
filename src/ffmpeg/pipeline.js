@@ -508,6 +508,7 @@ export class PipelinePlayout extends EventEmitter {
      * first.
      */
     this._sentVideoPts = null;
+    this._sentPos = null;
     /** Content position a resume returns to; set by pause, cleared by seek. */
     this._pauseResume = null;
 
@@ -1030,22 +1031,19 @@ export class PipelinePlayout extends EventEmitter {
   pause() {
     if (this.status === 'paused' || !this.current) return;
     this.status = 'paused';
-    // The cushion-kept, GOP-aligned splice — the exact machinery a track
-    // change uses. A flush here discarded the cushion and spliced the card
-    // at the on-air position, but the publisher had ALREADY been handed
-    // the cushion's bytes: the receiver saw DTS run backward by the
-    // cushion depth at every hold start ("Packet corrupt", out-of-order
-    // DTS, ~a cushion of replay for viewers). The cut trims to
-    // applySeconds, ends the kept bytes on a video access point, and
-    // rewinds the timeline to their own last pts — the card appends
-    // BEHIND the cushion and continues the published stream exactly.
-    const { resume } = this._bankCutForApply(this.applySeconds);
-    // Where the card will appear in CONTENT time, captured now: the hold
-    // card's bank stamps freeze `pos` while `tl` advances, so nothing at
-    // resume time can reconstruct this. Viewers resume at the moment the
-    // card appeared for them.
-    this._pauseResume = resume;
-    this.position = resume;
+    // INSTANT pause: flush the cushion rather than airing it out. Keeping
+    // the cushion made every pause take up to applySeconds to reach the
+    // wire — a pause button that keeps playing for fifteen seconds. The
+    // reason the flush was ever unsafe is gone: it now splices at the
+    // exact last video pts the publisher was handed (the sent frontier),
+    // so the card continues the published timeline monotonically instead
+    // of jumping backward by the stamp drift. Viewers lose only bytes
+    // they had not seen yet, and the flush rewinds `position` to what
+    // actually aired — the moment the card appears for them.
+    this._bankFlush();
+    // Captured for resume: the card's own bank stamps freeze `pos` while
+    // `tl` advances, so nothing at resume time can reconstruct this.
+    this._pauseResume = this.position;
     // The scheduler SURVIVES a pause: delivery suspends, the workers keep
     // encoding ahead, and the retained window keeps the position we are
     // pausing at. Killing it here was why resuming took a minute of card —
@@ -1879,7 +1877,18 @@ export class PipelinePlayout extends EventEmitter {
       // aligns the 188-byte grid inside an arbitrary pipe-read split.
       if (this._fmt === 'ts') {
         const sent = lastVideoPtsIn(c.data, (188 - ((this._published ?? 0) % 188)) % 188);
-        if (sent != null) this._sentVideoPts = sent;
+        if (sent != null) {
+          this._sentVideoPts = sent;
+          // The CONTENT position of that same byte, stamp-lag corrected:
+          // pos and tl stamps advance in lockstep from the same progress
+          // ticks, so the pts excess over the tl stamp is the same excess
+          // in content time. This is what lets a flush rewind the
+          // playhead to the byte viewers actually got, not to a stamp
+          // that lags it by however much the encoder ran ahead.
+          this._sentPos = c.pos != null && c.tl != null
+            ? { pos: Math.max(0, c.pos + (sent - c.tl)), item: c.item }
+            : null;
+        }
       }
       // Bytes the publisher accepted — THAT is the liveness signal the
       // 20s guard wants. It used to key off the playhead moving instead,
@@ -2312,7 +2321,12 @@ export class PipelinePlayout extends EventEmitter {
     // and rewinding the new episode's playhead to it would drop playback
     // to an arbitrary offset — reachable by seeking just after a
     // transition, which is exactly when someone tests transitions.
-    if (this.aired != null && this.aired < this.position
+    // The sent-frontier position is the same fact read from the wire —
+    // exact where the stamp lags — and wins when it is for this clip.
+    const sp = this._sentPos;
+    if (sp && sp.item === this.current?.item && sp.pos < this.position) {
+      this.position = sp.pos;
+    } else if (this.aired != null && this.aired < this.position
         && this.airedItem === this.current?.item) {
       this.position = this.aired;
     }
@@ -2931,6 +2945,7 @@ export class PipelinePlayout extends EventEmitter {
     // The sent frontier belongs to the OLD session's timeline — carrying
     // it across would drag every later flush back onto dead numbers.
     this._sentVideoPts = null;
+    this._sentPos = null;
     this._spawnPublisher();
     // The publisher's close cleared the watchdog; the broadcast is
     // continuing, so it has to be re-armed or nothing supervises it again.
