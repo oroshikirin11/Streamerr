@@ -44,6 +44,12 @@ export function publishDefaults() {
      * target, sends `SGR-TS/1 <key>\n` and splices bytes from there.
      */
     tcp: { url: '', key: '', passphrase: '' },
+    /**
+     * Which Streamingestarr room ("channel") the primary feeds. Metadata
+     * pushes carry it, so a fan-out where each destination is a different
+     * room gets its own now-playing. Empty = the receiver's default room.
+     */
+    channel: '',
     // Additional destinations, fanned out from the one encode.
     extras: [],
   };
@@ -205,12 +211,14 @@ export function destinations(publish, codec = 'h264') {
   if (!protocolCarries(protocol, codec) && String(p.srt?.url ?? '').trim()) {
     protocol = 'srt';
   }
-  const out = [{ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name) }];
+  const out = [{ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name),
+    channel: String(p.channel ?? '').trim().slice(0, 64) }];
   const skipped = [];
   for (const e of p.extras ?? []) {
     if (!e || e.enabled === false) continue;
     if (!PROTOCOLS.includes(e.protocol)) continue;
-    const d = { protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name) };
+    const d = { protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name),
+      channel: String(e.channel ?? '').trim().slice(0, 64) };
     if (protocolCarries(e.protocol, codec)) out.push(d);
     else skipped.push(d);
   }

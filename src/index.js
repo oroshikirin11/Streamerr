@@ -546,6 +546,15 @@ let sgAnnounced = null;
 let sgRestateTimer = null;
 let sgOnAirKey = null;
 /**
+ * The distinct Streamingestarr rooms among the destinations the LIVE
+ * broadcast is actually feeding — captured at start, like the destinations
+ * themselves, so a settings edit mid-broadcast changes neither. The
+ * receiver has no broadcast-to-all: one now-playing push per room, same
+ * payload. '' means the receiver's default room and is sent as 'main',
+ * which keeps a no-rooms setup byte-identical to before rooms existed.
+ */
+let sgChannels = [''];
+/**
  * Transitions fan out through several engine events, and each used to
  * push — 11-14 POSTs per skip, counted live. Coalesce: pushes requested
  * within a beat collapse into one nowplaying + one schedule, keeping the
@@ -602,7 +611,7 @@ async function sgNowPlaying({ announce = false } = {}) {
   const [artworkId, nextArt] = await Promise.all([
     sgArtId(it), next ? sgArtId(next) : undefined,
   ]).catch(() => [undefined, undefined]);
-  sgPost('/api/integrations/metadata/nowplaying', {
+  const payload = {
     ...head,
     ...(artworkId ? { artworkId } : {}),
     position: snap.position ?? undefined,
@@ -614,8 +623,12 @@ async function sgNowPlaying({ announce = false } = {}) {
     videoRange: snap.hdrOnAir ? 'pq' : 'sdr',
     ...(next ? { upNext: { ...sgSplit(next), ...(nextArt ? { artworkId: nextArt } : {}) } } : {}),
     announce: Boolean(announce && fresh),
-    channel: 'main',
-  });
+  };
+  // Artwork is id-addressed and room-agnostic (pushed once above); the
+  // now-playing itself goes once per room the broadcast feeds.
+  for (const ch of sgChannels) {
+    sgPost('/api/integrations/metadata/nowplaying', { ...payload, channel: ch || 'main' });
+  }
 }
 
 async function sgSchedule() {
@@ -2279,6 +2292,14 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   trackIntent = {};
   sgAnnounced = null;
   sgOnAirKey = null;
+  // Same capture moment as the destinations themselves: the rooms this
+  // broadcast pushes metadata to are the rooms it streams to, and a
+  // settings edit mid-broadcast changes neither until the next start.
+  try {
+    sgChannels = [...new Set(publishDestinations(config, config.encoder.codec ?? 'h264')
+      .map((d) => String(d.channel ?? '').trim()))];
+  } catch { sgChannels = ['']; }
+  if (!sgChannels.length) sgChannels = [''];
   engine = buildEngine({ profile, selection });
   // Not awaited: going live can legitimately take minutes when the first
   // clip's subtitles must be extracted (one full read of the file), and an

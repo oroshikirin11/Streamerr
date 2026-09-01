@@ -290,7 +290,7 @@
   function addExtra() {
     cfg.publish.extras = [...(cfg.publish.extras ?? []),
       { id: uid(), enabled: true, protocol: 'rtmp', url: '', key: '',
-        streamId: '', passphrase: '', latencyMs: 200 }];
+        streamId: '', passphrase: '', latencyMs: 200, channel: '' }];
   }
   function removeExtra(id) {
     cfg.publish.extras = (cfg.publish.extras ?? []).filter((e) => e.id !== id);
@@ -1056,6 +1056,10 @@
     <input bind:value={cfg.publish.name} spellcheck="false" maxlength="40"
            placeholder="e.g. Owncast VPS" />
 
+    <label>Room <span class="muted small">optional — the Streamingestarr room ("channel") this destination feeds; now-playing goes to that room</span></label>
+    <input bind:value={cfg.publish.channel} spellcheck="false" maxlength="40"
+           placeholder="empty = the receiver's main room" />
+
     <!-- Fan-out. One encode, several destinations: the box cannot afford a
          second encoder, and it does not need one. -->
     <h4 class="sub">Also send to</h4>
@@ -1084,6 +1088,8 @@
           <input type="password" bind:value={ex.passphrase}
                  placeholder={savedHint(`x.${ex.id}.passphrase`) ?? 'passphrase (if the receiver demands one)'} />
         {/if}
+        <input bind:value={ex.channel} spellcheck="false" maxlength="40"
+               placeholder="room (optional) — Streamingestarr channel this destination feeds" />
       </div>
     {/each}
     <button type="button" onclick={addExtra}>Add a destination</button>
