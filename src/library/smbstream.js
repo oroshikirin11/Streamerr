@@ -403,11 +403,21 @@ export class SmbStreamLibrary {
         if (!isVideo(e.name)) continue;
         const parsed = parseEpisode(e.name, { allowBareNumber: inSeason });
         const frel = `${dir}/${e.name}`;
+        // Same typing as the filesystem provider — a file with no episode
+        // number is a film, named after its folder rather than its release
+        // string. Without the type, openSeries' single-film auto-play
+        // guard never fired over SMB and every movie opened a one-row
+        // file list instead of playing.
+        const isEpisode = parsed.episode != null;
+        const folder = dir.split('/').pop() ?? '';
         out.push({
           id: this._remember(frel),
+          type: isEpisode ? 'Episode' : 'Movie',
           seriesId,
           seriesName,
-          title: parsed.title,
+          title: isEpisode
+            ? parsed.title
+            : (!inSeason && folder ? folder : parsed.title),
           season: parsed.season,
           episode: parsed.episode,
           size: e.size,
