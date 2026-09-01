@@ -500,9 +500,9 @@
     {#if stills.running && stills.total}
       <!-- Quiet on purpose: this is background work nobody is waiting on,
            so it reports itself without asking for attention. -->
-      <span class="stills" title={`Making the missing episode pictures — ${stills.done} of ${stills.total} done${stills.failed ? `, ${stills.failed} could not be made` : ''}. They are made a couple at a time and paused while you are on air, so browsing stays fast.`}>
+      <span class="stills" title={`Making the missing episode pictures — ${stills.done} made so far${stills.failed ? `, ${stills.failed} could not be made` : ''}. They are made a couple dozen at a time with long pauses, and paused entirely while you are on air, so browsing stays fast.`}>
         <span class="spin" aria-hidden="true"></span>
-        {stills.done}/{stills.total}
+        {stills.done} made
       </span>
     {/if}
     {#if meta.running && meta.fetched}

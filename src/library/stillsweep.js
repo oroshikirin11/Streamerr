@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync } from 'fs';
 
 import { cachedFrame, frameGrab, isVideoFile } from './thumbs.js';
+import { isMovieShelf } from './tmdb.js';
 
 /** Two, not three: this is background work competing with a NAS. */
 const CONCURRENCY = 2;
@@ -152,6 +153,10 @@ export class StillSweeper {
       let libraries = [];
       try { libraries = await src.lib.libraries(); } catch { continue; }
       for (const l of libraries) {
+        // A movies shelf has nothing to still: the grid shows posters and
+        // films play on click. Walking each folder's file list just to
+        // skip its one file cost an SMB round trip per movie, every pass.
+        if (isMovieShelf(l)) continue;
         let page;
         try { page = await src.lib.items(l.id, { startIndex: 0, limit: 500 }); } catch { continue; }
         for (const item of page?.items ?? []) {
@@ -204,7 +209,17 @@ export class StillSweeper {
     if (gen !== this._gen) return;
     if (!queue.length) { this._later(); return; }
 
-    this._state = { running: true, done: 0, total: queue.length, failed: 0 };
+    // done/failed accumulate across passes: the queue is one BATCH of a
+    // longer walk, and showing "10/24" on the panel read as the whole
+    // library's progress. The panel now gets a running made-count; totals
+    // are unknowable without walking everything, which the batching
+    // exists to avoid.
+    this._state = {
+      running: true,
+      done: this._state.done ?? 0,
+      total: (this._state.total ?? 0) + queue.length,
+      failed: this._state.failed ?? 0,
+    };
     this._didWork = true;
     this.log(`[stills] ${queue.length} to make\n`);
     const cacheDir = this.getCacheDir();
