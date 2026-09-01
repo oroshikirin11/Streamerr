@@ -37,12 +37,12 @@
   /**
    * Simple mode: two orthogonal levers instead of the full page. A lever
    * writes the same config Advanced edits and saves immediately — there is
-   * no second source of truth. Which view you were in last is remembered.
+   * no second source of truth. Settings always opens in Simple; Advanced
+   * is a per-visit choice, not a remembered one.
    */
   let viewMode = $state('simple');
   function setView(m) {
     viewMode = m;
-    try { localStorage.setItem('jsr-settings-mode', m); } catch { /* private mode */ }
   }
   const PICTURE_LEVERS = [
     { id: 'best', name: 'Best',
@@ -506,8 +506,8 @@
   }
 
   onMount(() => {
-    try { viewMode = localStorage.getItem('jsr-settings-mode') ?? 'simple'; }
-    catch { /* private mode */ }
+    // Settings always opens in Simple — Advanced is a per-visit choice,
+    // not a remembered one.
     load();
   });
 
