@@ -1396,8 +1396,23 @@
                 onclick={() => setMeta('none')}>Filenames</button>
         <button class:on={metaProvider === 'jellyfin'}
                 onclick={() => setMeta('jellyfin')}>Jellyfin</button>
-        <button disabled>TheTVDB <span class="tag">soon</span></button>
+        <button class:on={metaProvider === 'tmdb'}
+                onclick={() => setMeta('tmdb')}>TMDB</button>
       </div>
+
+      {#if metaProvider === 'tmdb'}
+        <p class="muted small">
+          Titles, episode names and posters from The Movie Database. Enter
+          the key and that is everything — matching runs in the background
+          and the library fills in as answers land.
+        </p>
+        <label>API key</label>
+        <input type="password" bind:value={metaKey}
+               placeholder={src.metadata.apiKey === '__SET__'
+                 ? 'saved — type to replace' : 'themoviedb.org → Settings → API'} />
+        <p class="muted small">A free account's key is enough. Both the short
+          v3 key and the long v4 token work.</p>
+      {/if}
 
       {#if metaProvider === 'jellyfin'}
         <p class="muted small">

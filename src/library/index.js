@@ -14,6 +14,14 @@ import { FilesystemLibrary } from './filesystem.js';
 import { SmbLibrary } from './smb.js';
 import { SmbStreamLibrary } from './smbstream.js';
 import { CompositeLibrary } from './composite.js';
+import { TmdbMeta, TmdbLibrary } from './tmdb.js';
+
+/** One TMDB cache per process; every enriched source shares it. */
+let tmdbMeta = null;
+function sharedTmdbMeta(cfg) {
+  tmdbMeta ??= new TmdbMeta({ cacheDir: cfg?.paths?.cache, log: console.log });
+  return tmdbMeta;
+}
 
 /** One provider instance for one configured source. */
 /**
@@ -48,6 +56,19 @@ function makeSource(src, cfg, reuseToken = null) {
       apiKey: src.metadata.apiKey,
     });
     return new PairedLibrary(catalogue, media, src.metadata.pathMap ?? []);
+  }
+  /**
+   * TMDB is an ENRICHER, not a catalogue: it has no notion of the files on
+   * disk, so the folder keeps defining structure and TMDB layers canonical
+   * titles, episode names and posters over it, answered from the on-disk
+   * cache the background sweeper fills. One shared cache per process — the
+   * same title in two sources is one TMDB answer.
+   */
+  if (src.metadata?.provider === 'tmdb' && src.provider !== 'jellyfin') {
+    const media = makeSource({ ...src, metadata: null }, cfg, reuseToken);
+    const meta = sharedTmdbMeta(cfg);
+    meta.setKey(src.metadata.apiKey);
+    return new TmdbLibrary(media, meta);
   }
   if (src.provider === 'jellyfin') {
     return new JellyfinLibrary({

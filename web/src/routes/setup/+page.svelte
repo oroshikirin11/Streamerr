@@ -335,6 +335,9 @@
         pathMap: metaRules,
       };
     }
+    if (metaProvider === 'tmdb' && metaKey.trim()) {
+      src.metadata = { provider: 'tmdb', url: '', apiKey: metaKey.trim(), pathMap: [] };
+    }
     return { sources: [src] };
   }
 
@@ -670,10 +673,23 @@
         <label class="pick">
           <input type="radio" bind:group={metaProvider} value="jellyfin" /> Jellyfin
         </label>
-        <label class="pick dim">
-          <input type="radio" disabled /> TheTVDB <span class="muted small">soon</span>
+        <label class="pick">
+          <input type="radio" bind:group={metaProvider} value="tmdb" /> TMDB
         </label>
       </div>
+
+      {#if metaProvider === 'tmdb'}
+        <p class="muted small">
+          Titles, episode names and posters from The Movie Database. Enter
+          the key and that is everything — matching runs in the background
+          after setup and the library fills in as answers land.
+        </p>
+        <label>API key</label>
+        <input type="password" bind:value={metaKey}
+               placeholder="themoviedb.org → Settings → API" />
+        <p class="muted small">A free account's key is enough. Both the short
+          v3 key and the long v4 token work.</p>
+      {/if}
 
       {#if metaProvider === 'jellyfin'}
         <p class="muted small">

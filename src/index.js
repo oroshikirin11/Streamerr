@@ -37,6 +37,7 @@ import { normalizeBitrate, codecBitrate, BACKENDS } from './ffmpeg/encoders.js';
 import { renderNodes } from './ffmpeg/gpuinfo.js';
 import { LANGUAGES } from './ffmpeg/tracks.js';
 import { StillSweeper } from './library/stillsweep.js';
+import { TmdbSweeper } from './library/tmdbsweep.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
@@ -376,6 +377,7 @@ function rememberIntent(selection, subtitleMode) {
 /** Rebuild the library client whenever its settings change. */
 /** Set once the engine wiring below exists; see the note there. */
 let stillSweeper = null;
+let tmdbSweeper = null;
 
 function refreshLibrary() {
   // Hand over the old instance so unchanged SMB sources keep their bridge
@@ -383,6 +385,7 @@ function refreshLibrary() {
   library = makeLibrary(config, library);
   // New media, or the setting just changed: look again.
   stillSweeper?.start();
+  tmdbSweeper?.start();
 }
 
 /** Exit code of a short synchronous command, -1 on spawn failure. */
@@ -2569,6 +2572,15 @@ stillSweeper = new StillSweeper({
   log: (m) => dpush('ffmpeg', m),
 });
 stillSweeper.start();
+
+// Matches folder/share titles against TMDB in the background, so entering
+// the API key is the whole setup: names, episode titles and posters land
+// as the sweep progresses, and cached metadata leaves with its title.
+tmdbSweeper = new TmdbSweeper({
+  library: () => library,
+  log: (m) => dpush('ffmpeg', m),
+});
+tmdbSweeper.start();
 
 scheduleAutoScan();
 
