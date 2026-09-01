@@ -554,6 +554,66 @@ let sgOnAirKey = null;
  * which keeps a no-rooms setup byte-identical to before rooms existed.
  */
 let sgChannels = [''];
+
+/** The stream key a destination authenticates with, for room resolution.
+ *  SRT smuggles it in the stream id, conventionally publish-prefixed. */
+function sgDestKey(d) {
+  if (d.protocol === 'srt') {
+    return String(d.creds?.streamId ?? '').replace(/^publish[:/]/i, '').trim();
+  }
+  return String(d.creds?.key ?? '').trim();
+}
+
+/**
+ * Which rooms these destinations feed, resolved once per broadcast start.
+ *
+ * A manual Room field wins verbatim — it exists as the override. Otherwise
+ * the receiver is asked to resolve the destination's stream key. The three
+ * answers mean three different things:
+ *   a room        → that room.
+ *   success:false → this key is no room on this receiver (a Twitch or
+ *                   Owncast extra, say) — the destination contributes NO
+ *                   room rather than a wrong one.
+ *   error/timeout → '' (main): network trouble must degrade to the
+ *                   pre-rooms behavior, never to silence.
+ * An empty final set falls back to [''] for the same reason.
+ */
+async function sgResolveChannels(dests) {
+  const receivers = sgReceivers();
+  const resolved = await Promise.all((dests ?? []).map(async (d) => {
+    const manual = String(d.channel ?? '').trim();
+    if (manual) return manual;
+    const key = sgDestKey(d);
+    if (!key || !receivers.length) return '';
+    let trouble = false;
+    for (const rc of receivers) {
+      try {
+        const r = await fetch(
+          `${String(rc.url).replace(/\/+$/, '')}/api/integrations/metadata/resolve-channel`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${rc.accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ key }),
+            signal: AbortSignal.timeout(3000),
+          },
+        );
+        const data = await r.json().catch(() => null);
+        if (data && data.success !== false && typeof data.channel === 'string') {
+          return data.channel.trim();
+        }
+        // A definite "not mine" moves on to the next receiver; anything
+        // unintelligible counts as trouble.
+        if (!(data && data.success === false)) trouble = true;
+      } catch { trouble = true; }
+    }
+    return trouble ? '' : null;
+  }));
+  const rooms = resolved.filter((v) => v !== null);
+  return rooms.length ? [...new Set(rooms)] : [''];
+}
 /**
  * Transitions fan out through several engine events, and each used to
  * push — 11-14 POSTs per skip, counted live. Coalesce: pushes requested
@@ -2295,11 +2355,12 @@ app.post('/api/stream/start', wrap(async (req, res) => {
   // Same capture moment as the destinations themselves: the rooms this
   // broadcast pushes metadata to are the rooms it streams to, and a
   // settings edit mid-broadcast changes neither until the next start.
+  // Resolution asks the receiver which room each stream key feeds; ~3s
+  // worst case, in parallel, and only when a receiver is configured.
   try {
-    sgChannels = [...new Set(publishDestinations(config, config.encoder.codec ?? 'h264')
-      .map((d) => String(d.channel ?? '').trim()))];
+    const dests = publishDestinations(config, config.encoder.codec ?? 'h264');
+    sgChannels = await sgResolveChannels(dests);
   } catch { sgChannels = ['']; }
-  if (!sgChannels.length) sgChannels = [''];
   engine = buildEngine({ profile, selection });
   // Not awaited: going live can legitimately take minutes when the first
   // clip's subtitles must be extracted (one full read of the file), and an

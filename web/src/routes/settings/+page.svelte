@@ -1056,9 +1056,9 @@
     <input bind:value={cfg.publish.name} spellcheck="false" maxlength="40"
            placeholder="e.g. Owncast VPS" />
 
-    <label>Room <span class="muted small">optional — the Streamingestarr room ("channel") this destination feeds; now-playing goes to that room</span></label>
+    <label>Room <span class="muted small">optional override — Streamingestarr detects the room from the stream key; set this only to force one</span></label>
     <input bind:value={cfg.publish.channel} spellcheck="false" maxlength="40"
-           placeholder="empty = the receiver's main room" />
+           placeholder="auto-detected from the stream key" />
 
     <!-- Fan-out. One encode, several destinations: the box cannot afford a
          second encoder, and it does not need one. -->
@@ -1089,7 +1089,7 @@
                  placeholder={savedHint(`x.${ex.id}.passphrase`) ?? 'passphrase (if the receiver demands one)'} />
         {/if}
         <input bind:value={ex.channel} spellcheck="false" maxlength="40"
-               placeholder="room (optional) — Streamingestarr channel this destination feeds" />
+               placeholder="room override (optional) — auto-detected from the stream key" />
       </div>
     {/each}
     <button type="button" onclick={addExtra}>Add a destination</button>
