@@ -21,7 +21,7 @@ function authHeader(apiKey) {
 export class JellyfinLibrary {
   /**
    * @param {object} opts
-   * @param {string} opts.url      e.g. http://192.168.178.100:8096
+   * @param {string} opts.url      e.g. http://192.168.1.10:8096
    * @param {string} opts.apiKey
    * @param {Array<{from,to}>} [opts.pathMap]
    */

@@ -21,8 +21,8 @@ and a second encoder.** Not started — this is a note, not a plan.
 ### 1. It needs a secure context
 
 `getDisplayMedia()` is only available on HTTPS or `localhost`. It works on
-`https://stream.livinginasimulation.de`, and it does **not** work on
-`http://192.168.178.186:8099` — a plain-HTTP LAN address is not a secure
+`https://ingest.example.com`, and it does **not** work on
+`http://192.168.1.20:8099` — a plain-HTTP LAN address is not a secure
 context, so the button would be dead on the address the operator normally
 uses. Solve this first; everything else is downstream of it.
 

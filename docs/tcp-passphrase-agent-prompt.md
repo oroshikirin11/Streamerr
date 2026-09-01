@@ -56,7 +56,7 @@ in the settings UI, and prove it live. Repo: `~/IdeaProjects/Streamerr`.
 
 ## Live verification (the receiver is ready)
 
-- Target: `tcp://stream.livinginasimulation.de:9711` — public, passphrase
+- Target: `tcp://ingest.example.com:9711` — public, passphrase
   SET by the operator (get the value from them; never log it).
 - **One broadcast slot**: stop any running SRT broadcast first, or the
   receiver answers the preamble with "stream already running" and closes —
@@ -72,7 +72,7 @@ in the settings UI, and prove it live. Repo: `~/IdeaProjects/Streamerr`.
 - Deploy note: the desktop sender runs as the docker container
   `streamerr` (compose in the repo root) — code changes need
   `docker compose up -d --build`, a plain restart reuses the stale image.
-  The N100 box (192.168.178.186:8099, API open) is the other sender.
+  The N100 box (192.168.1.20:8099, API open) is the other sender.
 
 ## Why TCP at all (context, not a task)
 

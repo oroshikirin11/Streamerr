@@ -203,7 +203,7 @@
 /* ------------------------------------------------------------------ */
 const HW = { name: 'Intel N100', vdenc: true, main10: true, uploadNow: 24.1, uploadDay: 52.7 };
 const cfg = {
-  codec: 'hevc', protocol: 'tcp', target: 'stream.livinginasimulation.de',
+  codec: 'hevc', protocol: 'tcp', target: 'ingest.example.com',
   bitrateAnchor: 12000, copyLimit: 26000, hdrOutput: true,
   buffer: 15, gop: 1, srtLatency: 500,
   subsBurn: true, audioMode: 'original', subtitleMode: 'auto',
@@ -392,7 +392,7 @@ const FIELDS = [
       <label>Now-playing &amp; artwork push ${badge('live')}</label>
       <div class="why">Sends title, poster and progress to the theater page. The legacy Owncast
         title sync lives here too, for Owncast receivers.</div>
-      <div class="dest"><span class="dname">stream.livinginasimulation.de</span>
+      <div class="dest"><span class="dname">ingest.example.com</span>
         <span class="dmeta">token set</span>
         <span class="dspacer"></span><span class="tag inuse">active</span></div>
       <div class="ctl"><span class="measured">Owncast title sync</span>
@@ -494,7 +494,7 @@ const FIELDS = [
     html: () => `
       <label>Libraries ${badge('live')}</label>
       <div class="dest"><span class="dname">SMB share</span>
-        <span class="dmeta">//192.168.178.100/media · Jellyfin metadata</span>
+        <span class="dmeta">//192.168.1.10/media · Jellyfin metadata</span>
         <span class="dspacer"></span><span class="tag inuse">connected</span></div>
       <div class="ctl"><button onclick="alert('(mock) add library dialog')">Add a library</button></div>` },
   { cat: 'library', id: 'tracks', label: 'Tracks & languages', kw: 'language subtitle audio track dub original',

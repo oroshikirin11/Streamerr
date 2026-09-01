@@ -126,7 +126,7 @@ keyframe placement will not match the publisher's. That is the second encoder
 `screen-capture-viability.md` warns about.
 
 `getDisplayMedia()` and `getUserMedia()` both need a **secure context**. They
-do not work on `http://192.168.178.186:8099`, which is the address normally
+do not work on `http://192.168.1.20:8099`, which is the address normally
 used. Solve that first — everything else is downstream.
 
 ## Webhook triggers

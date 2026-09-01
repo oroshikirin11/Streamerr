@@ -124,7 +124,7 @@ it, and it may be a useful reference for how a codec-aware splice was done.
 
 The N100 test box runs with auth disabled — drive it directly, no password:
 
-- Start: `POST http://192.168.178.186:8099/api/stream/start`
+- Start: `POST http://192.168.1.20:8099/api/stream/start`
   `{"itemIds":["bfd24e0f~534f7ac264c62476907b865073c69b71"]}` = Backrooms,
   4K DV/HDR10+ HEVC WEB-DL ~25 Mbps, no subtitles → HEVC passthrough.
   (Ensure `encoder.codec=hevc`; `encoder.hdrOutput=true` for the HDR path.)
@@ -133,12 +133,12 @@ The N100 test box runs with auth disabled — drive it directly, no password:
   `Packet corrupt … dropping it` line at the seam. **The fix is proven when
   repeated seeks produce zero corrupt-packet drops and zero discontinuity
   rebases in the publisher.**
-- On-air proof: capture `ws://192.168.178.186:8099/ws/preview` (binary frames
+- On-air proof: capture `ws://192.168.1.20:8099/ws/preview` (binary frames
   → concat → .ts) across a seek, then `ffmpeg -v error -i cap.ts -f null -`
   must be silent after the join point, and audio/video first/last DTS must
   stay aligned (`ffprobe -show_packets`).
 - Receiver proof (needs the user or an authed session): Streamingestarr admin
-  logs at stream.livinginasimulation.de must show no
+  logs at ingest.example.com must show no
   `timestamp discontinuity` spam after seeks.
 - Also cover: HEVC *transcode* seeks (enable a subtitle so the clip encodes),
   seek during passthrough→transcode transitions (Apply), and confirm H.264
