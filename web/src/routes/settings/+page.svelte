@@ -115,6 +115,16 @@
     timingName = '';
     await api.saveConfig({ presets: { timing: snap } });
   }
+  // Rename changes the label ONLY — never the captured fields. Re-saving
+  // fields on rename would silently replace the saved setup with whatever
+  // preset happens to be active at the time.
+  async function renameSnap(which, name) {
+    const cur = which === 'picture' ? pictureSnap : timingSnap;
+    if (!cur) return;
+    const snap = { ...cur, name: (name.trim() || cur.name) };
+    cfg.presets = { ...(cfg.presets ?? {}), [which]: snap };
+    await api.saveConfig({ presets: { [which]: snap } });
+  }
   async function applyPictureSnap() {
     const s = pictureSnap?.fields;
     if (!s) return;
@@ -857,12 +867,13 @@
           {/each}
         </ul>
       </details>
-      {#if pictureIsCustom}
-        <p class="driftline">This is your saved setup{snapWhen(pictureSnap) ? `, saved ${snapWhen(pictureSnap)}` : ''}.
+      {#if pictureSnap && (pictureCurrent !== null || pictureIsCustom)}
+        <p class="driftline">{pictureIsCustom ? 'This is your saved setup' : `“${pictureSnap.name}” is one click away`}{snapWhen(pictureSnap) ? `, saved ${snapWhen(pictureSnap)}` : ''}.
           Rename it:
           <input class="snapname" type="text" bind:value={pictureName}
                  placeholder={pictureSnap.name} aria-label="New name for this saved setup" />
-          <button type="button" class="snapbtn" onclick={savePictureSnap}>save</button></p>
+          <button type="button" class="snapbtn"
+                  onclick={() => { renameSnap('picture', pictureName); pictureName = ''; }}>save</button></p>
       {/if}
       {#if pictureCurrent === null && !pictureIsCustom}
         <p class="driftline">Picture is <b>customized</b> in Advanced. Picking a lever saves it
@@ -895,12 +906,13 @@
           </button>
         {/if}
       </div>
-      {#if timingIsCustom}
-        <p class="driftline">This is your saved cushion{snapWhen(timingSnap) ? `, saved ${snapWhen(timingSnap)}` : ''}.
+      {#if timingSnap && (timingCurrent !== null || timingIsCustom)}
+        <p class="driftline">{timingIsCustom ? 'This is your saved cushion' : `“${timingSnap.name}” is one click away`}{snapWhen(timingSnap) ? `, saved ${snapWhen(timingSnap)}` : ''}.
           Rename it:
           <input class="snapname" type="text" bind:value={timingName}
                  placeholder={timingSnap.name} aria-label="New name for this saved cushion" />
-          <button type="button" class="snapbtn" onclick={saveTimingSnap}>save</button></p>
+          <button type="button" class="snapbtn"
+                  onclick={() => { renameSnap('timing', timingName); timingName = ''; }}>save</button></p>
       {/if}
       {#if timingCurrent === null && !timingIsCustom}
         <p class="driftline">Timing is <b>customized</b> in Advanced ({cfg.buffer.seconds} s).
