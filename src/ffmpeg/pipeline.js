@@ -189,7 +189,7 @@ export function availableCores() {
  * output settings, so a title can be diagnosed without anyone shipping the
  * media.
  */
-const ISSUES_URL = 'http://192.168.178.180:3000/Alex/Streamerr/issues';
+const ISSUES_URL = 'https://github.com/oroshikirin11/Streamerr/issues';
 
 export function gpuDecodable(video) {
   if (!video) return true;
