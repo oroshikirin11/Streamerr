@@ -193,8 +193,15 @@ export class StillSweeper {
       if (out.length >= BATCH || scanned >= SCAN_SERIES) break;
     }
     // Wrap when the walk reaches the end, so newly added media is found on
-    // the next lap rather than never.
-    this._cursor = out.length || scanned ? seen : 0;
+    // the next lap rather than never. A batch that filled mid-series
+    // resumes at THAT series: advancing past it left every long series
+    // capped at one batch per lap of the library — six shows sitting at
+    // exactly 24 stills, measured. If the series was in fact finished,
+    // the next pass re-lists it, finds everything cached, and moves on.
+    const partial = out.length >= BATCH;
+    this._cursor = out.length || scanned
+      ? (partial ? Math.max(0, seen - 1) : seen)
+      : 0;
     this._saveCursor();
     return out;
   }
