@@ -51,6 +51,16 @@ const NOISE = new RegExp('\\b(2160p|1440p|1080p|720p|480p|4k|uhd|bluray|blu ray|
   + '|uncut|unrated|imax|x264|x265|h264|h265|hevc|av1|xvid|hdr10|hdr|dovi|dv|sdr'
   + '|10bit|8bit|dts|dd[p+]?[0-9]*|aac|ac3|eac3|truehd|atmos|5 1|7 1|multi|dual audio)\\b', 'i');
 
+/**
+ * Whether a library entry is a movies shelf. `type` where the provider
+ * carries one, the shelf's NAME otherwise — the SMB provider derives its
+ * shelves from collection folders called "movies"/"filme" anyway.
+ */
+export function isMovieShelf(l) {
+  if (l?.type) return l.type === 'movies';
+  return /\b(movies?|films?|filme)\b/i.test(String(l?.name ?? ''));
+}
+
 /** The searchable part of a title, plus the year it carried, if any. */
 export function scrubQuery(title) {
   let year = titleYear(title);
@@ -414,7 +424,8 @@ export class TmdbLibrary {
     let movieLib = false;
     try {
       const libs = await this.media.libraries();
-      movieLib = (libs ?? []).find((l) => l.id === a[0])?.type === 'movies';
+      const l = (libs ?? []).find((x) => x.id === a[0]);
+      movieLib = l ? isMovieShelf(l) : false;
     } catch { /* enrich by per-item type alone */ }
     return { ...page, items: (page?.items ?? []).map((it) => this._enrichSummary(it, movieLib)) };
   }

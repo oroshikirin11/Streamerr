@@ -12,7 +12,7 @@
  * walk of directory listings and no requests at all.
  */
 
-import { TmdbMeta, titleYear } from './tmdb.js';
+import { TmdbMeta, titleYear, isMovieShelf } from './tmdb.js';
 
 /** Between TMDB requests. ~3/s, far under the ~50/s limit, kind to NAS too. */
 const GAP_MS = 350;
@@ -98,7 +98,7 @@ export class TmdbSweeper {
       for (const l of libraries) {
         // The shelf's collection type outranks the per-folder heuristic —
         // same rule as the enricher, or the two would key differently.
-        const movieLib = l.type === 'movies';
+        const movieLib = isMovieShelf(l);
         let page;
         try { page = await src.lib.media.items(l.id, { startIndex: 0, limit: 5000 }); }
         catch { complete = false; continue; }

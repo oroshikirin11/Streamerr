@@ -299,7 +299,13 @@ export class SmbStreamLibrary {
     // same as the filesystem provider; otherwise the root is the library.
     const collections = dirs.filter((d) => COLLECTION.test(d.name));
     if (collections.length) {
-      return collections.map((d) => ({ id: this._remember(d.name), name: d.name }));
+      return collections.map((d) => ({
+        id: this._remember(d.name),
+        name: d.name,
+        // Same field the filesystem provider carries; the TMDB enricher
+        // keys its movie-vs-tv search off it.
+        type: /\b(movies?|films?|filme)\b/i.test(d.name) ? 'movies' : 'tvshows',
+      }));
     }
     return [{ id: this._remember(''), name: this._cfg.path?.split('/').pop() || this._cfg.share }];
   }
