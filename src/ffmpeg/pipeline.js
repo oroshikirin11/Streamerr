@@ -383,6 +383,34 @@ const BANK_MIN_BYTES = 2 * 1024 * 1024;
  */
 const bankCeiling = (seconds) => Math.max(48, Math.ceil(seconds * 8)) * 1024 * 1024;
 
+/**
+ * The pts of the LAST video PES start (pid 0x100, ffmpeg's first-stream
+ * default) in a run of TS bytes, in seconds — null when none survives
+ * whole. Drained chunks are arbitrary pipe-read splits, so the 188-byte
+ * grid rarely begins at byte 0; the caller knows the stream offset and
+ * passes the alignment in. A byte that breaks the grid ends the scan —
+ * everything before it was verified, everything after it is guesswork.
+ */
+export function lastVideoPtsIn(buf, gridStart = 0) {
+  let pts = null;
+  for (let o = gridStart; o + 188 <= buf.length; o += 188) {
+    if (buf[o] !== 0x47) return pts;
+    const pusi = (buf[o + 1] & 0x40) !== 0;
+    const pid = ((buf[o + 1] & 0x1f) << 8) | buf[o + 2];
+    if (!pusi || pid !== 0x100) continue;
+    const hasAf = (buf[o + 3] & 0x20) !== 0;
+    const p = o + 4 + (hasAf ? 1 + buf[o + 4] : 0);
+    if (p + 14 > o + 188) continue;
+    if (buf[p] !== 0 || buf[p + 1] !== 0 || buf[p + 2] !== 1) continue;
+    if (!(buf[p + 7] & 0x80)) continue;    // no PTS in this PES
+    const b = buf.subarray(p + 9, p + 14);
+    pts = (((b[0] >> 1) & 7) * 2 ** 30
+      + (b[1] << 22) + (((b[2] >> 1) & 0x7f) << 15) + (b[3] << 7) + (b[4] >> 1))
+      / 90000;
+  }
+  return pts;
+}
+
 export class PipelinePlayout extends EventEmitter {
   /**
    * @param {object} o
@@ -470,6 +498,16 @@ export class PipelinePlayout extends EventEmitter {
     this.timeline = 0;
     /** Position within the current clip. */
     this.position = 0;
+    /**
+     * The last video pts actually handed to the publisher, read from the
+     * drained TS bytes themselves. `timeline` is progress-derived and
+     * `airedTimeline` is chunk-stamp-derived; both lag or lead the wire
+     * by up to a second, and a splice anchored on either can start the
+     * next source BEHIND bytes already published — a backward pts jump.
+     * This is the wire's own answer, and the flush/cut paths trust it
+     * first.
+     */
+    this._sentVideoPts = null;
 
     this._stopping = false;
     /**
@@ -987,6 +1025,14 @@ export class PipelinePlayout extends EventEmitter {
   pause() {
     if (this.status === 'paused' || !this.current) return;
     this.status = 'paused';
+    // The flush both discards the cushion (pause means NOW, not a bankful
+    // later) and hands the hold card its -output_ts_offset: since the
+    // sent-pts fix it rewinds the timeline to the exact last video pts the
+    // publisher was given, so the card continues the published stream
+    // monotonically. It used to rewind to the chunk STAMPS, which lag the
+    // bytes — the card then started behind what was already published, a
+    // backward pts jump the receiver's offset correction turned into a
+    // per-packet discontinuity storm after hours of broadcast.
     this._bankFlush();
     // The scheduler SURVIVES a pause: delivery suspends, the workers keep
     // encoding ahead, and the retained window keeps the position we are
@@ -1025,6 +1071,13 @@ export class PipelinePlayout extends EventEmitter {
         return;
       }
     }
+    // Classic path: flush the card's unsent trickle so the resumed clip
+    // splices directly behind the last byte the publisher actually got —
+    // the flush rewinds the timeline to that byte's own video pts, and
+    // _play hands it to -output_ts_offset. Without the flush the clip
+    // spliced behind the card's ENCODE head, whose progress-derived
+    // timeline disagrees with the sent bytes by up to a second each way.
+    this._bankFlush();
     this.status = 'running';
     this._play(this.current.item, this.position, { duration: this.current.duration });
     this.emit('status', this.status);
@@ -1784,6 +1837,13 @@ export class PipelinePlayout extends EventEmitter {
       }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
+      // The wire's own record of how far the published stream reached.
+      // `_published` still holds this chunk's start offset, which is what
+      // aligns the 188-byte grid inside an arbitrary pipe-read split.
+      if (this._fmt === 'ts') {
+        const sent = lastVideoPtsIn(c.data, (188 - ((this._published ?? 0) % 188)) % 188);
+        if (sent != null) this._sentVideoPts = sent;
+      }
       // Bytes the publisher accepted — THAT is the liveness signal the
       // 20s guard wants. It used to key off the playhead moving instead,
       // which holds on the streaming path (position advances with every
@@ -2048,6 +2108,15 @@ export class PipelinePlayout extends EventEmitter {
     // the flash+beep rig; the PES read brings the seam under a frame).
     const exact = this._bankTailVideoPts();
     let tl = exact != null ? exact + this._frameSeconds() : tail?.tl ?? null;
+    // Never below the sent frontier: with a THIN bank (the hold card's
+    // trickle keeps it near-empty) the GOP trim can walk the kept tail
+    // behind bytes the publisher already has, and a splice there is a
+    // backward pts jump on the wire. Anything already sent is beyond
+    // recall — the floor is one frame after it.
+    const sentFloor = this._fmt === 'ts' && this._sentVideoPts != null
+      ? this._sentVideoPts + this._frameSeconds()
+      : null;
+    if (tl != null && sentFloor != null && tl < sentFloor) tl = sentFloor;
     if (tl != null && tl < this.timeline) this.timeline = tl;
     const est = Math.max(this.aired ?? 0, (this.position ?? 0) - rewound - gop);
     // A tail from another clip (bank still carrying the previous episode)
@@ -2218,7 +2287,21 @@ export class PipelinePlayout extends EventEmitter {
     // discarded amount. The content gap and the timestamp gap are two
     // halves of the same mistake; the local-file playout test catches this
     // one as an unreadable output.
-    if (this.airedTimeline != null && this.airedTimeline < this.timeline) {
+    //
+    // The SENT frontier is the authority when we have it: the next source
+    // must continue one frame after the last video pts the publisher was
+    // actually given. `airedTimeline` is only the chunk STAMP of that
+    // byte, and stamps lag the wire — a hold card spawned on the stamp
+    // landed hours behind the published stream once the stamps had gone
+    // stale, and the receiver's per-stream offset correction turned the
+    // backward jump into a discontinuity storm (video and audio pulled in
+    // opposite directions, one line per packet). Stamps remain the
+    // fallback for NUT/AV1, where no TS pts can be read.
+    const sent = this._fmt === 'ts' && this._sentVideoPts != null
+      ? this._sentVideoPts + this._frameSeconds()
+      : null;
+    if (sent != null) this.timeline = sent;
+    else if (this.airedTimeline != null && this.airedTimeline < this.timeline) {
       this.timeline = this.airedTimeline;
     }
     this._bankResume();
@@ -2808,6 +2891,9 @@ export class PipelinePlayout extends EventEmitter {
     // timeline starts over with it rather than resuming mid-episode.
     this.timeline = 0;
     this._clipBase = 0;
+    // The sent frontier belongs to the OLD session's timeline — carrying
+    // it across would drag every later flush back onto dead numbers.
+    this._sentVideoPts = null;
     this._spawnPublisher();
     // The publisher's close cleared the watchdog; the broadcast is
     // continuing, so it has to be re-armed or nothing supervises it again.
