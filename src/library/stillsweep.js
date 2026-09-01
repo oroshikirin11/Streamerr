@@ -37,9 +37,9 @@ const IDLE_MS = 20_000;
  */
 const BATCH = 24;
 const SCAN_SERIES = 40;
-/** Between batches. Long: nothing waits on this, and the point is to be
- *  invisible to the disk rather than to finish quickly. */
-const BATCH_IDLE_MS = 120_000;
+/** Between batches. Long enough to be gentle on the disk, short enough
+ *  that a library fills in within a sitting. */
+const BATCH_IDLE_MS = 60_000;
 /** A file that will not yield a frame is usually broken, not busy. */
 const MAX_ATTEMPTS = 3;
 /** Backoff per attempt; a share that is down deserves a longer pause. */
@@ -182,7 +182,8 @@ export class StillSweeper {
             if (this._cached(path, cacheDir)) continue;
             const f = this._failed.get(path);
             if (f && (f.attempts >= MAX_ATTEMPTS || Date.now() < f.nextAt)) continue;
-            out.push(path);
+            // The series name rides along purely for the panel's tooltip.
+            out.push({ path, series: item.title ?? null });
             if (out.length >= BATCH) break;
           }
         }
@@ -232,7 +233,8 @@ export class StillSweeper {
         if (this.isBusy() || gen !== this._gen) return;
         const i = next++;
         if (i >= queue.length) return;
-        const src = queue[i];
+        const { path: src, series } = queue[i];
+        this._state.current = series;
         let made = null;
         try { made = await this._grab(src, cacheDir); } catch { made = null; }
         // A switch of source while this item was in flight already reset
@@ -264,6 +266,7 @@ export class StillSweeper {
     if (gen !== this._gen) return;
     const { done, failed } = this._state;
     this._state.running = false;
+    this._state.current = null;
     if (done || failed) this.log(`[stills] made ${done}${failed ? `, ${failed} failed` : ''}\n`);
     this._later();
   }
