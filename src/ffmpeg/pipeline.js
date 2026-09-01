@@ -2407,24 +2407,10 @@ export class PipelinePlayout extends EventEmitter {
       const path = join(this.overlayDir, name);
       if (!existsSync(path)) continue;
 
-      let start = null;
-      let end = null;
-      const secs = Math.max(1, Number(it.seconds) || 15);
-      if (it.when === 'intro') { start = 0; end = secs; }
-      else if (it.when === 'outro') {
-        if (!duration || duration <= secs) continue;   // unknown or too short
-        start = duration - secs; end = duration;
-      }
-      if (start != null) {
-        start -= offset; end -= offset;
-        if (end <= 0) continue;                        // already gone by here
-        // ...and not yet due within this span. Without it every chunk
-        // before an outro still carried the picture as an extra input, with
-        // a decode/scale/rotate branch and an overlay that draws nothing —
-        // once per chunk, per worker, for the whole episode.
-        if (span != null && start >= span) continue;
-        start = Math.max(0, start);
-      }
+      // A picture is on screen for the whole clip: an overlay stays until
+      // the operator removes it — the intro/outro windowing is gone.
+      const start = null;
+      const end = null;
       const animated = /\.gif$/i.test(name);
       const desc = {
         path,
@@ -2701,7 +2687,6 @@ export class PipelinePlayout extends EventEmitter {
         height: this.profile.height,
         duration: this.current?.duration ?? item?.duration ?? null,
         startOffset: offset,
-        title: item?.title ?? '',
       });
       if (!ass) return null;
       const out = join(this.cacheDir, `overlay-${process.pid}${tag}.ass`);

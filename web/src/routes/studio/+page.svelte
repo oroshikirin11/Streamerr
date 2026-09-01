@@ -264,15 +264,11 @@
 
   function add(kind, file = null) {
     const base = { id: uid(), x: 0.5, y: 0.5, rotation: 0, opacity: 1,
-                   motion: 'none', speed: BOUNCE_SPEED,
-                   when: 'always', seconds: 15, enabled: true };
+                   motion: 'none', speed: BOUNCE_SPEED, enabled: true };
     const item = kind === 'image'
       ? { ...base, type: 'image', file, text: '', size: 0.2 }
-      : kind === 'text'
-        ? { ...base, type: 'text', text: 'New text', size: 0.06,
-            colour: '#ffffff', outline: true }
-        : { ...base, type: 'text', text: '{title}', y: 0.86, size: 0.05,
-            colour: '#ffcc66', outline: true, when: 'outro' };
+      : { ...base, type: 'text', text: 'New text', size: 0.06,
+          colour: '#ffffff', outline: true };
     items = [...items, item];
     selected = item.id;
     dirty = true;
@@ -330,7 +326,7 @@
      * that matters.
      */
     if (item.type !== 'image') {
-      const body = String(item.text ?? '').replace('{title}', 'Episode title');
+      const body = String(item.text ?? '');
       const lines = body.split('\n');
       const longest = Math.max(1, ...lines.map((l) => l.length));
       // The encoder ROUNDS the font size to whole pixels, and the bounce
@@ -663,8 +659,6 @@
     busy = '';
   }
 
-  const whenLabel = (i) => (i.when === 'intro' ? `first ${i.seconds}s`
-    : i.when === 'outro' ? `last ${i.seconds}s` : 'always');
 </script>
 
 <svelte:window on:keydown={onKey} />
@@ -692,10 +686,6 @@
 
     <div class="group">
       <button onclick={() => add('text')}>Add text</button>
-      <button onclick={() => add('nowplaying')}
-              title="A caption that fills in whatever episode is playing, shown before it ends">
-        Add now-playing
-      </button>
       <button onclick={() => fileInput.click()} disabled={busy === 'upload'}>
         {busy === 'upload' ? 'Uploading…' : 'Add picture'}
       </button>
@@ -824,7 +814,7 @@
                      the template's own newline and indentation as real space,
                      which widened the box and pushed the glyphs off centre
                      from where the encoder puts them. -->
-                <span class="txt" class:outline={item.outline !== false}>{item.text.replace('{title}', 'Episode title')}</span>
+                <span class="txt" class:outline={item.outline !== false}>{item.text}</span>
               {/if}
               {#if selected === item.id}
                 <span class="handle rot" onpointerdown={(e) => startRotate(e, item)}
@@ -875,9 +865,6 @@
             <label>Text</label>
             <textarea rows="2" value={sel.text}
                       oninput={(e) => patch(sel.id, { text: e.currentTarget.value })}></textarea>
-            <p class="muted small">
-              <code>{'{title}'}</code> is replaced with whatever is playing.
-            </p>
           {/if}
 
           <div class="row2">
@@ -950,24 +937,6 @@
             </label>
           {/if}
 
-          <label>When</label>
-          <select value={sel.when} onchange={(e) => patch(sel.id, { when: e.currentTarget.value })}>
-            <!-- Two different scopes, and naming them both "episode" hid
-                 that. `always` is not bounded by a clip at all — the overlay
-                 is applied to every clip that plays, so it lasts as long as
-                 the broadcast does. intro and outro ARE per episode, and now
-                 say so. -->
-            <option value="always">The whole broadcast</option>
-            <option value="intro">Only at the start of each episode</option>
-            <option value="outro">Only before each episode ends</option>
-          </select>
-          {#if sel.when !== 'always'}
-            <label class="row"><span>For</span>
-              <input type="number" min="1" max="600" value={sel.seconds} style="width:80px"
-                     oninput={(e) => patch(sel.id, { seconds: +e.currentTarget.value || 15 })} />
-              <span>seconds</span></label>
-          {/if}
-
           <div class="actions">
             <button onclick={() => patch(sel.id, { enabled: sel.enabled === false })}>
               {sel.enabled === false ? 'Show' : 'Hide'}
@@ -996,7 +965,6 @@
                   <span class="nm">
                     {i.type === 'image' ? (i.file || '(no picture)') : (i.text.slice(0, 24) || '(empty)')}
                   </span>
-                  <span class="muted small">{whenLabel(i)}</span>
                 </button>
                 <!-- A switch, not a delete. Turning something off to see the
                      frame without it is the common move; losing the item in

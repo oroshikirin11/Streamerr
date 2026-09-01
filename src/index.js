@@ -1451,8 +1451,6 @@ app.put('/api/config', (req, res) => {
           colour: /^#[0-9a-f]{6}$/i.test(String(it?.colour)) ? it.colour : '#ffffff',
           font: String(it?.font ?? '').slice(0, 64),
           outline: it?.outline !== false,
-          when: ['intro', 'outro'].includes(it?.when) ? it.when : 'always',
-          seconds: num(it?.seconds, 1, 3600, 15),
           enabled: it?.enabled !== false,
         })),
     };

@@ -44,20 +44,11 @@ const hms = (t) => {
 };
 
 /**
- * When an item is on screen, as [start, end] seconds within the clip.
- *
- * 'always'  the whole clip
- * 'intro'   the opening `seconds`
- * 'outro'   the closing `seconds` — what "show it before the episode ends"
- *           means, and it needs the duration to be known
+ * When an item is on screen, as [start, end] seconds within the clip:
+ * always the whole clip. An overlay stays until the operator removes it —
+ * the intro/outro windowing this once had is gone.
  */
 function windowFor(item, duration) {
-  const secs = Math.max(1, Number(item.seconds) || 15);
-  if (item.when === 'intro') return [0, secs];
-  if (item.when === 'outro') {
-    if (!duration || duration <= secs) return null;   // unknown or too short
-    return [duration - secs, duration];
-  }
   return [0, duration && duration > 0 ? duration : 86_400];
 }
 
@@ -66,10 +57,9 @@ function windowFor(item, duration) {
  * @param {object} o
  * @param {number} o.width      output frame size, for PlayRes
  * @param {number} o.height
- * @param {number} [o.duration] clip length, needed for 'outro' timing
+ * @param {number} [o.duration] clip length
  * @param {number} [o.startOffset] where this source was seeked to; event
  *   times are shifted back by it because -ss rebases timestamps to zero
- * @param {string} [o.title]    substituted for {title} in text
  * @returns {string|null} an ASS script, or null if nothing is visible
  */
 /**
@@ -129,7 +119,7 @@ function bounceLegs(item, {
 }
 
 export function overlayAss(items, {
-  width = 1920, height = 1080, duration = null, startOffset = 0, title = '',
+  width = 1920, height = 1080, duration = null, startOffset = 0,
 } = {}) {
   const events = [];
   // Staggers bouncing captions against each other, and against bouncing
@@ -173,7 +163,7 @@ export function overlayAss(items, {
     if (item.outline !== false) tags.push('\\bord2', '\\3c&H00000000&');
     if (item.font) tags.push(`\\fn${String(item.font).replace(/[{}\\,]/g, '')}`);
 
-    const text = assText(String(item.text ?? '').replace(/\{title\}/g, title));
+    const text = assText(String(item.text ?? ''));
     if (!text) continue;
 
     if (item.motion === 'bounce') {
