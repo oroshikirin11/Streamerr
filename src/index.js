@@ -1755,8 +1755,16 @@ app.get('/api/library/stills', (req, res) => res.json(stillSweeper?.status()
 app.get('/api/library/meta/status', (req, res) => res.json(tmdbSweeper?.status()
   ?? { running: false, fetched: 0, matched: 0, missed: 0 }));
 
+// Async by hand rather than through wrap(): it is declared further down
+// and a const is not hoisted — referencing it here crashed the boot.
+const metaRoute = (fn) => async (req, res) => {
+  try { await fn(req, res); } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
 /** Candidates for the Fix-artwork picker; the key never leaves the server. */
-app.get('/api/library/meta/search', wrap(async (req, res) => {
+app.get('/api/library/meta/search', metaRoute(async (req, res) => {
   const meta = currentTmdbMeta();
   if (!meta?.enabled) return res.status(409).json({ error: 'TMDB is not configured' });
   const type = req.query.type === 'movie' ? 'movie' : 'tv';
@@ -1770,7 +1778,7 @@ app.get('/api/library/meta/search', wrap(async (req, res) => {
  * Replaces the wrong match (or the miss) in the cache; the sweeper is
  * kicked so a corrected series gets its episode names straight away.
  */
-app.post('/api/library/meta/assign', wrap(async (req, res) => {
+app.post('/api/library/meta/assign', metaRoute(async (req, res) => {
   const meta = currentTmdbMeta();
   if (!meta?.enabled) return res.status(409).json({ error: 'TMDB is not configured' });
   const { metaKey, tmdbId } = req.body ?? {};
