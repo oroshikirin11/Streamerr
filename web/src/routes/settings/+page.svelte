@@ -86,22 +86,37 @@
     seconds: +cfg.buffer.seconds,
     applySeconds: +cfg.buffer.applySeconds,
   });
-  const pictureSnap = $derived(cfg?.presets?.picture ?? null);
-  const timingSnap = $derived(cfg?.presets?.timing ?? null);
+  // A snapshot carries a name and a save time alongside its fields; a
+  // legacy flat snapshot (the first shipped shape) is wrapped on read.
+  const snapWrap = (s) => (s ? (s.fields ? s : { name: 'My settings', savedAt: null, fields: s }) : null);
+  const pictureSnap = $derived(snapWrap(cfg?.presets?.picture));
+  const timingSnap = $derived(snapWrap(cfg?.presets?.timing));
+  const snapWhen = (s) => (s?.savedAt
+    ? new Date(s.savedAt).toLocaleString(undefined,
+      { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    : null);
+  let pictureName = $state('');
+  let timingName = $state('');
   const sameSnap = (a, b) => Boolean(a && b && JSON.stringify(a) === JSON.stringify(b));
-  const pictureIsCustom = $derived(Boolean(cfg) && sameSnap(pictureSnapFields(), pictureSnap));
-  const timingIsCustom = $derived(Boolean(cfg) && sameSnap(timingSnapFields(), timingSnap));
+  const pictureIsCustom = $derived(Boolean(cfg) && sameSnap(pictureSnapFields(), pictureSnap?.fields));
+  const timingIsCustom = $derived(Boolean(cfg) && sameSnap(timingSnapFields(), timingSnap?.fields));
 
   async function savePictureSnap() {
-    cfg.presets = { ...(cfg.presets ?? {}), picture: pictureSnapFields() };
-    await api.saveConfig({ presets: { picture: cfg.presets.picture } });
+    const snap = { name: (pictureName.trim() || pictureSnap?.name || 'My settings'),
+      savedAt: new Date().toISOString(), fields: pictureSnapFields() };
+    cfg.presets = { ...(cfg.presets ?? {}), picture: snap };
+    pictureName = '';
+    await api.saveConfig({ presets: { picture: snap } });
   }
   async function saveTimingSnap() {
-    cfg.presets = { ...(cfg.presets ?? {}), timing: timingSnapFields() };
-    await api.saveConfig({ presets: { timing: cfg.presets.timing } });
+    const snap = { name: (timingName.trim() || timingSnap?.name || 'My settings'),
+      savedAt: new Date().toISOString(), fields: timingSnapFields() };
+    cfg.presets = { ...(cfg.presets ?? {}), timing: snap };
+    timingName = '';
+    await api.saveConfig({ presets: { timing: snap } });
   }
   async function applyPictureSnap() {
-    const s = pictureSnap;
+    const s = pictureSnap?.fields;
     if (!s) return;
     cfg.encoder.codec = s.codec;
     cfg.encoder.hdrOutput = s.hdrOutput;
@@ -115,7 +130,7 @@
     }
   }
   async function applyTimingSnap() {
-    const s = timingSnap;
+    const s = timingSnap?.fields;
     if (!s) return;
     setBuffer(s.seconds);
     cfg.buffer.applySeconds = Math.min(+s.applySeconds, cfg.buffer.seconds);
@@ -829,8 +844,8 @@
         {#if pictureSnap}
           <button type="button" class="choice" class:on={pictureIsCustom}
                   onclick={applyPictureSnap}>
-            <span class="cname">My settings</span>
-            <span class="cdesc">Your saved Advanced setup — codec, HDR, passthrough, studio state.</span>
+            <span class="cname">{pictureSnap.name}</span>
+            <span class="cdesc">{snapWhen(pictureSnap) ? `Saved ${snapWhen(pictureSnap)} — ` : ''}codec, HDR, passthrough, studio state.</span>
           </button>
         {/if}
       </div>
@@ -844,9 +859,12 @@
       </details>
       {#if pictureCurrent === null && !pictureIsCustom}
         <p class="driftline">Picture is <b>customized</b> in Advanced. Picking a lever saves it
-          as “My settings” automatically —
+          automatically — or name and save it now:
+          <input class="snapname" type="text" bind:value={pictureName}
+                 placeholder={pictureSnap?.name ?? 'My settings'}
+                 aria-label="Name for this saved setup" />
           <button type="button" class="snapbtn" onclick={savePictureSnap}>
-            {pictureSnap ? 'overwrite My settings now' : 'save as My settings now'}</button></p>
+            {pictureSnap ? 'overwrite' : 'save'}</button></p>
       {/if}
       {#if saved === 'encoder'}<p class="ok small">Saved</p>{/if}
     </section>
@@ -865,16 +883,19 @@
         {#if timingSnap}
           <button type="button" class="choice" class:on={timingIsCustom}
                   onclick={applyTimingSnap}>
-            <span class="cname">My settings</span>
-            <span class="cdesc">Your saved cushion — {timingSnap.seconds} s, applies at {timingSnap.applySeconds} s.</span>
+            <span class="cname">{timingSnap.name}</span>
+            <span class="cdesc">{snapWhen(timingSnap) ? `Saved ${snapWhen(timingSnap)} — ` : ''}{timingSnap.fields.seconds} s cushion, applies at {timingSnap.fields.applySeconds} s.</span>
           </button>
         {/if}
       </div>
       {#if timingCurrent === null && !timingIsCustom}
         <p class="driftline">Timing is <b>customized</b> in Advanced ({cfg.buffer.seconds} s).
-          Picking a lever saves it as “My settings” automatically —
+          Picking a lever saves it automatically — or name and save it now:
+          <input class="snapname" type="text" bind:value={timingName}
+                 placeholder={timingSnap?.name ?? 'My settings'}
+                 aria-label="Name for this saved cushion" />
           <button type="button" class="snapbtn" onclick={saveTimingSnap}>
-            {timingSnap ? 'overwrite My settings now' : 'save as My settings now'}</button></p>
+            {timingSnap ? 'overwrite' : 'save'}</button></p>
       {/if}
       {#if saved === 'timing'}<p class="ok small">Saved</p>{/if}
     </section>
@@ -2105,6 +2126,8 @@
   .driftline b { color: var(--text); }
   .snapbtn { background: none; border: 0; padding: 0; font-size: inherit;
     color: var(--accent, #7aa2f7); cursor: pointer; text-decoration: underline; }
+  .snapname { font-size: 12px; padding: 2px 6px; margin: 0 2px; width: 130px;
+    display: inline-block; vertical-align: baseline; }
   .foot { margin-top: 18px; }
   /* Simple mode centers a narrow column; the footer follows it instead of
      hugging the page edge. */
