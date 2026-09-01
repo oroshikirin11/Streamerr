@@ -464,6 +464,18 @@ export class FilesystemLibrary {
         : null,
       season: parsed.season, episode: parsed.episode,
       path: p, sourcePath: p,
+      // Same artwork rules as the listing. Queue items are built from this
+      // call, and without an image here nothing queued by id ever carried
+      // a poster to the receiver, even when a sidecar still exists.
+      image: (() => {
+        const still = stillsIn(dirname(p), new Map())
+          .get(basename(p).slice(0, -extname(p).length));
+        if (still) {
+          this._paths.set(id(still), still);
+          return imageUrl(still);
+        }
+        return this._stills ? imageUrl(p) : null;
+      })(),
     };
   }
 

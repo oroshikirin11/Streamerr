@@ -213,6 +213,10 @@ export class JellyfinLibrary {
     const data = await this._get('/Items', {
       Ids: id,
       Fields: 'Path,MediaSources,Overview',
+      // Asked for explicitly, exactly like episodes(): queue items are
+      // built from this call, and without the tag there is no image url.
+      EnableImageTypes: 'Primary',
+      ImageTypeLimit: 1,
       EnableUserData: false,
     });
     const e = (data.Items ?? [])[0];
@@ -280,9 +284,27 @@ export class JellyfinLibrary {
     return `/api/library/image/${key}?v=${tag}`;
   }
 
-  /** Resolves an art id back to its Jellyfin url for the image route. */
+  /**
+   * Resolves an art id back to its Jellyfin url for the image route.
+   *
+   * The map is only a fast path. It is in-memory and born empty every time
+   * the library client is rebuilt — which happens on any settings save and
+   * after every scheduled rescan — while the ids it serves are baked into
+   * engine queue items and open pages for hours. A marathon queue crossing
+   * a rescan used to 404 every poster from then on (and the Streamingestarr
+   * push cached the miss, blanking episodes for the whole broadcast). The
+   * id itself carries the whole remote address — `<itemId>-<type>-<tag>` —
+   * so a miss is reconstructed instead of refused.
+   */
   imagePath(imageId) {
-    return this._art?.get(imageId) ?? null;
+    const hit = this._art?.get(imageId);
+    if (hit) return hit;
+    const m = /^([0-9a-fA-F]{32})-([A-Za-z]+)-([0-9a-fA-F]{8,64})$/.exec(String(imageId));
+    if (!m) return null;
+    const url = `${this.url}/Items/${m[1]}/Images/${m[2]}?tag=${m[3]}&maxHeight=450`;
+    this._art ??= new Map();
+    this._art.set(imageId, url);
+    return url;
   }
 
   _summary(i) {

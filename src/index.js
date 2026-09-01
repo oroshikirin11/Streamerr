@@ -456,10 +456,13 @@ function sgReceivers() {
 }
 const sgActive = () => (sgReceivers().length ? true : null);
 
-function sgPost(path, body) {
-  for (const rc of sgReceivers()) {
-    const label = rc.name || new URL(String(rc.url)).host;
-    fetch(`${String(rc.url).replace(/\/+$/, '')}${path}`, {
+/** One receiver, one POST; resolves to whether the receiver truly took it.
+ *  The receiver answers 200 with {success:false} for a rejected payload,
+ *  so HTTP status alone is not an ack. */
+async function sgPostOne(rc, path, body) {
+  const label = rc.name || new URL(String(rc.url)).host;
+  try {
+    const r = await fetch(`${String(rc.url).replace(/\/+$/, '')}${path}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${rc.accessToken}`,
@@ -467,12 +470,36 @@ function sgPost(path, body) {
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(4000),
-    }).then((r) => {
-      if (!r.ok) dpush('warn', `Streamingestarr [${label}] ${path}: HTTP ${r.status}`);
-    }).catch((err) => {
-      dpush('warn', `Streamingestarr [${label}] ${path} failed: ${err.cause?.message ?? err.message}`);
     });
+    if (!r.ok) {
+      dpush('warn', `Streamingestarr [${label}] ${path}: HTTP ${r.status}`);
+      return false;
+    }
+    const data = await r.json().catch(() => null);
+    if (data?.success === false) {
+      dpush('warn', `Streamingestarr [${label}] ${path}: ${data.message ?? 'rejected'}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    dpush('warn', `Streamingestarr [${label}] ${path} failed: ${err.cause?.message ?? err.message}`);
+    return false;
   }
+}
+
+function sgPost(path, body) {
+  for (const rc of sgReceivers()) void sgPostOne(rc, path, body);
+}
+
+/** Fan out and wait: true only when EVERY enabled receiver acked. Used
+ *  where a lost push must be retried later (artwork is pushed once per
+ *  id); re-sending to a receiver that already has it is a cheap
+ *  overwrite, so all-or-retry is safe. */
+async function sgPostAcked(path, body) {
+  const receivers = sgReceivers();
+  if (!receivers.length) return false;
+  const acks = await Promise.all(receivers.map((rc) => sgPostOne(rc, path, body)));
+  return acks.every(Boolean);
 }
 
 /** series/episode un-flattened: title = the show or film, subtitle = the
@@ -494,12 +521,15 @@ const sgArtPushed = new Set();
 function sgArtPrepare(imageSrc) {
   if (!imageSrc) return Promise.resolve(null);
   if (!sgArtCache.has(imageSrc)) {
-    sgArtCache.set(imageSrc, (async () => {
+    const prep = (async () => {
       let src = imageSrc;
       if (src.startsWith('/api/library/image/')) {
         const id = decodeURIComponent(src.split('/').pop().split('?')[0]);
         src = library.imagePath?.(id) ?? null;
-        if (!src) return null;
+        if (!src) {
+          dpush('warn', `artwork: image id ${id} no longer resolves — poster skipped`);
+          return null;
+        }
         if (!isRemote(src) && !existsSync(src)) return null;
         if (isVideoFile(src)) {
           // artless media resolves to the video file; a sweeper still is
@@ -527,7 +557,19 @@ function sgArtPrepare(imageSrc) {
         type: 'image/jpeg',
         data: buf.toString('base64'),
       };
-    })().catch(() => null));
+    })().catch((err) => {
+      dpush('warn', `artwork: preparing ${imageSrc} failed: ${err.message}`);
+      return null;
+    }).then((art) => {
+      // A failure must never be remembered: the first prep attempt rides
+      // the go-live burst (spawn, subtitle extraction, run-ahead fill) and
+      // a miss there used to blank the episode's poster for the rest of
+      // the process. Concurrent callers still share the in-flight promise;
+      // only the settled null is forgotten.
+      if (!art) sgArtCache.delete(imageSrc);
+      return art;
+    });
+    sgArtCache.set(imageSrc, prep);
   }
   return sgArtCache.get(imageSrc);
 }
@@ -536,8 +578,13 @@ async function sgArtId(it) {
   const art = await sgArtPrepare(it.image).catch(() => null);
   if (!art) return undefined;
   if (!sgArtPushed.has(art.id)) {
+    // Marked pushed only on a confirmed store. The old fire-and-forget
+    // marked it immediately, so one dropped POST meant every later push
+    // referenced a poster the receiver never held — until the next
+    // publisher restart cleared the set. Unacked = this push goes out
+    // without an artworkId and the next one retries the upload.
+    if (!(await sgPostAcked('/api/integrations/metadata/artwork', art))) return undefined;
     sgArtPushed.add(art.id);
-    sgPost('/api/integrations/metadata/artwork', art);
   }
   return art.id;
 }

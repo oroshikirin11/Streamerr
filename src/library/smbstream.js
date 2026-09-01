@@ -455,6 +455,12 @@ export class SmbStreamLibrary {
       season: parsed.season,
       episode: parsed.episode,
       rel,
+      // Same artwork rule as the listing: queue items are built from this
+      // call, and a missing image here means no poster ever reaches the
+      // receiver for media queued by id.
+      image: this._stills
+        ? `/api/library/image/${itemId}-frame?v=frame`
+        : null,
     };
   }
 
