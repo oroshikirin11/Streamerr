@@ -13,6 +13,8 @@
  * anything goes live and picks up where it left off afterwards.
  */
 
+import { readFileSync, writeFileSync } from 'fs';
+
 import { cachedFrame, frameGrab, isVideoFile } from './thumbs.js';
 
 /** Two, not three: this is background work competing with a NAS. */
@@ -97,9 +99,36 @@ export class StillSweeper {
     this._gen += 1;
     this._state = { running: false, done: 0, total: 0, failed: 0 };
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
-    this._cursor = 0;
+    // The cursor survives restarts and library refreshes on purpose. It
+    // used to reset here, and a day of frequent redeploys meant every
+    // process began the walk from the top — the head of the library was
+    // re-checked forever and the tail's stills were never reached. A
+    // stale cursor is self-healing: past the end it scans nothing and
+    // wraps to zero.
+    this._cursor ??= this._loadCursor();
     this._timer = setTimeout(() => { this._timer = null; this._run(); }, 1500);
     this._timer.unref?.();
+  }
+
+  _cursorFile() {
+    const dir = this.getCacheDir?.();
+    return dir ? `${dir}/stills-cursor.json` : null;
+  }
+
+  _loadCursor() {
+    try {
+      const f = this._cursorFile();
+      if (!f) return 0;
+      const v = JSON.parse(readFileSync(f, 'utf8'))?.cursor;
+      return Number.isFinite(v) && v >= 0 ? v : 0;
+    } catch { return 0; }
+  }
+
+  _saveCursor() {
+    try {
+      const f = this._cursorFile();
+      if (f) writeFileSync(f, JSON.stringify({ cursor: this._cursor ?? 0 }));
+    } catch { /* cache dir gone; the cursor is a nicety */ }
   }
 
   stop() {
@@ -159,6 +188,7 @@ export class StillSweeper {
     // Wrap when the walk reaches the end, so newly added media is found on
     // the next lap rather than never.
     this._cursor = out.length || scanned ? seen : 0;
+    this._saveCursor();
     return out;
   }
 
