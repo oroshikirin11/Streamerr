@@ -291,38 +291,55 @@
     await stream();
   }
 
+  /** Looking inside a folder before deciding what clicking it means. */
+  let opening = $state(false);
+
   async function openSeries(item, from = null) {
     refreshLive();
-    fromLibrary = from;
-    series = item;
-    selected = new Set();
-    seasonId = null;
-    seasons = [];
-    episodes = [];
-    error = '';
 
     // A movie is a single playable file — it has no seasons to list, and
     // asking Jellyfin for its episodes returns nothing.
     if (item.type === 'Movie') {
+      fromLibrary = from;
+      series = item;
+      seasonId = null;
+      seasons = [];
+      error = '';
       episodes = [{ ...item, season: null, episode: null }];
       selected = new Set([item.id]);
       return;
     }
 
+    // Look inside BEFORE switching views. A folder holding one film reads
+    // as a series until something looks inside it, and a list of one entry
+    // is a worse answer than just playing the thing — decided on click
+    // rather than while listing, because over SMB looking inside every
+    // folder to label the grid cost a round trip per row. Probing first
+    // also means a single film plays straight from the grid instead of
+    // flashing an empty detail view for the length of an SMB round trip.
+    if (opening) return;
+    opening = true;
+    let ss = [];
+    let eps = [];
+    let failed = null;
     try {
-      seasons = await api.seasons(item.id);
-      episodes = await api.episodes(item.id);
-      // A folder holding one film reads as a series until something looks
-      // inside it, and a list of one entry is a worse answer than just
-      // playing the thing. Decided here rather than while listing, because
-      // over SMB looking inside every folder to label the grid cost a
-      // network round trip per row and stalled browsing.
-      if (!seasons.length && episodes.length === 1 && episodes[0].type === 'Movie') {
-        await playMovie(episodes[0]);
-      }
-    } catch (err) {
-      error = err.message;
+      ss = await api.seasons(item.id);
+      eps = await api.episodes(item.id);
+    } catch (err) { failed = err.message; }
+    finally { opening = false; }
+
+    if (!failed && !ss.length && eps.length === 1 && eps[0].type === 'Movie') {
+      await playMovie(eps[0]);
+      return;
     }
+
+    fromLibrary = from;
+    series = item;
+    seasonId = null;
+    seasons = ss;
+    episodes = eps;
+    selected = new Set();
+    error = failed ?? '';
   }
 
   async function pickSeason(id) {
@@ -520,7 +537,7 @@
       </header>
       <div class="grid">
         {#each sh.items.slice(0, shown[sh.library.id] ?? SHELF_STEP) as item, i (item.id)}
-          <button class="poster" disabled={starting}
+          <button class="poster" disabled={starting || opening}
                   onclick={() => (item.type === 'Movie'
                     ? playMovie(item)
                     : openSeries(item, shelfTitle(sh.library)))}
