@@ -96,18 +96,22 @@ export class TmdbSweeper {
       let libraries = [];
       try { libraries = await src.lib.libraries(); } catch { complete = false; continue; }
       for (const l of libraries) {
+        // The shelf's collection type outranks the per-folder heuristic —
+        // same rule as the enricher, or the two would key differently.
+        const movieLib = l.type === 'movies';
         let page;
         try { page = await src.lib.media.items(l.id, { startIndex: 0, limit: 5000 }); }
         catch { complete = false; continue; }
         for (const item of page?.items ?? []) {
           if (gen !== this._gen || this._stopped) return PASS_IDLE_MS;
-          const kind = item.type === 'Movie' ? 'movie' : 'tv';
+          const asMovie = item.type === 'Movie' || movieLib;
+          const kind = asMovie ? 'movie' : 'tv';
           seen.add(TmdbMeta.keyFor(kind, item.title, item.year));
           let entry = meta.lookup(kind, item.title, item.year);
           const cold = !entry;
           if (cold) {
             try {
-              entry = await meta.ensure(item.type, item.title, item.year);
+              entry = await meta.ensure(asMovie ? 'Movie' : 'Series', item.title, item.year);
               fetched += 1;
               this._state.fetched = fetched;
               const st = meta.stats();
@@ -120,7 +124,7 @@ export class TmdbSweeper {
               continue;
             }
           }
-          if (!entry || item.type === 'Movie') continue;
+          if (!entry || asMovie) continue;
           // Episode names, one season fetch per season present on disk.
           let eps = [];
           try { eps = await src.lib.media.episodes(item.id); } catch { complete = false; continue; }

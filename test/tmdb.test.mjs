@@ -145,6 +145,30 @@ check('titles gone from the library lose their cache',
   dropped >= 1 && meta.lookup('movie', 'Backrooms (2026)', '2026') === null
   && meta.lookup('tv', 'Shaman King (2021)', '2021')?.id === 2);
 
+// ── movies shelf outranks the per-folder type heuristic ──
+const media2 = {
+  async libraries() { return [{ id: 'm', type: 'movies' }]; },
+  async items() {
+    return { total: 1, items: [
+      { id: 'g', title: 'Ghost in the Shell (1995)', year: '1995', type: 'Series', image: null },
+    ] };
+  },
+  imagePath() { return null; },
+};
+const lib2 = new TmdbLibrary(media2, meta);
+const p2 = await lib2.items('m');
+check('a movies shelf forces the movie key even for Series-typed folders',
+  p2.items[0].metaKey === TmdbMeta.keyFor('movie', 'Ghost in the Shell (1995)', '1995')
+  && p2.items[0].metaType === 'movie');
+
+// ── operator rejection (clear) ──
+const skKey = TmdbMeta.keyFor('tv', 'Shaman King (2021)', '2021');
+meta.clear(skKey);
+check('clear drops the match', meta.lookup('tv', 'Shaman King (2021)', '2021') === null);
+const reqs2 = calls.length;
+const after = await meta.ensure('Series', 'Shaman King (2021)', '2021');
+check('a cleared title is never re-matched', after === null && calls.length === reqs2);
+
 rmSync(dir, { recursive: true, force: true });
 console.log(fail ? `\n${fail} FAILED` : '\nall passed');
 process.exit(fail ? 1 : 0);

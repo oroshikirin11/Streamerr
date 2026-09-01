@@ -65,7 +65,7 @@ export function scrubQuery(title) {
 
 export class TmdbMeta {
   /** Bumped when scoring/scrubbing changes enough to distrust old answers. */
-  static MATCHER_V = 2;
+  static MATCHER_V = 3;
 
   constructor({ cacheDir, log = () => {} } = {}) {
     this.cacheDir = cacheDir;
@@ -195,9 +195,11 @@ export class TmdbMeta {
     const have = this._entries[key];
     const now = Date.now();
     if (have) {
+      // Pinned answers are the operator's own — a pick stays a pick, and a
+      // removal ("this match was wrong, leave it alone") stays removed.
+      if (have.pinned) return have.miss ? null : have;
       if (have.miss && now - (have.missAt ?? 0) < MISS_RETRY_MS) return null;
-      // A pinned entry is the operator's own pick and never re-matched.
-      if (!have.miss && (have.pinned || now - (have.fetchedAt ?? 0) < STALE_MS)) return have;
+      if (!have.miss && now - (have.fetchedAt ?? 0) < STALE_MS) return have;
     }
     if (this._inflight.has(key)) return this._inflight.get(key);
     const flight = (async () => {
@@ -296,6 +298,18 @@ export class TmdbMeta {
   }
 
   /**
+   * The operator's rejection: no TMDB entry is right for this title, so
+   * drop the wrong one and pin the absence — the sweeper must not put the
+   * same wrong answer back next pass. The title falls back to its
+   * filename and local artwork.
+   */
+  clear(metaKey) {
+    if (!/^(movie|tv):/.test(String(metaKey))) throw new Error('Bad metadata key');
+    this._entries[metaKey] = { miss: true, pinned: true, missAt: Date.now() };
+    this._save();
+  }
+
+  /**
    * The edge case pruning exists for: a title that left the library takes
    * its cached metadata with it. Only called after a COMPLETE walk — a
    * partial walk's seen-set would delete metadata for everything the walk
@@ -354,8 +368,13 @@ export class TmdbLibrary {
     return this.tmdbMeta.artPath(imageId) ?? this.media.imagePath(imageId);
   }
 
-  _enrichSummary(it) {
-    const type = it.type === 'Movie' ? 'movie' : 'tv';
+  _enrichSummary(it, movieLib = false) {
+    // The shelf's collection type outranks the per-folder heuristic: a
+    // movie folder holding a sample or featurette lists two videos and
+    // gets typed 'Series' — which is how every film in a Movies library
+    // was TV-searched, and "Ghost in the Shell" (1995) came back as
+    // Stand Alone Complex.
+    const type = it.type === 'Movie' || movieLib ? 'movie' : 'tv';
     // The key travels with the item so the Fix-artwork picker can name
     // exactly which cache slot it is correcting — the ENRICHED title
     // must never be used to re-derive it, or fixing a wrong match would
@@ -392,7 +411,12 @@ export class TmdbLibrary {
 
   async items(...a) {
     const page = await this.media.items(...a);
-    return { ...page, items: (page?.items ?? []).map((it) => this._enrichSummary(it)) };
+    let movieLib = false;
+    try {
+      const libs = await this.media.libraries();
+      movieLib = (libs ?? []).find((l) => l.id === a[0])?.type === 'movies';
+    } catch { /* enrich by per-item type alone */ }
+    return { ...page, items: (page?.items ?? []).map((it) => this._enrichSummary(it, movieLib)) };
   }
 
   async episodes(...a) {

@@ -157,6 +157,16 @@
     } catch (err) { fixError = err.message; }
     finally { fixBusy = false; }
   }
+  /** Nothing here is right: drop the match and stay with the filename. */
+  async function fixClear() {
+    fixBusy = true; fixError = '';
+    try {
+      await api.post('/api/library/meta/clear', { metaKey: fixItem.metaKey });
+      fixItem = null;
+      await refreshLibrary();
+    } catch (err) { fixError = err.message; }
+    finally { fixBusy = false; }
+  }
 
   onMount(load);
 
@@ -735,7 +745,14 @@
       {:else if fixBusy}
         <p class="muted">Searching…</p>
       {/if}
-      <button onclick={() => (fixItem = null)}>Close</button>
+      <div class="fixfoot">
+        <button onclick={fixClear} disabled={fixBusy}
+                title="Drop whatever TMDB matched and keep the filename and local artwork">
+          Remove match — keep the filename
+        </button>
+        <div style="flex:1"></div>
+        <button onclick={() => (fixItem = null)}>Close</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -882,6 +899,7 @@
     font-size: 22px; color: var(--muted);
   }
   .fixname { display: block; font-size: 11.5px; margin-top: 4px; line-height: 1.25; }
+  .fixfoot { display: flex; gap: 8px; align-items: center; }
   .poster:hover .playbadge svg { transform: scale(1); }
   .name { margin: 7px 0 0; font-size: 13px; line-height: 1.35; }
   .poster:hover .name { color: var(--accent); }
@@ -927,6 +945,9 @@
   .overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.45);
     display: grid; place-items: center; padding: 20px;
+    /* Above the sticky shelf headers (z-index 2), which otherwise float
+       over the dimmed backdrop as bright horizontal bars. */
+    z-index: 30;
   }
   .modal { width: min(460px, 100%); max-height: 80vh; overflow: auto; }
   .tracks { list-style: none; padding: 0; margin: 4px 0 14px; font-size: 13px; }

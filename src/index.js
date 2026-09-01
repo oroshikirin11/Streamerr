@@ -1788,6 +1788,20 @@ app.post('/api/library/meta/assign', metaRoute(async (req, res) => {
   res.json({ ok: true, title: entry.title, year: entry.year });
 }));
 
+/**
+ * The operator's rejection: nothing on TMDB is this title. The wrong match
+ * is dropped and the absence pinned, so the sweeper cannot put the same
+ * wrong answer back; the title falls back to filename and local artwork.
+ */
+app.post('/api/library/meta/clear', metaRoute(async (req, res) => {
+  const meta = currentTmdbMeta();
+  if (!meta?.enabled) return res.status(409).json({ error: 'TMDB is not configured' });
+  const { metaKey } = req.body ?? {};
+  if (!metaKey) return res.status(400).json({ error: 'metaKey is required' });
+  meta.clear(String(metaKey));
+  res.json({ ok: true });
+}));
+
 app.get('/api/check/encoders', async (req, res) => {
   const results = await probeAll(config.encoder.device);
   const caps = await probeConcatCapabilities();
