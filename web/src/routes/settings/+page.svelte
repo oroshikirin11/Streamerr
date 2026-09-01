@@ -857,6 +857,13 @@
           {/each}
         </ul>
       </details>
+      {#if pictureIsCustom}
+        <p class="driftline">This is your saved setup{snapWhen(pictureSnap) ? `, saved ${snapWhen(pictureSnap)}` : ''}.
+          Rename it:
+          <input class="snapname" type="text" bind:value={pictureName}
+                 placeholder={pictureSnap.name} aria-label="New name for this saved setup" />
+          <button type="button" class="snapbtn" onclick={savePictureSnap}>save</button></p>
+      {/if}
       {#if pictureCurrent === null && !pictureIsCustom}
         <p class="driftline">Picture is <b>customized</b> in Advanced. Picking a lever saves it
           automatically — or name and save it now:
@@ -888,6 +895,13 @@
           </button>
         {/if}
       </div>
+      {#if timingIsCustom}
+        <p class="driftline">This is your saved cushion{snapWhen(timingSnap) ? `, saved ${snapWhen(timingSnap)}` : ''}.
+          Rename it:
+          <input class="snapname" type="text" bind:value={timingName}
+                 placeholder={timingSnap.name} aria-label="New name for this saved cushion" />
+          <button type="button" class="snapbtn" onclick={saveTimingSnap}>save</button></p>
+      {/if}
       {#if timingCurrent === null && !timingIsCustom}
         <p class="driftline">Timing is <b>customized</b> in Advanced ({cfg.buffer.seconds} s).
           Picking a lever saves it automatically — or name and save it now:
