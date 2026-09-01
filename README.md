@@ -61,7 +61,7 @@ Two good options, one fallback:
 
 ## The receiving end
 
-[Streamingestarr](https://github.com/CHANGE-ME/Streamingestarr) is Streamerr's
+[Streamingestarr](https://github.com/oroshikirin11/Streamingestarr) is Streamerr's
 hybrid ingest service — the stream-receiving counterpart with playback and
 chat. Streamerr was first built to publish to
 [Owncast](https://owncast.online), which remains fully supported, and any
