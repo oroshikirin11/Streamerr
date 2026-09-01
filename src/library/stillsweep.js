@@ -37,9 +37,10 @@ const IDLE_MS = 20_000;
  */
 const BATCH = 24;
 const SCAN_SERIES = 40;
-/** Between batches. Long enough to be gentle on the disk, short enough
- *  that a library fills in within a sitting. */
-const BATCH_IDLE_MS = 60_000;
+/** Between batches: none. The per-still GAP and the on-air yield are the
+ *  throttles; batches follow each other straight through until the
+ *  library is covered, then the ordinary idle poll takes over. */
+const BATCH_IDLE_MS = 0;
 /** A file that will not yield a frame is usually broken, not busy. */
 const MAX_ATTEMPTS = 3;
 /** Backoff per attempt; a share that is down deserves a longer pause. */
