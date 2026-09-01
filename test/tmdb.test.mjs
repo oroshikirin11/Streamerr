@@ -6,7 +6,7 @@
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { TmdbMeta, TmdbLibrary, normTitle, titleYear } from '../src/library/tmdb.js';
+import { TmdbMeta, TmdbLibrary, normTitle, titleYear, scrubQuery } from '../src/library/tmdb.js';
 
 let ok = 0;
 let fail = 0;
@@ -31,9 +31,18 @@ globalThis.fetch = async (url) => {
     ] });
   }
   if (u.pathname.endsWith('/search/movie')) {
+    if (u.searchParams.get('query') === 'apocalypto') {
+      // Only a substring candidate: the guarded picker must refuse it.
+      return body({ results: [
+        { id: 7, title: 'Tenacious D: Post-Apocalypto', release_date: '2020-01-01', popularity: 8, poster_path: '/t.jpg' },
+      ] });
+    }
     return body({ results: [
       { id: 9, title: 'Backrooms', release_date: '2026-05-01', popularity: 3, poster_path: '/b.jpg' },
     ] });
+  }
+  if (/\/movie\/55$/.test(u.pathname)) {
+    return body({ id: 55, title: 'Apocalypto', release_date: '2006-12-08', poster_path: '/a.jpg', overview: 'y' });
   }
   if (/\/tv\/2\/season\/1$/.test(u.pathname)) {
     return body({ episodes: [
@@ -92,6 +101,10 @@ await meta.ensure('Movie', 'Backrooms (2026)', '2026');
 const page = await lib.items('l');
 check('series gets canonical title and a proxied poster',
   page.items[0].title === 'SHAMAN KING' && /\/api\/library\/image\/tmdb-/.test(page.items[0].image));
+check('items carry the cache key for the fix picker, derived from the RAW title',
+  page.items[0].metaKey === TmdbMeta.keyFor('tv', 'Shaman King (2021)', '2021')
+  && page.items[0].rawTitle === 'Shaman King (2021)'
+  && page.items[0].metaType === 'tv');
 check('local artwork wins over TMDB', page.items[1].image === '/api/library/image/local');
 check('movie title enriched', page.items[1].title === 'Backrooms');
 
@@ -104,6 +117,26 @@ check('art id resolves to the TMDB url',
   lib.imagePath(artId) === 'https://image.tmdb.org/t/p/w500/sk.jpg');
 check('unknown art id falls through to media', lib.imagePath('local') === '/x/poster.jpg');
 check('_stills proxies to the media half', lib._stills === true);
+
+// ── scrubbed queries & guarded matching ──
+const s1 = scrubQuery('Apocalypto 2006 2160p HDR DV x265-BEN THE MEN');
+check('release noise is cut and the bare year becomes the hint',
+  s1.q === 'apocalypto' && s1.year === '2006');
+check('parenthesised year still wins', scrubQuery('Backrooms (2026)').year === '2026');
+
+const weak = await meta.ensure('Movie', 'Apocalypto 2006 2160p HDR DV x265-BEN THE MEN', null);
+check('a substring-only candidate is refused, not guessed', weak === null);
+
+// ── operator correction (assign) ──
+const apKey = TmdbMeta.keyFor('movie', 'Apocalypto 2006 2160p HDR DV x265-BEN THE MEN', null);
+const pinned = await meta.assign(apKey, 55);
+check('assign replaces the miss with the chosen entry',
+  pinned.title === 'Apocalypto' && meta._entries[apKey]?.pinned === true);
+const reqs = calls.length;
+const again = await meta.ensure('Movie', 'Apocalypto 2006 2160p HDR DV x265-BEN THE MEN', null);
+check('a pinned entry is never re-matched', again?.id === 55 && calls.length === reqs);
+check('assign rejects junk keys',
+  await meta.assign('garbage', 55).then(() => false, () => true));
 
 // ── pruning ──
 const seen = new Set([TmdbMeta.keyFor('tv', 'Shaman King (2021)', '2021')]);

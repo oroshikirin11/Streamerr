@@ -104,16 +104,59 @@
    * a minute otherwise, since a refresh or a settings change can start one.
    */
   let stills = $state({ running: false, done: 0, total: 0, failed: 0 });
+  let meta = $state({ running: false, fetched: 0, matched: 0, missed: 0 });
   onMount(() => {
     let stop = false;
     const tick = async () => {
       if (stop) return;
       try { stills = await api.get('/api/library/stills'); } catch { /* not fatal */ }
-      setTimeout(tick, stills.running ? 2000 : 60_000);
+      try { meta = await api.get('/api/library/meta/status'); } catch { /* not fatal */ }
+      setTimeout(tick, stills.running || meta.running ? 2000 : 60_000);
     };
     tick();
     return () => { stop = true; };
   });
+
+  /**
+   * Fix artwork: the operator browses TMDB candidates and pins the right
+   * one to a title the matcher got wrong (or missed). The item carries
+   * its cache key (`metaKey`), so the fix lands in exactly the slot the
+   * wrong answer occupies.
+   */
+  let fixItem = $state(null);
+  let fixQuery = $state('');
+  let fixResults = $state(null);
+  let fixBusy = $state(false);
+  let fixError = $state('');
+  function openFix(item, e) {
+    e.stopPropagation();
+    e.preventDefault();
+    fixItem = item;
+    fixQuery = item.rawTitle?.replace(/\((?:19|20)\d{2}\)/, '').trim() ?? item.title;
+    fixResults = null;
+    fixError = '';
+    fixSearch();
+  }
+  async function fixSearch() {
+    if (!fixItem || !fixQuery.trim()) return;
+    fixBusy = true; fixError = '';
+    try {
+      const r = await api.get(`/api/library/meta/search?type=${fixItem.metaType}`
+        + `&q=${encodeURIComponent(fixQuery.trim())}`);
+      fixResults = r.results ?? [];
+    } catch (err) { fixError = err.message; }
+    finally { fixBusy = false; }
+  }
+  async function fixApply(candidate) {
+    fixBusy = true; fixError = '';
+    try {
+      await api.post('/api/library/meta/assign',
+        { metaKey: fixItem.metaKey, tmdbId: candidate.id });
+      fixItem = null;
+      await refreshLibrary();
+    } catch (err) { fixError = err.message; }
+    finally { fixBusy = false; }
+  }
 
   onMount(load);
 
@@ -435,6 +478,14 @@
         {stills.done}/{stills.total}
       </span>
     {/if}
+    {#if meta.running && meta.fetched}
+      <!-- Same quiet register as the stills indicator: background work
+           reporting itself, not asking for attention. -->
+      <span class="stills" title={`Matching titles against TMDB — ${meta.matched} matched so far${meta.missed ? `, ${meta.missed} not found` : ''}. Runs in the background; the library fills in as answers land.`}>
+        <span class="spin" aria-hidden="true"></span>
+        matching titles
+      </span>
+    {/if}
     <button class="ghost small" onclick={refreshLibrary} disabled={refreshing}
             title="Look for media added since this page was opened">
       {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -477,6 +528,16 @@
               <span class="playbadge" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               </span>
+              {#if item.metaKey}
+                <!-- Not a <button>: it lives inside one. Stops the click so
+                     fixing artwork never queues the title it is fixing. -->
+                <span class="fixart" role="button" tabindex="0"
+                      title="Wrong picture or title? Pick the right one from TMDB"
+                      onclick={(e) => openFix(item, e)}
+                      onkeydown={(e) => { if (e.key === 'Enter') openFix(item, e); }}>
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                </span>
+              {/if}
             </div>
             <p class="name">{item.title}</p>
             {#if item.childCount}<p class="muted small">{item.childCount} episodes</p>{/if}
@@ -641,6 +702,44 @@
   </div>
 {/if}
 
+{#if fixItem}
+  <div class="overlay" onclick={() => (fixItem = null)} role="presentation">
+    <div class="card modal fixmodal" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Pick the right match</h3>
+      <p class="muted small">For <b>{fixItem.rawTitle}</b> — the choice is
+        remembered and never re-matched.</p>
+      <form class="fixsearch" onsubmit={(e) => { e.preventDefault(); fixSearch(); }}>
+        <input type="search" bind:value={fixQuery} aria-label="Search TMDB"
+               placeholder="Search TMDB" />
+        <button type="submit" disabled={fixBusy}>{fixBusy ? 'Searching…' : 'Search'}</button>
+      </form>
+      {#if fixError}<p class="err">{fixError}</p>{/if}
+      {#if fixResults}
+        {#if !fixResults.length}
+          <p class="muted">Nothing found — try fewer words.</p>
+        {:else}
+          <div class="fixgrid">
+            {#each fixResults as c (c.id)}
+              <button class="fixcand" disabled={fixBusy} onclick={() => fixApply(c)}
+                      title={c.overview}>
+                {#if c.poster}
+                  <img src={c.poster} alt="" loading="lazy" />
+                {:else}
+                  <span class="noart">{c.title.slice(0, 1)}</span>
+                {/if}
+                <span class="fixname">{c.title}{c.year ? ` (${c.year})` : ''}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {:else if fixBusy}
+        <p class="muted">Searching…</p>
+      {/if}
+      <button onclick={() => (fixItem = null)}>Close</button>
+    </div>
+  </div>
+{/if}
+
 <style>
   .stills {
     display: inline-flex; align-items: center; gap: 7px;
@@ -755,6 +854,34 @@
     transition: transform .15s ease;
   }
   .poster:hover .playbadge, .poster:focus-visible .playbadge { opacity: 1; }
+  /* Fix-artwork: a corner affordance that exists only under the cursor,
+     so the grid stays a grid until someone needs it. */
+  .fixart {
+    position: absolute; top: 6px; right: 6px; z-index: 2;
+    display: grid; place-items: center; width: 26px; height: 26px;
+    border-radius: 6px; background: rgba(0, 0, 0, 0.65); color: #fff;
+    opacity: 0; transition: opacity 0.12s ease; cursor: pointer;
+  }
+  .poster:hover .fixart, .fixart:focus-visible { opacity: 1; }
+  .fixart:hover { background: rgba(0, 0, 0, 0.85); }
+  .fixmodal { width: min(680px, 92vw); }
+  .fixsearch { display: flex; gap: 8px; margin: 10px 0; }
+  .fixsearch input { flex: 1; }
+  .fixgrid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 10px; max-height: 55vh; overflow-y: auto; margin-bottom: 12px;
+  }
+  .fixcand {
+    background: none; border: 1px solid transparent; border-radius: 8px;
+    padding: 4px; text-align: left; cursor: pointer;
+  }
+  .fixcand:hover { border-color: var(--accent); }
+  .fixcand img, .fixcand .noart {
+    width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06); display: grid; place-items: center;
+    font-size: 22px; color: var(--muted);
+  }
+  .fixname { display: block; font-size: 11.5px; margin-top: 4px; line-height: 1.25; }
   .poster:hover .playbadge svg { transform: scale(1); }
   .name { margin: 7px 0 0; font-size: 13px; line-height: 1.35; }
   .poster:hover .name { color: var(--accent); }

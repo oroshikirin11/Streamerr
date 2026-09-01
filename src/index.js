@@ -42,7 +42,7 @@ import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
-import { makeLibrary, JellyfinLibrary } from './library/index.js';
+import { makeLibrary, JellyfinLibrary, currentTmdbMeta } from './library/index.js';
 import { deriveMapping, describeMatch } from './library/match.js';
 import { SmbStreamLibrary } from './library/smbstream.js';
 import { thumbnail, isRemote, isVideoFile, cachedFrame } from './library/thumbs.js';
@@ -1750,6 +1750,35 @@ app.get('/api/options', async (req, res) => {
 /** Progress of background still generation, for the library indicator. */
 app.get('/api/library/stills', (req, res) => res.json(stillSweeper?.status()
   ?? { running: false, done: 0, total: 0, failed: 0, pending: 0 }));
+
+/** Progress of background TMDB matching, for the library indicator. */
+app.get('/api/library/meta/status', (req, res) => res.json(tmdbSweeper?.status()
+  ?? { running: false, fetched: 0, matched: 0, missed: 0 }));
+
+/** Candidates for the Fix-artwork picker; the key never leaves the server. */
+app.get('/api/library/meta/search', wrap(async (req, res) => {
+  const meta = currentTmdbMeta();
+  if (!meta?.enabled) return res.status(409).json({ error: 'TMDB is not configured' });
+  const type = req.query.type === 'movie' ? 'movie' : 'tv';
+  const q = String(req.query.q ?? '').slice(0, 200);
+  if (!q.trim()) return res.json({ results: [] });
+  res.json({ results: await meta.search(type, q) });
+}));
+
+/**
+ * The operator's correction: pin this TMDB entry to that library title.
+ * Replaces the wrong match (or the miss) in the cache; the sweeper is
+ * kicked so a corrected series gets its episode names straight away.
+ */
+app.post('/api/library/meta/assign', wrap(async (req, res) => {
+  const meta = currentTmdbMeta();
+  if (!meta?.enabled) return res.status(409).json({ error: 'TMDB is not configured' });
+  const { metaKey, tmdbId } = req.body ?? {};
+  if (!metaKey || !Number(tmdbId)) return res.status(400).json({ error: 'metaKey and tmdbId are required' });
+  const entry = await meta.assign(String(metaKey), Number(tmdbId));
+  tmdbSweeper?.start();
+  res.json({ ok: true, title: entry.title, year: entry.year });
+}));
 
 app.get('/api/check/encoders', async (req, res) => {
   const results = await probeAll(config.encoder.device);

@@ -36,7 +36,10 @@ export class TmdbSweeper {
     this._timer = null;
     this._running = false;
     this._stopped = false;
+    this._state = { running: false, fetched: 0, matched: 0, missed: 0 };
   }
+
+  status() { return { ...this._state }; }
 
   start() {
     this._gen += 1;
@@ -60,6 +63,7 @@ export class TmdbSweeper {
   async _run() {
     if (this._running || this._stopped) return;
     this._running = true;
+    this._state = { running: true, fetched: 0, matched: 0, missed: 0 };
     const gen = this._gen;
     let idle = PASS_IDLE_MS;
     try {
@@ -69,6 +73,7 @@ export class TmdbSweeper {
       idle = RETRY_IDLE_MS;
     } finally {
       this._running = false;
+      this._state.running = false;
     }
     this._later(idle);
   }
@@ -104,6 +109,10 @@ export class TmdbSweeper {
             try {
               entry = await meta.ensure(item.type, item.title, item.year);
               fetched += 1;
+              this._state.fetched = fetched;
+              const st = meta.stats();
+              this._state.matched = st.matched;
+              this._state.missed = st.missed;
               await sleep(GAP_MS);
             } catch (err) {
               if (err.auth) { this.log(`[tmdb] ${err.message} — check it in Settings`); return PASS_IDLE_MS; }

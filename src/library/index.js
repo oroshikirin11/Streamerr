@@ -23,6 +23,10 @@ function sharedTmdbMeta(cfg) {
   return tmdbMeta;
 }
 
+/** The shared instance, for the search/assign endpoints. Null until a
+ *  TMDB-enriched source has been built. */
+export function currentTmdbMeta() { return tmdbMeta; }
+
 /** One provider instance for one configured source. */
 /**
  * Whether this source should make stills for media that has none.
