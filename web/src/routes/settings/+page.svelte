@@ -69,7 +69,63 @@
   });
   const timingCurrent = $derived.by(() => (cfg
     && TIMING_LEVERS.some((t) => t.id === cfg.buffer?.seconds) ? cfg.buffer.seconds : null));
+  /**
+   * "My settings": a snapshot of exactly the fields the two levers
+   * overwrite, kept in the config so it follows the operator across
+   * browsers. Saved automatically the moment a lever click would clobber
+   * a hand-tuned state, restorable as a third chip on each lever, and
+   * overwritable on demand.
+   */
+  const pictureSnapFields = () => ({
+    codec: cfg.encoder.codec || 'h264',
+    hdrOutput: Boolean(cfg.encoder.hdrOutput),
+    copyLimitKbps: +cfg.encoder.copyLimitKbps || 0,
+    overlayEnabled: (cfg.overlay?.items ?? []).map((i) => Boolean(i?.enabled)),
+  });
+  const timingSnapFields = () => ({
+    seconds: +cfg.buffer.seconds,
+    applySeconds: +cfg.buffer.applySeconds,
+  });
+  const pictureSnap = $derived(cfg?.presets?.picture ?? null);
+  const timingSnap = $derived(cfg?.presets?.timing ?? null);
+  const sameSnap = (a, b) => Boolean(a && b && JSON.stringify(a) === JSON.stringify(b));
+  const pictureIsCustom = $derived(Boolean(cfg) && sameSnap(pictureSnapFields(), pictureSnap));
+  const timingIsCustom = $derived(Boolean(cfg) && sameSnap(timingSnapFields(), timingSnap));
+
+  async function savePictureSnap() {
+    cfg.presets = { ...(cfg.presets ?? {}), picture: pictureSnapFields() };
+    await api.saveConfig({ presets: { picture: cfg.presets.picture } });
+  }
+  async function saveTimingSnap() {
+    cfg.presets = { ...(cfg.presets ?? {}), timing: timingSnapFields() };
+    await api.saveConfig({ presets: { timing: cfg.presets.timing } });
+  }
+  async function applyPictureSnap() {
+    const s = pictureSnap;
+    if (!s) return;
+    cfg.encoder.codec = s.codec;
+    cfg.encoder.hdrOutput = s.hdrOutput;
+    cfg.encoder.copyLimitKbps = s.copyLimitKbps;
+    syncPickers();
+    await save('encoder');
+    if (Array.isArray(s.overlayEnabled) && cfg.overlay?.items?.length) {
+      cfg.overlay.items = cfg.overlay.items.map((i, idx) => (
+        { ...i, enabled: Boolean(s.overlayEnabled[idx]) }));
+      await api.saveConfig({ overlay: { items: cfg.overlay.items } });
+    }
+  }
+  async function applyTimingSnap() {
+    const s = timingSnap;
+    if (!s) return;
+    setBuffer(s.seconds);
+    cfg.buffer.applySeconds = Math.min(+s.applySeconds, cfg.buffer.seconds);
+    bufferSel = String(cfg.buffer.seconds);
+    await save('timing');
+  }
   async function applyPicture(id) {
+    // A lever click on a hand-tuned state saves it as "My settings"
+    // first, so the custom setup is one click away instead of gone.
+    if (pictureCurrent === null && !pictureIsCustom) await savePictureSnap();
     if (id === 'best') {
       cfg.encoder.codec = 'hevc';
       cfg.encoder.hdrOutput = true;
@@ -90,6 +146,7 @@
     }
   }
   async function applyTiming(n) {
+    if (timingCurrent === null && !timingIsCustom) await saveTimingSnap();
     setBuffer(n);
     // The lever sets the whole timing posture, not just the depth: apply
     // point at the full cushion is the shipped default (seamless applies),
@@ -763,12 +820,19 @@
       <p class="lead muted small">What quality the stream aims for. Picking a lever switches all studio overlays off.</p>
       <div class="choices">
         {#each PICTURE_LEVERS as l}
-          <button type="button" class="choice" class:on={pictureCurrent === l.id}
+          <button type="button" class="choice" class:on={pictureCurrent === l.id && !pictureIsCustom}
                   onclick={() => applyPicture(l.id)}>
             <span class="cname">{l.name}</span>
             <span class="cdesc">{l.desc}</span>
           </button>
         {/each}
+        {#if pictureSnap}
+          <button type="button" class="choice" class:on={pictureIsCustom}
+                  onclick={applyPictureSnap}>
+            <span class="cname">My settings</span>
+            <span class="cdesc">Your saved Advanced setup — codec, HDR, passthrough, studio state.</span>
+          </button>
+        {/if}
       </div>
       <details class="diff">
         <summary>what this sets</summary>
@@ -778,9 +842,11 @@
           {/each}
         </ul>
       </details>
-      {#if pictureCurrent === null}
-        <p class="driftline">Picture is <b>customized</b> in Advanced — it stays yours until you
-          pick a lever.</p>
+      {#if pictureCurrent === null && !pictureIsCustom}
+        <p class="driftline">Picture is <b>customized</b> in Advanced. Picking a lever saves it
+          as “My settings” automatically —
+          <button type="button" class="snapbtn" onclick={savePictureSnap}>
+            {pictureSnap ? 'overwrite My settings now' : 'save as My settings now'}</button></p>
       {/if}
       {#if saved === 'encoder'}<p class="ok small">Saved</p>{/if}
     </section>
@@ -790,16 +856,25 @@
       <p class="lead muted small">How much safety cushion the broadcast keeps between encoder and air.</p>
       <div class="choices">
         {#each TIMING_LEVERS as l}
-          <button type="button" class="choice" class:on={timingCurrent === l.id}
+          <button type="button" class="choice" class:on={timingCurrent === l.id && !timingIsCustom}
                   onclick={() => applyTiming(l.id)}>
             <span class="cname">{l.name}</span>
             <span class="cdesc">{l.desc}</span>
           </button>
         {/each}
+        {#if timingSnap}
+          <button type="button" class="choice" class:on={timingIsCustom}
+                  onclick={applyTimingSnap}>
+            <span class="cname">My settings</span>
+            <span class="cdesc">Your saved cushion — {timingSnap.seconds} s, applies at {timingSnap.applySeconds} s.</span>
+          </button>
+        {/if}
       </div>
-      {#if timingCurrent === null}
-        <p class="driftline">Timing is <b>customized</b> in Advanced ({cfg.buffer.seconds} s) — it
-          stays yours until you pick a lever.</p>
+      {#if timingCurrent === null && !timingIsCustom}
+        <p class="driftline">Timing is <b>customized</b> in Advanced ({cfg.buffer.seconds} s).
+          Picking a lever saves it as “My settings” automatically —
+          <button type="button" class="snapbtn" onclick={saveTimingSnap}>
+            {timingSnap ? 'overwrite My settings now' : 'save as My settings now'}</button></p>
       {/if}
       {#if saved === 'timing'}<p class="ok small">Saved</p>{/if}
     </section>
@@ -2028,6 +2103,8 @@
   .diff b { color: var(--text); font-weight: 500; }
   .driftline { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
   .driftline b { color: var(--text); }
+  .snapbtn { background: none; border: 0; padding: 0; font-size: inherit;
+    color: var(--accent, #7aa2f7); cursor: pointer; text-decoration: underline; }
   .foot { margin-top: 18px; }
   /* Simple mode centers a narrow column; the footer follows it instead of
      hugging the page edge. */
