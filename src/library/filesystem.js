@@ -85,6 +85,22 @@ function cleanTitle(stem, matched) {
   return cleaned.length >= 2 ? cleaned : null;
 }
 
+/**
+ * Display title for a loose movie FILE: the stem with the usual release
+ * junk cut off — "Film (2021) 1080p WEB-DL x265" reads as "Film (2021)".
+ * Same tokens cleanTitle strips after an episode code; a stem that is
+ * nothing but junk keeps itself rather than vanishing.
+ */
+export function movieTitle(stem) {
+  const cut = stem
+    .replace(/[\s._-]*(WEBDL|WEB-DL|WEBRip|BluRay|BDRip|HDTV|DVDRip|REMUX)[\s._-]*.*$/i, '')
+    .replace(/[\s._-]*\b\d{3,4}[pP]\b.*$/, '')
+    .replace(/[._]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return cut.length >= 2 ? cut : stem;
+}
+
 /** Movies or shows, guessed from the folder name and what is inside. */
 function guessCollectionType(dir) {
   const n = basename(dir).toLowerCase();
@@ -214,6 +230,11 @@ export class FilesystemLibrary {
     this._stills = stills;
     this.roots = roots.filter(Boolean);
     this._paths = new Map(); // synthetic id -> real path
+    // Directories that ARE libraries (roots, or their collection subdirs).
+    // item() consults this so a loose video lying directly in a library
+    // dir is titled after its own filename — the generic folder rule
+    // would name every one of them after the library ("Videos").
+    this._libDirs = new Set(this.roots);
   }
 
   get configured() {
@@ -303,6 +324,7 @@ export class FilesystemLibrary {
       const dirs = isCollectionDir(r) ? listDirs(r).map((n) => join(r, n)) : [r];
       for (const d of dirs) {
         this._paths.set(id(d), d);
+        this._libDirs.add(d);
         out.push({
           id: id(d),
           name: basename(d) || d,
@@ -323,13 +345,45 @@ export class FilesystemLibrary {
     const root = this._paths.get(libraryId);
     if (!root) throw new Error('Unknown library');
 
-    let names = listDirs(root);
+    // Folders AND loose files: a `Videos/` full of bare films is as real a
+    // library as a sorted one, and a library that only listed directories
+    // silently dropped every file lying at its top level. A loose file is
+    // a Movie whose id is the file itself — exactly the shape a one-film
+    // folder already produces, so the panel plays it directly the same way.
+    let rows = [
+      ...listDirs(root).map((name) => ({ name, dir: true })),
+      ...listVideos(root).map((name) => ({ name, dir: false })),
+    ];
     if (search) {
       const q = search.toLowerCase();
-      names = names.filter((n) => n.toLowerCase().includes(q));
+      rows = rows.filter((r) => r.name.toLowerCase().includes(q));
     }
+    rows.sort((a, b) => naturalSort(a.name, b.name));
 
-    const page = names.slice(startIndex, startIndex + limit).map((name) => {
+    const stillCache = new Map();
+    const page = rows.slice(startIndex, startIndex + limit).map(({ name, dir: isDir }) => {
+      if (!isDir) {
+        const full = join(root, name);
+        this._paths.set(id(full), full);
+        const stem = name.slice(0, -extname(name).length);
+        const parsed = parseEpisode(name, { allowBareNumber: false });
+        // An episode-CODED loose file keeps its stem: parseEpisode would
+        // title it "Episode 5" with no show anywhere to hang that off.
+        const title = parsed.episode != null ? stem : movieTitle(stem);
+        // Sidecar still or nothing: like a film folder's poster, the gap
+        // is left for the metadata enricher rather than filled with a
+        // frame grab meant for episode rows.
+        const still = stillsIn(root, stillCache).get(stem);
+        if (still) this._paths.set(id(still), still);
+        return {
+          id: id(full),
+          title,
+          year: /\((\d{4})\)/.exec(name)?.[1] ?? null,
+          type: 'Movie',
+          childCount: null,
+          image: still ? imageUrl(still) : null,
+        };
+      }
       const dir = join(root, name);
       this._paths.set(id(dir), dir);
       const poster = findPoster(dir);
@@ -350,7 +404,7 @@ export class FilesystemLibrary {
       };
     });
 
-    return { total: names.length, items: page };
+    return { total: rows.length, items: page };
   }
 
   async seasons(seriesId) {
@@ -449,17 +503,22 @@ export class FilesystemLibrary {
     // grid would go on air titled after its release string.
     const folder = basename(dirname(p));
     const inSeason = SEASON_DIR.test(folder);
+    // A loose file directly in a library dir has no folder of its own —
+    // the folder rule would title every one of them after the library.
+    const looseInLib = this._libDirs?.has(dirname(p)) ?? false;
     const parsed = parseEpisode(basename(p), { allowBareNumber: inSeason });
     const isEpisode = parsed.episode != null;
     return {
       id: itemId,
       type: isEpisode ? 'Episode' : 'Movie',
-      title: isEpisode || !folder || inSeason ? parsed.title : folder,
+      title: looseInLib
+        ? (isEpisode ? basename(p, extname(p)) : movieTitle(basename(p, extname(p))))
+        : isEpisode || !folder || inSeason ? parsed.title : folder,
       // The show this episode belongs to — one level up from a Season dir,
       // otherwise the containing folder. Without it an episode queued
       // straight from the grid went on air as a bare "Ep02", with no show
       // name in the title and nothing to group the schedule by.
-      seriesName: isEpisode
+      seriesName: isEpisode && !looseInLib
         ? basename(inSeason ? dirname(dirname(p)) : dirname(p))
         : null,
       season: parsed.season, episode: parsed.episode,

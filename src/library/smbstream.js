@@ -40,7 +40,7 @@ try {
     };
   };
 }
-import { parseEpisode } from './filesystem.js';
+import { parseEpisode, movieTitle } from './filesystem.js';
 import { parseSmbTarget } from './smb.js';
 
 const id = (s) => createHash('sha1').update(s).digest('hex').slice(0, 16);
@@ -295,18 +295,23 @@ export class SmbStreamLibrary {
   async libraries() {
     const entries = await this._readdir('');
     const dirs = entries.filter((e) => e.isDirectory());
+    this._libRels ??= new Set();
     // A root holding collections (movies/tv) becomes one library each,
     // same as the filesystem provider; otherwise the root is the library.
     const collections = dirs.filter((d) => COLLECTION.test(d.name));
     if (collections.length) {
-      return collections.map((d) => ({
-        id: this._remember(d.name),
-        name: d.name,
-        // Same field the filesystem provider carries; the TMDB enricher
-        // keys its movie-vs-tv search off it.
-        type: /\b(movies?|films?|filme)\b/i.test(d.name) ? 'movies' : 'tvshows',
-      }));
+      return collections.map((d) => {
+        this._libRels.add(d.name);
+        return {
+          id: this._remember(d.name),
+          name: d.name,
+          // Same field the filesystem provider carries; the TMDB enricher
+          // keys its movie-vs-tv search off it.
+          type: /\b(movies?|films?|filme)\b/i.test(d.name) ? 'movies' : 'tvshows',
+        };
+      });
     }
+    this._libRels.add('');
     return [{ id: this._remember(''), name: this._cfg.path?.split('/').pop() || this._cfg.share }];
   }
 
@@ -314,22 +319,40 @@ export class SmbStreamLibrary {
     const root = this._paths.get(libraryId);
     if (root == null) throw new Error('Unknown library');
     const entries = await this._readdir(root);
-    let dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+    // Folders AND loose files — a bare film at the library's top level is
+    // media too, and costs nothing extra: the entries are already in hand.
+    let rows = [
+      ...entries.filter((e) => e.isDirectory()).map((e) => ({ name: e.name, dir: true })),
+      ...entries.filter((e) => !e.isDirectory() && isVideo(e.name))
+        .map((e) => ({ name: e.name, dir: false })),
+    ];
     if (search) {
       const q = search.toLowerCase();
-      dirs = dirs.filter((n) => n.toLowerCase().includes(q));
+      rows = rows.filter((r) => r.name.toLowerCase().includes(q));
     }
+    rows.sort((a, b) => a.name.localeCompare(b.name));
     // Deliberately does NOT look inside each folder to tell a film from a
     // series. Doing that cost one SMB round trip per row — 60 of them for
     // one page, against a client whose whole concurrency budget is 8
     // sessions three deep — and browsing visibly stalled. A folder holding
     // a single film is recognised when it is opened instead, which costs
     // nothing until someone clicks.
-    const page = dirs.slice(startIndex, startIndex + limit).map((name) => {
+    const page = rows.slice(startIndex, startIndex + limit).map(({ name, dir: isDir }) => {
       const rel = root ? `${root}/${name}` : name;
+      if (!isDir) {
+        const stem = name.replace(/\.[^.]+$/, '');
+        const parsed = parseEpisode(name, { allowBareNumber: false });
+        return {
+          id: this._remember(rel),
+          // Episode-coded loose files keep their stem — "Episode 5" with
+          // no show anywhere is worse than the filename.
+          title: parsed.episode != null ? stem : movieTitle(stem),
+          type: 'Movie',
+        };
+      }
       return { id: this._remember(rel), title: name, type: 'Series' };
     });
-    return { items: page, total: dirs.length };
+    return { items: page, total: rows.length };
   }
 
   async seasons(seriesId) {
@@ -443,13 +466,18 @@ export class SmbStreamLibrary {
     const name = parts[parts.length - 1];
     const parent = parts[parts.length - 2] ?? '';
     const inSeason = SEASON_DIR.test(parent);
+    // A loose file directly in a library dir must not be titled after the
+    // library folder — same rule the filesystem provider applies.
+    const looseInLib = this._libRels?.has(parts.slice(0, -1).join('/')) ?? false;
     const parsed = parseEpisode(name, { allowBareNumber: inSeason });
     const isEpisode = parsed.episode != null;
     return {
       id: itemId,
       type: isEpisode ? 'Episode' : 'Movie',
-      title: isEpisode || !parent ? parsed.title : parent,
-      seriesName: isEpisode
+      title: looseInLib
+        ? (isEpisode ? name.replace(/\.[^.]+$/, '') : movieTitle(name.replace(/\.[^.]+$/, '')))
+        : isEpisode || !parent ? parsed.title : parent,
+      seriesName: isEpisode && !looseInLib
         ? (inSeason ? parts[parts.length - 3] : parent) ?? null
         : null,
       season: parsed.season,
