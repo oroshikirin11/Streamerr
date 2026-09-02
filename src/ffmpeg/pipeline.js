@@ -391,10 +391,17 @@ const bankCeiling = (seconds) => Math.max(48, Math.ceil(seconds * 8)) * 1024 * 1
  * passes the alignment in. A byte that breaks the grid ends the scan —
  * everything before it was verified, everything after it is guesswork.
  */
+export /** One 33-bit MPEG timestamp field, in seconds. */
+function readTs(buf, at) {
+  return (((buf[at] >> 1) & 7) * 2 ** 30
+    + (buf[at + 1] << 22) + (((buf[at + 2] >> 1) & 0x7f) << 15)
+    + (buf[at + 3] << 7) + (buf[at + 4] >> 1)) / 90000;
+}
+
 export function lastVideoPtsIn(buf, gridStart = 0) {
-  let pts = null;
+  let dts = null;
   for (let o = gridStart; o + 188 <= buf.length; o += 188) {
-    if (buf[o] !== 0x47) return pts;
+    if (buf[o] !== 0x47) return dts;
     const pusi = (buf[o + 1] & 0x40) !== 0;
     const pid = ((buf[o + 1] & 0x1f) << 8) | buf[o + 2];
     if (!pusi || pid !== 0x100) continue;
@@ -402,13 +409,22 @@ export function lastVideoPtsIn(buf, gridStart = 0) {
     const p = o + 4 + (hasAf ? 1 + buf[o + 4] : 0);
     if (p + 14 > o + 188) continue;
     if (buf[p] !== 0 || buf[p + 1] !== 0 || buf[p + 2] !== 1) continue;
-    if (!(buf[p + 7] & 0x80)) continue;    // no PTS in this PES
-    const b = buf.subarray(p + 9, p + 14);
-    pts = (((b[0] >> 1) & 7) * 2 ** 30
-      + (b[1] << 22) + (((b[2] >> 1) & 0x7f) << 15) + (b[3] << 7) + (b[4] >> 1))
-      / 90000;
+    const flags = buf[p + 7] & 0xc0;
+    if (flags === 0xc0) {
+      // Both present: the DTS field follows the PTS field. DTS is the
+      // one that means "how far the stream has been written" — PTS is
+      // presentation order and B-frames reorder it (measured on a real
+      // passthrough capture: 166 of 399 successive PTS steps ran
+      // BACKWARD), so reading it under-reads the frontier and can move
+      // it backward, splicing the successor behind bytes already sent.
+      if (p + 19 > o + 188) continue;
+      dts = readTs(buf, p + 14);
+    } else if (flags === 0x80) {
+      // PTS only: an unreordered stream, where pts IS the dts.
+      dts = readTs(buf, p + 9);
+    }
   }
-  return pts;
+  return dts;
 }
 
 export class PipelinePlayout extends EventEmitter {
@@ -1885,6 +1901,20 @@ export class PipelinePlayout extends EventEmitter {
       // starts clean rather than gluing onto a torn packet.
       if (c.gen !== this._drainGen) {
         this._drainGen = c.gen;
+        /**
+         * THE seam, announced where it actually is.
+         *
+         * Preview clients resync on this, and they need it at the splice
+         * in the BYTE STREAM — not when a source process was spawned. A
+         * cushion-kept change (skip, track or overlay apply) spawns its
+         * successor seconds before the first of its bytes airs, so
+         * announcing at spawn aimed the preview at the tail of the
+         * OUTGOING clip and left the real parameter change unannounced:
+         * the preview sat on the old episode while the queued one played.
+         * Flush-based changes are unaffected — their bank is empty, so
+         * spawn and seam coincide and this fires on the very next chunk.
+         */
+        this.emit('discontinuity');
         const torn = (this._published ?? 0) % 188;
         if (torn) {
           const pad = Buffer.alloc(188 - torn);
@@ -1909,7 +1939,9 @@ export class PipelinePlayout extends EventEmitter {
       // aligns the 188-byte grid inside an arbitrary pipe-read split.
       if (this._fmt === 'ts') {
         const sent = lastVideoPtsIn(c.data, (188 - ((this._published ?? 0) % 188)) % 188);
-        if (sent != null) {
+        // Monotonic by construction: "the furthest the publisher has been
+        // fed" cannot shrink within a session, whatever a container says.
+        if (sent != null && !(sent < (this._sentVideoPts ?? -Infinity))) {
           this._sentVideoPts = sent;
           // The CONTENT position of that same byte, stamp-lag corrected:
           // pos and tl stamps advance in lockstep from the same progress
@@ -2158,6 +2190,93 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   /**
+   * Drop a final AUDIO frame the video trim cut in half.
+   *
+   * The bank is truncated at a VIDEO random-access point, but audio and
+   * video are interleaved: an AAC frame that began before that point and
+   * continued past it loses its tail, and the receiver decodes a partial
+   * frame — "channel element 0.0 is not allocated", one click per splice,
+   * and a decoder error is exactly what makes a player resync a beat
+   * later. Measured at every cushion-kept splice before this.
+   *
+   * The frame cannot be completed, so it is removed: only the TS packets
+   * carrying it are spliced out of the tail, which leaves the video
+   * untouched and simply ends the audio one frame earlier — the successor
+   * starts its own audio there anyway. Nothing moves in time.
+   */
+  _bankDropPartialAudioTail(pid = 0x101) {
+    if (process.env.JSR_SPLICE_TRACE) {
+      this.emit('log', `[splice-trace] enter fmt=${this._fmt} chunks=${this._bank?.length ?? 0}\n`);
+    }
+    if (this._fmt !== 'ts' || !this._bank?.length) return 0;
+    // One AAC frame is ~400 bytes; a generous window costs nothing.
+    let scan = 0;
+    const tailChunks = [];
+    for (let i = this._bank.length - 1; i >= 0 && scan < 65536; i -= 1) {
+      tailChunks.unshift(this._bank[i]);
+      scan += this._bank[i].data.length;
+    }
+    const tail = Buffer.concat(tailChunks.map((c) => c.data));
+    // The publisher's byte stream sets the grid; the tail begins wherever
+    // the kept chunks do.
+    const before = (this._bankBytes ?? 0) - tail.length;
+    const grid = (188 - (((this._published ?? 0) + before) % 188)) % 188;
+
+    let pusiAt = -1;
+    let declared = 0;
+    let payload = 0;
+    for (let o = grid; o + 188 <= tail.length; o += 188) {
+      if (tail[o] !== 0x47) {
+        if (process.env.JSR_SPLICE_TRACE) {
+          this.emit('log', `[splice-trace] torn grid at ${o} (grid=${grid} tail=${tail.length} `
+            + `published=${this._published} before=${before}) byte=0x${tail[o].toString(16)}\n`);
+        }
+        return 0;                                           // torn grid: leave it alone
+      }
+      if ((((tail[o + 1] & 0x1f) << 8) | tail[o + 2]) !== pid) continue;
+      const hasAf = (tail[o + 3] & 0x20) !== 0;
+      const start = o + 4 + (hasAf ? 1 + tail[o + 4] : 0);
+      if (start > o + 188) continue;
+      if ((tail[o + 1] & 0x40) !== 0) {
+        // A new PES starts here: the previous one is complete by
+        // definition, so only the LAST one can be short.
+        if (start + 6 > o + 188) return 0;
+        pusiAt = o;
+        declared = (tail[start + 4] << 8) | tail[start + 5];  // PES packet_length
+        payload = (o + 188) - start;
+      } else if (pusiAt >= 0) {
+        payload += (o + 188) - start;
+      }
+    }
+    if (process.env.JSR_SPLICE_TRACE) {
+      this.emit('log', `[splice-trace] pusiAt=${pusiAt} declared=${declared} `
+        + `payload=${payload} short=${pusiAt >= 0 && declared > 0 && payload < declared + 6}\n`);
+    }
+    // packet_length 0 means unbounded (video only) — nothing to judge.
+    if (pusiAt < 0 || declared === 0 || payload >= declared + 6) return 0;
+
+    // Splice this frame's packets out of the tail, keeping every other pid.
+    const kept = [];
+    for (let o = 0; o < tail.length; o += 188) {
+      const whole = o + 188 <= tail.length;
+      const isAudio = whole && tail[o] === 0x47
+        && (((tail[o + 1] & 0x1f) << 8) | tail[o + 2]) === pid;
+      if (o >= pusiAt && isAudio) continue;
+      kept.push(tail.subarray(o, Math.min(o + 188, tail.length)));
+    }
+    const rebuilt = Buffer.concat(kept);
+    const removed = tail.length - rebuilt.length;
+    if (removed <= 0) return 0;
+    // Put the rebuilt tail back as one chunk, inheriting the last chunk's
+    // stamps so nothing downstream sees a new position.
+    const last = tailChunks[tailChunks.length - 1];
+    this._bank.length -= tailChunks.length;
+    this._bank.push({ ...last, data: rebuilt });
+    this._bankBytes -= removed;
+    return removed;
+  }
+
+  /**
    * The splice bookkeeping every cushion-kept apply shares: cut the
    * cushion, GOP-align the junction, and rewind the OUTPUT timeline to
    * the trimmed tail. The trims discard seconds that were already
@@ -2207,6 +2326,13 @@ export class PipelinePlayout extends EventEmitter {
     // the publisher expects. Chunk stamps and byte/kbps arithmetic are
     // fallbacks — both lag or drift (measured +0.8..2.5s residual hole on
     // the flash+beep rig; the PES read brings the seam under a frame).
+    // Whatever the trims above decided, the kept tail must not end on a
+    // half-cut audio frame — including when no access point was found and
+    // the RAP trim returned early.
+    const audioDropped = this._bankDropPartialAudioTail();
+    if (audioDropped) {
+      this.emit('log', `[splice] dropped ${audioDropped}B of a half-cut audio frame\n`);
+    }
     const exact = this._bankTailVideoPts();
     let tl = exact != null ? exact + this._frameSeconds() : tail?.tl ?? null;
     // Never below the sent frontier: with a THIN bank (the hold card's
@@ -3315,7 +3441,20 @@ export class PipelinePlayout extends EventEmitter {
         return;
       }
       if (this._copyAlignFor?.req === offset) this._copyAlignFor = null;
-      const kbps = isCopy ? Math.max(this._kbpsBase, srcKbps ?? 0) : this._kbpsBase;
+      /**
+       * A copied clip ships the FILE's bytes, so the file's rate is the
+       * one every seconds-from-bytes sum depends on: how deep the bank
+       * runs, what a cushion-kept trim really keeps, what the reserve
+       * meter reads. Taking the larger of configured and measured looked
+       * conservative and was the opposite — a 4000 kbps file copied under
+       * a 16000 kbps profile made the bank hold FOUR TIMES bufferSeconds.
+       * The source (no -re on a copy) then raced to end-of-file a minute
+       * early, the engine advanced while viewers still had a minute of
+       * the previous episode banked, and the panel's clock dropped to the
+       * new clip's zero while the wire was somewhere else entirely.
+       * BANK_MIN_BYTES still floors a very light file.
+       */
+      const kbps = isCopy && srcKbps > 0 ? srcKbps : this._kbpsBase;
       if (isCopy) {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
           + `bytes ship untouched (~${kbps} kbps); encode cost zero. An Apply `
@@ -4121,11 +4260,10 @@ export class PipelinePlayout extends EventEmitter {
     // instead of the forecast.
     if (!this.publisher && !this._stopping) this._spawnPublisher();
     this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
-    // Every new source process is a fresh muxer: a splice in the TS stream.
-    // The publisher's ffmpeg reads through it, but a browser's MSE decoder
-    // wedges on it silently — playback time keeps advancing over a frozen
-    // picture. Announce it so preview clients get resynced instead.
-    this.emit('discontinuity');
+    // The splice this process causes is announced when its bytes actually
+    // reach the publisher (the generation change in _bankDrain), not here:
+    // with a cushion kept that is seconds later, and resyncing the preview
+    // now would aim it at the outgoing clip.
     // Generation tag: lets the drain notice the seam between two source
     // processes and repair packet alignment there if the old one ended
     // mid-packet (a crash can cut its output anywhere).
@@ -4746,7 +4884,19 @@ export class PipelinePlayout extends EventEmitter {
       this.status = 'starting';
       this.emit('status', this.status);
     }
-    this._bankFlush();
+    /**
+     * The cushion-kept, GOP-aligned splice — the same move a natural
+     * episode end makes (which never flushes, and is seamless because of
+     * it). A flush anchors the successor on the frontier of bytes already
+     * SENT, and a reordered stream opens several frames below its own
+     * stamp, so those frames land behind delivered content. Anchoring on
+     * the kept TAIL instead leaves that opening inside the cushion, where
+     * it costs nothing.
+     */
+    const { rewound, gop } = this._bankCutForApply(this._applyRunway());
+    if (rewound + gop > 0.05) {
+      this.emit('log', `[skip] cushion cut to ${this._applyRunway().toFixed(1)}s\n`);
+    }
     this._advance();
     return true;
   }

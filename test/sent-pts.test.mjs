@@ -18,8 +18,21 @@ const check = (name, actual, expected) => {
   console.log(`  FAIL  ${name}\n          expected ${e}\n          actual   ${a}`);
 };
 
-/** One 188-byte TS packet: PUSI, given pid, PES header carrying `pts90k`. */
-function packet(pid, pts90k, { pusi = true, af = false } = {}) {
+/** Write one 33-bit timestamp field at `at`. */
+function putTs(p, at, T, marker) {
+  p[at] = marker | (((T / 2 ** 30) & 7) << 1);
+  p[at + 1] = (T / 2 ** 22) & 0xff;
+  p[at + 2] = ((((T / 2 ** 15) & 0x7f) << 1) | 1) & 0xff;
+  p[at + 3] = (T / 2 ** 7) & 0xff;
+  p[at + 4] = (((T & 0x7f) << 1) | 1) & 0xff;
+}
+
+/**
+ * One 188-byte TS packet: PUSI, given pid, PES header carrying `pts90k`
+ * and — when `dts90k` is given — a DTS field too, exactly as a reordered
+ * (B-frame) stream carries both.
+ */
+function packet(pid, pts90k, { pusi = true, af = false, dts90k = null } = {}) {
   const p = Buffer.alloc(188, 0xff);
   p[0] = 0x47;
   p[1] = (pusi ? 0x40 : 0) | ((pid >> 8) & 0x1f);
@@ -27,16 +40,12 @@ function packet(pid, pts90k, { pusi = true, af = false } = {}) {
   p[3] = (af ? 0x30 : 0x10);
   let o = 4;
   if (af) { p[4] = 1; p[5] = 0x00; o = 6; }
-  // PES: start code, stream id, length, marker, PTS-only flags, header len
+  const both = dts90k != null;
   p[o] = 0; p[o + 1] = 0; p[o + 2] = 1; p[o + 3] = 0xe0;
   p[o + 4] = 0; p[o + 5] = 0;
-  p[o + 6] = 0x80; p[o + 7] = 0x80; p[o + 8] = 5;
-  const T = pts90k;
-  p[o + 9] = 0x21 | (((T / 2 ** 30) & 7) << 1);
-  p[o + 10] = (T / 2 ** 22) & 0xff;
-  p[o + 11] = ((((T / 2 ** 15) & 0x7f) << 1) | 1) & 0xff;
-  p[o + 12] = (T / 2 ** 7) & 0xff;
-  p[o + 13] = (((T & 0x7f) << 1) | 1) & 0xff;
+  p[o + 6] = 0x80; p[o + 7] = both ? 0xc0 : 0x80; p[o + 8] = both ? 10 : 5;
+  putTs(p, o + 9, pts90k, both ? 0x31 : 0x21);
+  if (both) putTs(p, o + 14, dts90k, 0x11);
   return p;
 }
 
@@ -75,6 +84,39 @@ check('no video PES at all is an honest null',
   null);
 
 check('an empty buffer is null', lastVideoPtsIn(Buffer.alloc(0)), null);
+
+console.log('\nreordered streams (passthrough B-frames)');
+
+// The frontier means "how far the stream has been WRITTEN", and only DTS
+// says that: PTS is presentation order and B-frames reorder it (measured
+// on a real passthrough capture, 166 of 399 successive PTS steps ran
+// BACKWARD). Reading pts under-reads the frontier and can move it
+// backward, splicing the next source behind bytes already sent — which
+// stalls the publisher's pacer and rewinds the playhead with it.
+check('a reordered PES yields its DTS, not its PTS',
+  lastVideoPtsIn(packet(0x100, sec(10.5), { dts90k: sec(10.25) })),
+  10.25);
+
+{
+  const frames = [[0, 0], [0.292, 0.041], [0.208, 0.083], [0.125, 0.125],
+    [0.166, 0.166], [0.25, 0.208], [0.5, 0.25], [0.417, 0.292]];
+  const run = Buffer.concat(frames.map(([pts, dts]) =>
+    packet(0x100, sec(pts), { dts90k: sec(dts) })));
+  check('a reordered run reports the LAST dts (the true frontier)',
+    lastVideoPtsIn(run), 0.292);
+  let last = -1; let monotonic = true;
+  for (let n = 1; n <= frames.length; n += 1) {
+    const v = lastVideoPtsIn(Buffer.concat(
+      frames.slice(0, n).map(([pts, dts]) => packet(0x100, sec(pts), { dts90k: sec(dts) }))));
+    if (v < last) monotonic = false;
+    last = v;
+  }
+  check('the frontier never moves backward as the run grows', monotonic, true);
+}
+
+check('an adaptation field does not shift the dts read',
+  lastVideoPtsIn(packet(0x100, sec(9), { dts90k: sec(8.75), af: true })),
+  8.75);
 
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');
