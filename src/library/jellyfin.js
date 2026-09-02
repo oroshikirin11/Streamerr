@@ -127,7 +127,9 @@ export class JellyfinLibrary {
       StartIndex: startIndex,
       Limit: limit,
       SearchTerm: search || undefined,
-      Fields: 'ProductionYear,ChildCount',
+      // Path rides along so the paired library can hold the listing
+      // against the disk — the catalogue is metadata, not availability.
+      Fields: 'ProductionYear,ChildCount,Path',
       EnableImageTypes: 'Primary,Backdrop',
       ImageTypeLimit: 1,
       EnableUserData: false,
@@ -220,7 +222,13 @@ export class JellyfinLibrary {
       EnableUserData: false,
     });
     const e = (data.Items ?? [])[0];
-    if (!e) throw new Error(`Jellyfin has no item ${id}`);
+    // Id VERIFIED, not trusted: handed an id it has never seen (a paired
+    // media-half id, say), Jellyfin does not error — it ignores the Ids
+    // filter and answers with some other item entirely. The paired
+    // library's catalogue-first dispatch relies on this throw to fall
+    // through to the media half; without the check it "resolved" a loose
+    // file to a random folder named "movies" and playback died on it.
+    if (!e || String(e.Id) !== String(id)) throw new Error(`Jellyfin has no item ${id}`);
 
     // A movie is a playable file just like an episode, so it needs the same
     // path resolution — only a series or season is a container.
@@ -314,6 +322,10 @@ export class JellyfinLibrary {
       year: i.ProductionYear ?? null,
       type: i.Type,
       childCount: i.ChildCount ?? null,
+      // The catalogue's own path for this title (a folder for shows and
+      // foldered films, the file for loose ones) — the paired library
+      // holds listings against the disk with it.
+      path: i.Path ?? null,
       image: this.imageUrl(i.Id, 'Primary', i.ImageTags?.Primary),
     };
   }

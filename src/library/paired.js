@@ -83,7 +83,57 @@ export class PairedLibrary {
       // mapping — the media half serves its own files directly.
       return { ...page, items: (page?.items ?? []).map((i) => ({ ...i, fromMedia: true })) };
     }
-    return this.catalogue.items(libraryId, ...a);
+    return this._diskTruth(await this.catalogue.items(libraryId, ...a), a[0] ?? {});
+  }
+
+  /**
+   * The disk is the single source of truth for what EXISTS; the catalogue
+   * only decorates it. Two reconciliations per listing page, both against
+   * the media half: rows whose mapped path is gone are hidden now rather
+   * than after the catalogue's next scan lands, and loose files the
+   * catalogue has not indexed yet are appended (last page only), served
+   * directly by the media half. The collection's media-side directory is
+   * derived from the surviving rows' own paths, so no extra configuration
+   * exists to go stale. Costs: existsSync per row on a folder, one cached
+   * readdir per directory on a share.
+   */
+  async _diskTruth(page, { startIndex = 0, search = '' } = {}) {
+    const px = this.media?.pathExists;
+    if (typeof px !== 'function' || !page?.items?.length) return page;
+    const canon = (s) => String(s).replace(/^\/+/, '');
+    const kept = [];
+    const catPaths = new Set();
+    let dropped = 0;
+    for (const it of page.items) {
+      let mapped = null;
+      try { mapped = it.path ? this.map(it.path) : null; } catch { /* unmapped */ }
+      if (mapped) catPaths.add(canon(mapped));
+      let gone = false;
+      if (mapped) {
+        try { gone = (await px.call(this.media, mapped)) === false; } catch { /* unknown — keep */ }
+      }
+      if (gone) { dropped += 1; continue; }
+      kept.push(it);
+    }
+    let added = [];
+    const total = page.total ?? page.items.length;
+    const lastPage = startIndex + page.items.length >= total;
+    const sample = kept.find((it) => it.path);
+    if (lastPage && sample && typeof this.media.looseItemsIn === 'function') {
+      try {
+        // The RAW mapped path keeps its shape (absolute for a folder,
+        // leading-slash-relative for a share) — canon() is only for
+        // comparing the two halves' spellings.
+        const m = this.map(sample.path);
+        const dir = m.slice(0, Math.max(0, m.lastIndexOf('/')));
+        const q = String(search ?? '').toLowerCase();
+        added = (await this.media.looseItemsIn(dir || '/'))
+          .filter((r) => !catPaths.has(canon(r.path)))
+          .filter((r) => !q || r.title.toLowerCase().includes(q))
+          .map((r) => ({ ...r, fromMedia: true }));
+      } catch { /* media unavailable — the catalogue's listing stands */ }
+    }
+    return { ...page, total: total - dropped + added.length, items: [...kept, ...added] };
   }
 
   seasons(...a) { return this.catalogue.seasons(...a); }

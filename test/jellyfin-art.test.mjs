@@ -57,5 +57,24 @@ console.log('\njellyfin artwork ids');
     lib.imagePath(`${ITEM}-Primary-../../secret`), null);
 }
 
+{
+  // Handed an id it has never seen, real Jellyfin does not error — it
+  // ignores the Ids filter and answers with some other item. item() must
+  // treat that as "no such item", or the paired library resolves a loose
+  // file to a random catalogue folder (measured live: a film "played"
+  // as a folder called "movies" and died on No path).
+  const lib = new JellyfinLibrary({ url: 'http://jf:8096', apiKey: 'k' });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ Items: [{ Id: 'a-completely-different-item', Type: 'Folder', Name: 'movies' }] }),
+  });
+  let threw = false;
+  try { await lib.item('9e9ea6595000bf80'); } catch { threw = true; }
+  globalThis.fetch = realFetch;
+  check('item() rejects an answer for a DIFFERENT id', threw, true);
+}
+
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');

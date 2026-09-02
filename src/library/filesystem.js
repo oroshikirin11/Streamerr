@@ -400,28 +400,7 @@ export class FilesystemLibrary {
 
     const stillCache = new Map();
     const page = rows.slice(startIndex, startIndex + limit).map(({ name, dir: isDir }) => {
-      if (!isDir) {
-        const full = join(root, name);
-        this._paths.set(id(full), full);
-        const stem = name.slice(0, -extname(name).length);
-        const parsed = parseEpisode(name, { allowBareNumber: false });
-        // An episode-CODED loose file keeps its stem: parseEpisode would
-        // title it "Episode 5" with no show anywhere to hang that off.
-        const title = parsed.episode != null ? stem : movieTitle(stem);
-        // Sidecar still or nothing: like a film folder's poster, the gap
-        // is left for the metadata enricher rather than filled with a
-        // frame grab meant for episode rows.
-        const still = stillsIn(root, stillCache).get(stem);
-        if (still) this._paths.set(id(still), still);
-        return {
-          id: id(full),
-          title,
-          year: /\((\d{4})\)/.exec(name)?.[1] ?? null,
-          type: 'Movie',
-          childCount: null,
-          image: still ? imageUrl(still) : null,
-        };
-      }
+      if (!isDir) return this._looseRow(root, name, stillCache);
       const dir = join(root, name);
       this._paths.set(id(dir), dir);
       const poster = findPoster(dir);
@@ -528,6 +507,46 @@ export class FilesystemLibrary {
       (a.season ?? 0) - (b.season ?? 0)
       || (a.episode ?? 0) - (b.episode ?? 0)
       || naturalSort(a.path, b.path));
+  }
+
+  /**
+   * One loose video file as a listing row. Shared by items() and the
+   * paired library's disk-truth pass, so a loose film looks identical
+   * whether the shelf is ours or a catalogue's.
+   */
+  _looseRow(root, name, stillCache = new Map()) {
+    const full = join(root, name);
+    this._paths.set(id(full), full);
+    const stem = name.slice(0, -extname(name).length);
+    const parsed = parseEpisode(name, { allowBareNumber: false });
+    // An episode-CODED loose file keeps its stem: parseEpisode would
+    // title it "Episode 5" with no show anywhere to hang that off.
+    const title = parsed.episode != null ? stem : movieTitle(stem);
+    // Sidecar still or nothing: like a film folder's poster, the gap
+    // is left for the metadata enricher rather than filled with a
+    // frame grab meant for episode rows.
+    const still = stillsIn(root, stillCache).get(stem);
+    if (still) this._paths.set(id(still), still);
+    return {
+      id: id(full),
+      title,
+      year: /\((\d{4})\)/.exec(name)?.[1] ?? null,
+      type: 'Movie',
+      childCount: null,
+      path: full,
+      image: still ? imageUrl(still) : null,
+    };
+  }
+
+  /** Disk truth for the paired library: is this mapped path still there? */
+  pathExists(p) {
+    return existsSync(p);
+  }
+
+  /** Loose video rows directly in `dir` — the paired union's other half. */
+  looseItemsIn(dir) {
+    const stillCache = new Map();
+    return listVideos(dir).map((name) => this._looseRow(dir, name, stillCache));
   }
 
   async item(itemId) {

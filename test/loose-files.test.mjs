@@ -122,7 +122,15 @@ const { PairedLibrary } = await import('../src/library/paired.js');
 const catalogue = {
   configured: true,
   libraries: async () => [{ id: 'jf-movies', name: 'Movies' }, { id: 'jf-shows', name: 'Shows' }],
-  items: async (libId) => ({ total: 1, items: [{ id: 'jf-1', title: 'Catalogue Film' }] }),
+  // Paths as the catalogue reports them (identity rules here): one row
+  // whose folder exists, one whose file was deleted from the disk.
+  items: async (libId) => (libId === 'jf-movies'
+    ? { total: 2,
+      items: [
+        { id: 'jf-1', title: 'Catalogue Film', path: join(media, 'movies', 'Film X (2018)') },
+        { id: 'jf-2', title: 'Deleted Film', path: join(media, 'movies', 'Gone (2001)', 'gone.mkv') },
+      ] }
+    : { total: 0, items: [] }),
   item: async (id) => { if (id !== 'jf-1') throw new Error(`Jellyfin has no item ${id}`); return { id, title: 'Catalogue Film', path: '/data/movies/x.mkv' }; },
   imagePath: () => null,
 };
@@ -143,8 +151,17 @@ check('item() falls through to the media half, tagged',
   [pItem.title, pItem.fromMedia], ['Concert Rip (2024)', true]);
 check('resolvePath serves it from the media half, unmapped',
   paired.resolvePath(pItem).endsWith('Concert Rip (2024) 1080p.mkv'), true);
-check('catalogue items are untouched by the union',
-  (await paired.items('jf-movies')).items[0].title, 'Catalogue Film');
+// Disk truth on the catalogue's own shelf: the deleted row is hidden,
+// the unindexed loose file inside movies/ joins the shelf, and the
+// indexed folder-film stays exactly the catalogue's row.
+const pMovies = await paired.items('jf-movies');
+check('deleted catalogue rows are hidden by disk truth',
+  pMovies.items.some((i) => i.title === 'Deleted Film'), false);
+check('unindexed loose files join the catalogue shelf, tagged',
+  pMovies.items.filter((i) => i.fromMedia).map((i) => i.title), ['Bare Film (2017)']);
+check('the surviving catalogue row is untouched',
+  pMovies.items[0], { id: 'jf-1', title: 'Catalogue Film', path: join(media, 'movies', 'Film X (2018)') });
+check('the total reflects both reconciliations', pMovies.total, 2);
 
 // Without loose files, no extra shelf appears at all.
 rmSync(join(media, 'Concert Rip (2024) 1080p.mkv'));

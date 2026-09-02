@@ -473,6 +473,46 @@ export class SmbStreamLibrary {
     return out;
   }
 
+  /**
+   * Disk truth for the paired library: does this mapped share path still
+   * exist? One cached readdir per directory (5s), never a stat per file —
+   * a listing page costs at most one extra round trip.
+   */
+  async pathExists(relPath) {
+    const rel = String(relPath).replace(/^\/+/, '');
+    const cut = rel.lastIndexOf('/');
+    const parent = cut < 0 ? '' : rel.slice(0, cut);
+    const name = cut < 0 ? rel : rel.slice(cut + 1);
+    this._dirCache ??= new Map();
+    const hit = this._dirCache.get(parent);
+    let names = hit && Date.now() - hit.at < 5000 ? hit.names : null;
+    if (!names) {
+      const entries = await this._readdir(parent);
+      names = new Set(entries.map((e) => e.name));
+      this._dirCache.set(parent, { at: Date.now(), names });
+    }
+    return names.has(name);
+  }
+
+  /** Loose video rows directly in `dir` — the paired union's other half. */
+  async looseItemsIn(dir) {
+    const rel = String(dir).replace(/^\/+/, '');
+    const entries = await this._readdir(rel);
+    return entries
+      .filter((e) => !e.isDirectory() && isVideo(e.name))
+      .map((e) => {
+        const frel = rel ? `${rel}/${e.name}` : e.name;
+        const stem = e.name.replace(/\.[^.]+$/, '');
+        const parsed = parseEpisode(e.name, { allowBareNumber: false });
+        return {
+          id: this._remember(frel),
+          title: parsed.episode != null ? stem : movieTitle(stem),
+          type: 'Movie',
+          path: frel,
+        };
+      });
+  }
+
   async item(itemId) {
     const rel = this._paths.get(itemId);
     if (rel == null) throw new Error('Unknown item');
