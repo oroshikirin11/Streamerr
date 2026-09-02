@@ -1022,10 +1022,24 @@ export class PipelinePlayout extends EventEmitter {
     }
     // A seek while playing discards any pause bookkeeping outright.
     this._pauseResume = null;
-    // Flush first: it rewinds the playhead to what has aired, and a
-    // relative skip has to count from there or +30 lands a bankful further
-    // ahead than the viewer expects.
-    this._bankFlush();
+    /**
+     * Cushion-kept, like every other mid-broadcast change.
+     *
+     * A flush emptied the pipe and THEN spawned, so the publisher had
+     * nothing to send for however long the successor took to produce its
+     * first byte — measured on air at 1856ms on a heavy title, and the
+     * receiver reported exactly that as a starved feed and sat looping
+     * its last frames. Worse, it left the bank empty afterwards: on a
+     * title the encoder can only just sustain, the cushion never
+     * refilled, so the NEXT control action had nothing to splice behind
+     * either and starved again. Keeping the cushion costs a couple of
+     * seconds before the new position airs and gives the publisher
+     * something to play while the successor starts. The cut's own resume
+     * point is what a relative skip counts from, exactly as the flushed
+     * playhead was.
+     */
+    const cut = this._bankCutForApply(this._applyRunway());
+    this.position = cut.resume;
     let next = position != null ? Number(position) : this.position + Number(delta);
     next = Math.max(0, next);
     if (this.current.duration) {
@@ -2260,14 +2274,40 @@ export class PipelinePlayout extends EventEmitter {
     if (!this._bank?.length) return 0;
     const whole = Buffer.concat(this._bank.map((c) => c.data));
     let cut = -1;
+    let frameCut = -1;
     for (let o = 0; o + 188 <= whole.length; o += 188) {
       if (whole[o] !== 0x47) continue;
       const pusi = (whole[o + 1] & 0x40) !== 0;
       const pid = ((whole[o + 1] & 0x1f) << 8) | whole[o + 2];
       const hasAf = (whole[o + 3] & 0x20) !== 0;
       const rai = hasAf && whole[o + 4] > 0 && (whole[o + 5] & 0x40) !== 0;
-      if (pusi && rai && pid === 0x100) cut = o;
+      if (pusi && pid === 0x100) {
+        // Every video PES start is the end of the frame before it, and
+        // that is the weaker guarantee this needs when no keyframe is
+        // available.
+        frameCut = o;
+        if (rai) cut = o;
+      }
     }
+    /**
+     * No keyframe in the kept cushion — so end on a whole FRAME instead.
+     *
+     * A cushion shorter than the source's GOP contains no random-access
+     * point at all, and that is ordinary: measured on air, a title
+     * keyframing every 4.5-9.6s against a ~3s cushion never has one. The
+     * old code trimmed NOTHING there and spliced onto whatever byte the
+     * cushion ended on — mid-frame, essentially always. The publisher
+     * then read a truncated NAL ("Failed to parse header of NALU (type
+     * 0)"), its timestamps went backward, and the receiver starved and
+     * sat looping its last frames.
+     *
+     * Ending on a PES boundary is enough: the frames before it are whole,
+     * and the successor opens with its own IDR, so the decoder gets
+     * complete pictures and then a clean entry point. The keyframe cut is
+     * still preferred when one exists — it costs no re-encode — this is
+     * the floor beneath it.
+     */
+    if (cut <= 0) cut = frameCut;
     if (cut <= 0) return 0;
     const dropBytes = whole.length - cut;
     const perSecond = this._kbps * 125;
