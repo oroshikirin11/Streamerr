@@ -49,8 +49,11 @@ const catalogue = new Proxy({}, {
 const media = { configured: true, bridgeToken: 'tok-1', resolveMapped: (p) => `served:${p}` };
 const lib = new PairedLibrary(catalogue, media, [{ from: '/cat', to: '/media' }]);
 
+// Awaited in order: libraries()/items()/item() are async since the loose
+// shelf union, and items() lazily rebuilds the shelf set via libraries()
+// when called cold — sequential awaits keep the call ledger deterministic.
 for (const m of ['libraries', 'items', 'seasons', 'episodes', 'item', 'nextEpisode', 'imagePath']) {
-  lib[m]('x');
+  await lib[m]('x');
 }
 check('listing goes to the catalogue', calls, [
   'catalogue.libraries', 'catalogue.items', 'catalogue.seasons', 'catalogue.episodes',

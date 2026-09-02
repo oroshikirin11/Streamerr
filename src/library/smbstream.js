@@ -317,7 +317,7 @@ export class SmbStreamLibrary {
       this._collectionRoot = entries.some((e) => !e.isDirectory() && isVideo(e.name));
       if (this._collectionRoot) {
         this._libRels.add('');
-        out.push({ id: this._remember(''), name: rootName, type: 'mixed' });
+        out.push({ id: this._remember(''), name: rootName, type: 'mixed', loose: true });
       }
       return out;
     }

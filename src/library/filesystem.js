@@ -363,6 +363,10 @@ export class FilesystemLibrary {
           name: basename(r) || r,
           type: 'mixed',
           locations: [r],
+          // Marks this shelf as media-half-only: a paired catalogue
+          // unions these into its own listing, since the catalogue
+          // (Jellyfin) never indexes files outside its libraries.
+          loose: true,
         });
       }
     }

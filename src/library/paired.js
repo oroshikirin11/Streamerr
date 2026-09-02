@@ -57,20 +57,61 @@ export class PairedLibrary {
   }
 
   /**
-   * Listing is the catalogue's job, verbatim.
-   *
-   * This list is not decoration — CompositeLibrary calls every one of these
-   * on a source, and a missing one is not a graceful degradation but a
-   * TypeError surfacing as a 400 with an empty library behind it. Anything
-   * added to the library interface has to be added here too.
+   * Listing is the catalogue's job — with ONE addition. The catalogue only
+   * knows what it indexes, and a loose file dropped straight into the
+   * share's collection root is in none of its libraries: it existed on the
+   * media half and appeared nowhere. The media half now surfaces those as
+   * shelves marked `loose: true`, and this unions them into the listing —
+   * their ids route back to the media half, everything else stays the
+   * catalogue's verbatim.
    */
-  libraries(...a) { return this.catalogue.libraries(...a); }
-  items(...a) { return this.catalogue.items(...a); }
+  async libraries(...a) {
+    const cat = await this.catalogue.libraries(...a);
+    let loose = [];
+    try {
+      loose = ((await this.media.libraries?.(...a)) ?? []).filter((l) => l.loose);
+    } catch { /* media browsing unavailable — the catalogue still lists */ }
+    this._looseShelves = new Set(loose.map((l) => l.id));
+    return [...cat, ...loose];
+  }
+
+  async items(libraryId, ...a) {
+    if (!this._looseShelves) await this.libraries();
+    if (this._looseShelves.has(libraryId)) {
+      const page = await this.media.items(libraryId, ...a);
+      // Tagged so resolvePath knows these bypass the catalogue's path
+      // mapping — the media half serves its own files directly.
+      return { ...page, items: (page?.items ?? []).map((i) => ({ ...i, fromMedia: true })) };
+    }
+    return this.catalogue.items(libraryId, ...a);
+  }
+
   seasons(...a) { return this.catalogue.seasons(...a); }
   episodes(...a) { return this.catalogue.episodes(...a); }
-  item(...a) { return this.catalogue.item(...a); }
+
+  /**
+   * The catalogue first; a media-half id (a loose file) falls through to
+   * the media provider, tagged for resolvePath. The catalogue's error is
+   * kept when BOTH halves refuse — it names the id, which is the useful
+   * message.
+   */
+  async item(...a) {
+    try {
+      return await this.catalogue.item(...a);
+    } catch (err) {
+      try {
+        const it = await this.media.item?.(...a);
+        if (it) return { ...it, fromMedia: true };
+      } catch { /* fall through to the catalogue's error */ }
+      throw err;
+    }
+  }
+
   nextEpisode(...a) { return this.catalogue.nextEpisode(...a); }
-  imagePath(...a) { return this.catalogue.imagePath(...a); }
+  imagePath(...a) {
+    return this.catalogue.imagePath(...a) ?? this.media.imagePath?.(...a) ?? null;
+  }
+
   shows(...a) { return this.catalogue.shows?.(...a); }
   search(...a) { return this.catalogue.search?.(...a); }
   allPaths(...a) { return this.catalogue.allPaths?.(...a); }
@@ -115,6 +156,12 @@ export class PairedLibrary {
    * surfacing as an ffmpeg error minutes into a broadcast.
    */
   resolvePath(episode) {
+    // A media-half item (a loose file the catalogue never indexed) is
+    // resolved by the media provider directly — the derived rules map
+    // CATALOGUE paths, and this path never was one.
+    if (episode?.fromMedia && typeof this.media?.resolvePath === 'function') {
+      return this.media.resolvePath(episode);
+    }
     const reported = episode?.sourcePath ?? episode?.path;
     if (!reported) throw new Error(`No path for "${episode?.title ?? 'this item'}"`);
     const mapped = this.map(reported);

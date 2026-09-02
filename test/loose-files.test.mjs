@@ -114,11 +114,46 @@ const movieItems2 = await clib2.items(movies2.id);
 check('a loose file inside movies/ joins that shelf',
   movieItems2.items.map((i) => i.title).sort(), ['Bare Film (2017)', 'Film X (2018)']);
 
+// ── Paired (Jellyfin-catalogue) setups ─────────────────────────────────
+// The catalogue only lists what it indexes; the media half's loose
+// shelves must union into the listing and route back to the media half.
+console.log('\npaired union');
+const { PairedLibrary } = await import('../src/library/paired.js');
+const catalogue = {
+  configured: true,
+  libraries: async () => [{ id: 'jf-movies', name: 'Movies' }, { id: 'jf-shows', name: 'Shows' }],
+  items: async (libId) => ({ total: 1, items: [{ id: 'jf-1', title: 'Catalogue Film' }] }),
+  item: async (id) => { if (id !== 'jf-1') throw new Error(`Jellyfin has no item ${id}`); return { id, title: 'Catalogue Film', path: '/data/movies/x.mkv' }; },
+  imagePath: () => null,
+};
+const pmedia = new FilesystemLibrary({ roots: [media], stills: true });
+const paired = new PairedLibrary(catalogue, pmedia, []);
+
+const plibs = await paired.libraries();
+check('catalogue shelves plus the media loose shelf',
+  plibs.map((l) => l.name).sort(), ['Movies', 'Shows', mediaName(media)].sort());
+
+const pShelf = plibs.find((l) => l.loose);
+const pItems = await paired.items(pShelf.id);
+check('the loose shelf routes to the media half',
+  pItems.items.map((i) => [i.title, i.fromMedia]), [['Concert Rip (2024)', true]]);
+
+const pItem = await paired.item(pItems.items[0].id);
+check('item() falls through to the media half, tagged',
+  [pItem.title, pItem.fromMedia], ['Concert Rip (2024)', true]);
+check('resolvePath serves it from the media half, unmapped',
+  paired.resolvePath(pItem).endsWith('Concert Rip (2024) 1080p.mkv'), true);
+check('catalogue items are untouched by the union',
+  (await paired.items('jf-movies')).items[0].title, 'Catalogue Film');
+
 // Without loose files, no extra shelf appears at all.
 rmSync(join(media, 'Concert Rip (2024) 1080p.mkv'));
 const clib3 = new FilesystemLibrary({ roots: [media], stills: true });
 check('no loose files, no extra shelf',
   (await clib3.libraries()).map((l) => l.name).sort(), ['movies', 'tv']);
+const paired3 = new PairedLibrary(catalogue, clib3, []);
+check('paired listing is catalogue-only again without strays',
+  (await paired3.libraries()).map((l) => l.name).sort(), ['Movies', 'Shows']);
 
 rmSync(media, { recursive: true, force: true });
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
