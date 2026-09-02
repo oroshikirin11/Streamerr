@@ -685,8 +685,8 @@ export class PipelinePlayout extends EventEmitter {
     const sc = this.scheduler;
     if (!sc) {
       return {
-        seconds: (this._bankBytes ?? 0) / perSecond,
-        max: this._bankMax / perSecond,
+        seconds: this._bankSeconds() ?? (this._bankBytes ?? 0) / perSecond,
+        max: this.bufferSeconds,
       };
     }
     return {
@@ -1829,12 +1829,28 @@ export class PipelinePlayout extends EventEmitter {
       chunk = head;
     }
     this._bank ??= [];
-    // Each chunk carries the playhead it was encoded at, so we always know
-    // how far viewers have actually got — the encoder runs up to a bank
-    // ahead of them, and every restart has to resume from what they saw,
-    // not from what was encoded.
+    /**
+     * Each chunk carries the playhead it was encoded at, so we always know
+     * how far viewers have actually got — the encoder runs up to a bank
+     * ahead of them, and every restart has to resume from what they saw,
+     * not from what was encoded.
+     *
+     * The TIMELINE stamp is read from the chunk's own bytes rather than
+     * from `this.timeline`, which only moves when a progress report
+     * arrives. A source that races — any copied clip, since a copy has no
+     * -re and is limited only by the disk — pushes megabytes between two
+     * reports: measured, 7.8MB (fifteen seconds of content) banked inside
+     * 200ms, every chunk of it stamped tl=0. The bank then held nearly a
+     * minute of content that claimed to be zero seconds deep, so the
+     * depth cap never engaged and a cushion "cut to 3s" left 54s on air
+     * ahead of the splice. The bytes cannot lie about their own time.
+     */
+    const stampAt = (this._published ?? 0) + (this._bankBytes ?? 0);
+    const wireTl = this._fmt === 'ts'
+      ? lastVideoPtsIn(chunk, (188 - (stampAt % 188)) % 188)
+      : null;
     this._bank.push({
-      data: chunk, pos: this.position, tl: this.timeline,
+      data: chunk, pos: this.position, tl: wireTl ?? this.timeline,
       item: this.current?.item ?? null, gen: this._srcGen ?? 0,
       // Card bytes carry the CLIP's item (a hold never changes `current`),
       // so this flag is the only way resume() can tell a queued card from
@@ -1844,7 +1860,7 @@ export class PipelinePlayout extends EventEmitter {
     this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
     // Backpressure moves from the OS pipe to here: past the cap the source
     // pauses, and resumes once half the bank has aired.
-    if (this._bankBytes > this._bankMax && !this._srcPaused) {
+    if (this._bankFull() && !this._srcPaused) {
       this._srcPaused = true;
       try { src.stdout.pause(); } catch { /* dying */ }
     }
@@ -1996,10 +2012,25 @@ export class PipelinePlayout extends EventEmitter {
     this._bankResume();
   }
 
+  /**
+   * Is the cushion full? Seconds first, bytes as the ceiling.
+   *
+   * The byte cap exists to bound memory; the SECONDS cap is the actual
+   * policy, and it is the one that must hold whatever the file's bitrate
+   * turns out to be. Judging depth by bytes alone banked four times
+   * bufferSeconds for a file cheaper than the profile and starved one
+   * dearer than the estimate — the same fault in both directions.
+   */
+  _bankFull(margin = 1) {
+    const secs = this._bankSeconds();
+    if (secs != null && secs >= this.bufferSeconds * margin) return true;
+    return (this._bankBytes ?? 0) >= this._bankMax * margin;
+  }
+
   _bankResume() {
     if (process.env.JSR_TRACE && this._bankRoom) this.emit('log', `[trace] sink resumed bank=${this._bankBytes}\n`);
     // A chunk writer parked because the bank was full.
-    if (this._bankRoom && (this._bankBytes ?? 0) < this._bankMax * 0.9) {
+    if (this._bankRoom && !this._bankFull(0.9)) {
       const cb = this._bankRoom;
       this._bankRoom = null;
       cb();
@@ -2011,7 +2042,7 @@ export class PipelinePlayout extends EventEmitter {
     // well over realtime, depending on which phase you sampled. Keeping the
     // bank near full couples the encoder to the publisher's actual
     // consumption, which is what the figure should reflect.
-    if (this._srcPaused && (this._bankBytes ?? 0) < this._bankMax * 0.9) {
+    if (this._srcPaused && !this._bankFull(0.9)) {
       this._srcPaused = false;
       try { this.source?.stdout?.resume(); } catch { /* gone */ }
     }
@@ -2069,7 +2100,69 @@ export class PipelinePlayout extends EventEmitter {
    *
    * Returns the seconds removed, so the caller can rewind by the same amount.
    */
+  /**
+   * The timeline of the content about to air — the front of the cushion.
+   * `airedTimeline` is the byte-accurate answer once anything has been
+   * drained; before that the first chunk's own stamp stands in.
+   */
+  _bankHeadTl() {
+    if (this.airedTimeline != null) return this.airedTimeline;
+    return this._bank?.[0]?.tl ?? null;
+  }
+
+  /**
+   * How many SECONDS of content the bank holds, from its own stamps.
+   *
+   * Every chunk was stamped with the timeline it was encoded at, so the
+   * bank knows the time of its own bytes exactly. Inferring it from a
+   * bitrate instead was the bug behind a whole family of faults: the
+   * figure was wrong by whatever the estimate was wrong by, in both
+   * directions. A 4000 kbps file measured at 1593 made a "3s" cushion
+   * really 1.2s, so an apply cut the pipe down to less than a spawn and
+   * the publisher ran dry — the receiver looping a few frames at every
+   * skip. The same estimate read high (16000 for a 4000 kbps file) had
+   * banked four times the configured depth. Stamps have no such failure
+   * mode. Null when the stamps cannot answer (a bank of one chunk, or a
+   * card whose progress has not ticked), and callers fall back.
+   */
+  _bankSeconds() {
+    const head = this._bankHeadTl();
+    const last = this._bank?.[this._bank.length - 1];
+    if (head == null || !last || last.tl == null) return null;
+    return Math.max(0, last.tl - head);
+  }
+
+  /**
+   * Cut the cushion down to `keepSeconds`, from the NEWEST end.
+   *
+   * Whole chunks only, and it stops as soon as the cushion is short
+   * enough — so it errs toward keeping slightly MORE than asked, which
+   * is the safe direction: the runway exists to cover the successor's
+   * spawn, and overshooting costs a fraction of a chunk while
+   * undershooting starves the publisher.
+   *
+   * Returns the seconds actually removed, read from the stamps.
+   */
   _bankTrimTo(keepSeconds) {
+    const head = this._bankHeadTl();
+    const startTl = this._bank?.[this._bank.length - 1]?.tl ?? null;
+    if (head == null || startTl == null) return this._bankTrimToBytes(keepSeconds);
+    let dropped = 0;
+    while (this._bank.length > 1) {
+      const last = this._bank[this._bank.length - 1];
+      if (last.tl == null) break;                       // unstamped: byte path
+      if (last.tl - head <= keepSeconds) break;         // short enough now
+      this._bank.pop();
+      this._bankBytes -= last.data.length;
+      dropped += last.data.length;
+    }
+    if (!dropped) return 0;
+    const endTl = this._bank[this._bank.length - 1]?.tl ?? startTl;
+    return Math.max(0, startTl - endTl);
+  }
+
+  /** The old byte-budget trim, kept for banks the stamps cannot describe. */
+  _bankTrimToBytes(keepSeconds) {
     const perSecond = this._kbps * 125;
     const keepBytes = Math.max(0, Math.round(keepSeconds * perSecond));
     let excess = Math.max(0, (this._bankBytes ?? 0) - keepBytes);
@@ -2205,9 +2298,6 @@ export class PipelinePlayout extends EventEmitter {
    * starts its own audio there anyway. Nothing moves in time.
    */
   _bankDropPartialAudioTail(pid = 0x101) {
-    if (process.env.JSR_SPLICE_TRACE) {
-      this.emit('log', `[splice-trace] enter fmt=${this._fmt} chunks=${this._bank?.length ?? 0}\n`);
-    }
     if (this._fmt !== 'ts' || !this._bank?.length) return 0;
     // One AAC frame is ~400 bytes; a generous window costs nothing.
     let scan = 0;
@@ -2226,13 +2316,7 @@ export class PipelinePlayout extends EventEmitter {
     let declared = 0;
     let payload = 0;
     for (let o = grid; o + 188 <= tail.length; o += 188) {
-      if (tail[o] !== 0x47) {
-        if (process.env.JSR_SPLICE_TRACE) {
-          this.emit('log', `[splice-trace] torn grid at ${o} (grid=${grid} tail=${tail.length} `
-            + `published=${this._published} before=${before}) byte=0x${tail[o].toString(16)}\n`);
-        }
-        return 0;                                           // torn grid: leave it alone
-      }
+      if (tail[o] !== 0x47) return 0;                       // torn grid: leave it alone
       if ((((tail[o + 1] & 0x1f) << 8) | tail[o + 2]) !== pid) continue;
       const hasAf = (tail[o + 3] & 0x20) !== 0;
       const start = o + 4 + (hasAf ? 1 + tail[o + 4] : 0);
@@ -2247,10 +2331,6 @@ export class PipelinePlayout extends EventEmitter {
       } else if (pusiAt >= 0) {
         payload += (o + 188) - start;
       }
-    }
-    if (process.env.JSR_SPLICE_TRACE) {
-      this.emit('log', `[splice-trace] pusiAt=${pusiAt} declared=${declared} `
-        + `payload=${payload} short=${pusiAt >= 0 && declared > 0 && payload < declared + 6}\n`);
     }
     // packet_length 0 means unbounded (video only) — nothing to judge.
     if (pusiAt < 0 || declared === 0 || payload >= declared + 6) return 0;
@@ -3454,10 +3534,19 @@ export class PipelinePlayout extends EventEmitter {
        * new clip's zero while the wire was somewhere else entirely.
        * BANK_MIN_BYTES still floors a very light file.
        */
-      const kbps = isCopy && srcKbps > 0 ? srcKbps : this._kbpsBase;
+      /**
+       * The byte figure is now only a memory CEILING — the cushion's real
+       * limit is its depth in seconds (see _bankFull), read from the
+       * chunk stamps. So take the larger of configured and measured: a
+       * probe that reads low (Death Note measured 1593 kbps while the
+       * wire carried 4000+) can no longer squeeze the bank below the
+       * configured depth, and a file dearer than the profile still gets
+       * room for its own bytes.
+       */
+      const kbps = isCopy ? Math.max(this._kbpsBase, srcKbps ?? 0) : this._kbpsBase;
       if (isCopy) {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
-          + `bytes ship untouched (~${kbps} kbps); encode cost zero. An Apply `
+          + `bytes ship untouched (~${srcKbps ?? kbps} kbps); encode cost zero. An Apply `
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
       } else if (srcKbps != null && this.profile?.codec === 'hevc'
           && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
