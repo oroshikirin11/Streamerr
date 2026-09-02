@@ -38,7 +38,7 @@ import { basename, join } from 'path';
 import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
-import { buildSubtitleFilter, escapeFilterPath } from './tracks.js';
+import { buildSubtitleFilter, escapeFilterPath, workKeyOf } from './tracks.js';
 import { analyseAssBand, bandScript } from './subband.js';
 import { overlayAss } from './overlay-ass.js';
 import {
@@ -320,6 +320,16 @@ const SLOW_REPEAT_MS = 120_000;
 
 /** Below this many seconds the cushion has no margin left, whatever the rate. */
 const BUFFER_FLOOR_S = 10;
+
+/**
+ * How many queued clips are made ready ahead of the one on air.
+ *
+ * One is enough for a natural boundary — the successor has the whole clip to
+ * get ready. It is not enough for consecutive skips, where each successor
+ * starts preparing only once the previous skip lands. Three covers a burst of
+ * skips without preparing more of the queue than a clip's runtime can pay for.
+ */
+export const PREFETCH_DEPTH = 3;
 
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;
@@ -1457,6 +1467,12 @@ export class PipelinePlayout extends EventEmitter {
       if (it.duration == null) this._durTried?.delete(it.srcPath);
     }
     this._fillDurations();
+    // Editing the queue changes what is coming up, so re-walk it. Without
+    // this, an item added mid-clip would not be looked at until the next
+    // clip boundary — throwing away the rest of the current clip's runtime,
+    // which is the very time this preparation is meant to spend. Cheap to
+    // call: already-warm and already-extracted items are no-ops.
+    if (this.current) this._prefetchUpcoming();
     this.emit('queue', this.snapshot());
   }
 
@@ -3627,10 +3643,7 @@ export class PipelinePlayout extends EventEmitter {
     }
 
     this._spawnSource(args, { kind: 'clip' });
-    if (this.queue[0]) {
-      this._detached(this._warm(this.queue[0]), 'reading ahead');
-      this._detached(this._extract(this.queue[0]), 'extracting subtitles');
-    }
+    this._prefetchUpcoming();
     this.emit('nowplaying', this.snapshot());
 
     this._fillDuration(item);
@@ -4378,6 +4391,61 @@ export class PipelinePlayout extends EventEmitter {
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
     this._detached(this._extract(item), 'extracting subtitles');
+  }
+
+  /**
+   * Get the next few queued clips ready, in order, while one is on air.
+   *
+   * Ready means warm — head pulled through the page cache, keyframes measured
+   * — and, where the chosen subtitle lives inside the container, extracted to
+   * a small file. Both are paid for during the PREVIOUS clip's playback,
+   * which is why a natural boundary feels instant: the successor had the
+   * whole clip to get ready. A skip does not. The successor has had only as
+   * long as the viewer watched, and a SECOND skip moments later used to land
+   * on an item whose preparation began when the first skip completed — on
+   * nothing at all, guaranteeing the hold card. Looking three deep gives
+   * those later skips something warm to land on, spending time the extractor
+   * would otherwise sit idle through.
+   *
+   * STRICTLY SEQUENTIAL, and that is the whole design. Extraction demuxes an
+   * entire multi-gigabyte file over the network; three of those at once
+   * compete with the live source read, and on a title the encoder only just
+   * sustains, that is precisely how the cushion starves. One at a time keeps
+   * peak I/O identical to preparing a single clip.
+   */
+  _prefetchUpcoming() {
+    // Re-walk on demand rather than start a second chain: the queue shifts at
+    // every clip boundary, so a chain started earlier is walking stale
+    // positions by the time it reaches them. The flag makes a request during
+    // a running pass cause exactly one more pass, never a pile of them.
+    this._prefetchWanted = true;
+    if (this._prefetchRunning) return;
+    this._prefetchRunning = true;
+    this._detached((async () => {
+      try {
+        while (this._prefetchWanted) {
+          this._prefetchWanted = false;
+          const work = workKeyOf(this.current?.item);
+          for (let i = 0; i < PREFETCH_DEPTH; i++) {
+            const item = this.queue[i];
+            if (!item) break;
+            if (this._stopping || this._abort?.signal?.aborted) return;
+            await this._warm(item);
+            // Past the immediate successor, only extract for the same work.
+            // _extract pulls the track index CURRENTLY selected, and a track
+            // choice does not carry to an unrelated work — so doing this for
+            // a film sitting behind an episode would spend a full read on a
+            // track that film will never ask for. Warming it is still worth
+            // it: that is just bytes, and correct whatever plays.
+            const key = workKeyOf(item);
+            if (i > 0 && work && key && key !== work) continue;
+            if (this._needsExtraction(item)) await this._extract(item);
+          }
+        }
+      } finally {
+        this._prefetchRunning = false;
+      }
+    })(), 'preparing upcoming clips');
   }
 
   /**
