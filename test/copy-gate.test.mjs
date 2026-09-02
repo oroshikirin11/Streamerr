@@ -44,5 +44,12 @@ check('...and lower it',
 check('a nonsense setting falls back to the default bar',
   copyKeyframesFitLive({ srcGopSeconds: 10, copyMaxGopSeconds: 0 }), false);
 
+// The bar judges the FILE; whether we may ignore it is the caller's
+// call. An HDR clip the operator asked to keep HDR has no cheap encode
+// (a main10 re-encode measured 0.55x on the deploy box, a tone map
+// throws the HDR away), so the copy path keeps it and warns instead.
+check('the bar itself still reports the truth for an HDR file',
+  copyKeyframesFitLive({ srcGopSeconds: 9, hdrWanted: true }), false);
+
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');

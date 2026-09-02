@@ -3550,6 +3550,13 @@ export class PipelinePlayout extends EventEmitter {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
           + `bytes ship untouched (~${srcKbps ?? kbps} kbps); encode cost zero. An Apply `
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
+      } else if (isCopy && !copyKeyframesFitLive(this.profile)) {
+        // Kept on the copy path only because re-encoding it would be
+        // worse — say so, since the latency is the visible consequence.
+        this.emit('warn', `${this.current?.item?.title ?? 'This title'} keyframes only `
+          + `every ${this.profile.srcGopSeconds.toFixed(1)}s, so viewers will sit further `
+          + `behind live on it. It is being copied anyway because it is HDR and `
+          + `re-encoding would cost the HDR or the broadcast.`);
       } else if (this.profile?.codec === 'hevc'
           && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
           && !copyKeyframesFitLive(this.profile)) {
@@ -5528,7 +5535,14 @@ export function buildSourceArgs({
       // reports as a stall and a snap. Encoding costs the GPU and buys a
       // keyframe every gopSeconds — which is exactly why one of these
       // titles behaves the moment subtitles force a transcode.
-      && copyKeyframesFitLive(profile)) {
+      // ...unless copying is the only way this clip can go out at all.
+      // An HDR file the operator asked to keep HDR has no cheap encode:
+      // the alternative is a main10 re-encode or a tone map, one of which
+      // measured 0.55x on the deploy box (the broadcast dies) and the
+      // other of which throws the HDR away. Long segments are a worse
+      // experience; a dead or downgraded broadcast is a worse outcome.
+      && (copyKeyframesFitLive(profile)
+        || (selection?.video?.hdr && profile.hdrWanted))) {
     /**
      * THE SEAM ALIGNMENT. A copy-mode `-ss` splits the streams: the
      * demuxer starts VIDEO at whatever keyframe the cue table picks —
