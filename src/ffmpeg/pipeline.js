@@ -877,9 +877,16 @@ export class PipelinePlayout extends EventEmitter {
    */
   _onAir() {
     const item = this.airedItem ?? this.current?.item ?? null;
-    const position = this.airedItem != null && this.aired != null
-      ? this.aired
-      : this.position;
+    // Paused, the position IS the resume point — by definition, not by
+    // bookkeeping. Deriving it from aired stamps raced the card's own
+    // bank: chunks stamped before a paused-seek drained after it and
+    // dragged the shown position (and the theater veil's) briefly back
+    // to the old spot, exactly when the coalesced metadata push read it.
+    const position = this.status === 'paused' && this._pauseResume != null
+      ? this._pauseResume
+      : this.airedItem != null && this.aired != null
+        ? this.aired
+        : this.position;
     const duration = item === this.current?.item
       ? this.current?.duration ?? item?.duration ?? null
       : item?.duration ?? null;
@@ -973,8 +980,31 @@ export class PipelinePlayout extends EventEmitter {
 
     // A fresh seek earns a fresh reconnect (see the copy-seam reshape).
     this._reshapedFor = null;
-    // A seek while paused replaces the pause point: resume() must come
-    // back at the seeked position, not where the card first appeared.
+    /**
+     * PAUSED is a state, not an interruption: a seek only moves the point
+     * resume() will come back to. Spawning the clip here (the old
+     * behaviour) un-paused the broadcast as a side effect — skip to the
+     * episode's start while paused and it just started playing. Nothing
+     * is flushed and nothing spawns: the card keeps the pipe alive and
+     * its timeline running, the aired stamp moves so the panel (and the
+     * theater's paused veil, which carries position) shows the new spot,
+     * and resume() plays from here — through the retained window when the
+     * target is cached, so an un-moved pause resumes as instantly as
+     * before.
+     */
+    if (this.status === 'paused') {
+      const base = this._pauseResume ?? this.position ?? 0;
+      let next = position != null ? Number(position) : base + Number(delta);
+      next = Math.max(0, next);
+      if (this.current.duration) {
+        next = Math.min(next, Math.max(0, this.current.duration - 2));
+      }
+      this._pauseResume = next;
+      this.position = next;
+      this.emit('seeked', { position: next });
+      return next;
+    }
+    // A seek while playing discards any pause bookkeeping outright.
     this._pauseResume = null;
     // Flush first: it rewinds the playhead to what has aired, and a
     // relative skip has to count from there or +30 lands a bankful further
@@ -1101,7 +1131,7 @@ export class PipelinePlayout extends EventEmitter {
       // behind the remaining cushion, and the content position comes from
       // the CUT (where the kept bytes end), not from the pause point:
       // viewers never saw a card, so they must not see a skip either.
-      const { resume } = this._bankCutForApply(this.applySeconds);
+      const { resume } = this._bankCutForApply(this._applyRunway());
       this._play(this.current.item, resume, { duration: this.current.duration });
     } else {
       // The card aired (or the cushion is gone): flush pads the torn
@@ -1139,11 +1169,12 @@ export class PipelinePlayout extends EventEmitter {
         // forward seam the publisher's pacer tolerates, and no seam at
         // all for viewers. `applySeconds` bounds the wait, as it does
         // for overlays.
-        const { rewound, gop, resume } = this._bankCutForApply(this.applySeconds);
+        const runway = this._applyRunway();
+        const { rewound, gop, resume } = this._bankCutForApply(runway);
         const ahead = Math.max(0, resume - (this.aired ?? resume));
         this.emit('log', `[tracks] applied — on air in ~${ahead.toFixed(1)}s `
           + (rewound > 0.05
-            ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
+            ? `(cushion cut to ${runway.toFixed(1)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
             : gop > 0
               ? `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`
               : '(cushion kept)')
@@ -1373,11 +1404,12 @@ export class PipelinePlayout extends EventEmitter {
       // truncated frame at the junction, and the decoder holds a still
       // frame until it resyncs. Ending the bank on an access point costs
       // up to one GOP of re-encode — the cushion absorbs it.
-      const { rewound, gop, resume } = this._bankCutForApply(this.applySeconds);
+      const runway = this._applyRunway();
+      const { rewound, gop, resume } = this._bankCutForApply(runway);
       const ahead = Math.max(0, resume - (this.aired ?? resume));
       this.emit('log', `[overlay] applied — on air in ~${ahead.toFixed(1)}s `
         + (rewound > 0.05
-          ? `(cushion cut to ${(this.applySeconds ?? 0).toFixed(0)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
+          ? `(cushion cut to ${runway.toFixed(1)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
           : gop > 0
             ? `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`
             : '(cushion kept)')
@@ -2139,6 +2171,29 @@ export class PipelinePlayout extends EventEmitter {
    * Resume comes from the tail chunk's own stamps so the seam's content
    * position and timeline agree with the bytes actually kept.
    */
+  /**
+   * Runway to keep in front of a cushion-kept apply — the wait the viewer
+   * experiences, since the splice airs when the KEPT cushion has drained.
+   *
+   * The replacement source does not race the frontier: it re-encodes from
+   * the splice point onward, so all the runway must cover is the spawn
+   * (process start, input open, encoder init, first bytes) with margin,
+   * plus a GOP for the aligned junction. That cost is MEASURED — every
+   * clip spawn records wall time to its first byte, kept as a decaying
+   * maximum so one slow SMB open is remembered and a lucky fast one does
+   * not shrink the guard — which makes the runway self-tuning per box and
+   * per graph shape. buffer.applySeconds remains the operator's CEILING
+   * (never waits longer than configured); before any measurement exists
+   * the configured value stands, so the first apply of a broadcast is
+   * exactly as safe as it always was.
+   */
+  _applyRunway() {
+    const cap = this.applySeconds ?? this.bufferSeconds ?? 15;
+    if (this._spawnMs == null) return cap;
+    const floor = (this._spawnMs / 1000) * 2 + (this.profile?.gopSeconds ?? 2) + 1;
+    return Math.min(cap, Math.max(3, floor));
+  }
+
   _bankCutForApply(keepSeconds = null) {
     // Timeline-to-content delta, read at the frontier BEFORE rewinding:
     // both advance in lockstep from the same progress reports, so their
@@ -4095,7 +4150,23 @@ export class PipelinePlayout extends EventEmitter {
     this.source = s;
 
     // Through the bank, not a direct pipe — see BANK_MAX_BYTES.
-    s.stdout.on('data', (d) => this._bankPush(s, d));
+    // The first byte also closes the spawn-cost measurement that feeds
+    // _applyRunway — clip sources only, since cards and holds are not
+    // what a cushion-kept apply respawns.
+    let sawFirstByte = false;
+    s.stdout.on('data', (d) => {
+      if (!sawFirstByte) {
+        sawFirstByte = true;
+        if (kind === 'clip') {
+          const ms = Date.now() - startedAt;
+          this._spawnMs = this._spawnMs == null ? ms : Math.max(ms, this._spawnMs * 0.7);
+          // The number behind every "feels sluggish": seeks and applies
+          // cannot land on the wire faster than this.
+          this.emit('log', `[spawn] first byte in ${ms}ms (runway ${this._applyRunway().toFixed(1)}s)\n`);
+        }
+      }
+      this._bankPush(s, d);
+    });
 
     const parser = new ProgressParser();
     const startOffset = kind === 'clip' ? (this.current?.offset ?? 0) : 0;
