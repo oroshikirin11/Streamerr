@@ -299,8 +299,9 @@ export class SmbStreamLibrary {
     // A root holding collections (movies/tv) becomes one library each,
     // same as the filesystem provider; otherwise the root is the library.
     const collections = dirs.filter((d) => COLLECTION.test(d.name));
+    const rootName = this._cfg.path?.split('/').pop() || this._cfg.share;
     if (collections.length) {
-      return collections.map((d) => {
+      const out = collections.map((d) => {
         this._libRels.add(d.name);
         return {
           id: this._remember(d.name),
@@ -310,9 +311,19 @@ export class SmbStreamLibrary {
           type: /\b(movies?|films?|filme)\b/i.test(d.name) ? 'movies' : 'tvshows',
         };
       });
+      // Loose videos in the collection root get a small shelf of their
+      // own — same rule as the filesystem provider; the entries are
+      // already in hand, so this costs no extra round trip.
+      this._collectionRoot = entries.some((e) => !e.isDirectory() && isVideo(e.name));
+      if (this._collectionRoot) {
+        this._libRels.add('');
+        out.push({ id: this._remember(''), name: rootName, type: 'mixed' });
+      }
+      return out;
     }
+    this._collectionRoot = false;
     this._libRels.add('');
-    return [{ id: this._remember(''), name: this._cfg.path?.split('/').pop() || this._cfg.share }];
+    return [{ id: this._remember(''), name: rootName }];
   }
 
   async items(libraryId, { startIndex = 0, limit = 100, search } = {}) {
@@ -321,8 +332,11 @@ export class SmbStreamLibrary {
     const entries = await this._readdir(root);
     // Folders AND loose files — a bare film at the library's top level is
     // media too, and costs nothing extra: the entries are already in hand.
+    // A collection root's own shelf holds ONLY its loose files; the
+    // folders inside it are whole libraries of their own.
+    const filesOnly = root === '' && this._collectionRoot === true;
     let rows = [
-      ...entries.filter((e) => e.isDirectory()).map((e) => ({ name: e.name, dir: true })),
+      ...(filesOnly ? [] : entries.filter((e) => e.isDirectory()).map((e) => ({ name: e.name, dir: true }))),
       ...entries.filter((e) => !e.isDirectory() && isVideo(e.name))
         .map((e) => ({ name: e.name, dir: false })),
     ];

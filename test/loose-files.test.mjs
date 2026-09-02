@@ -77,5 +77,49 @@ const coldItems = await cold.items(libs[0].id);
 check('a cold items() call still lists loose files', coldItems.total, 4);
 
 rmSync(root, { recursive: true, force: true });
+
+// ── Collection roots: `media/` holding `movies/` and `tv/` ─────────────
+// A loose file dropped into the collection ROOT must neither vanish nor
+// demote the whole root to a single library (which would turn the
+// Movies/Shows shelves into two tiles named "movies" and "tv").
+const media = mkdtempSync(join(tmpdir(), 'streamerr-coll-'));
+mkdirSync(join(media, 'movies', 'Film X (2018)'), { recursive: true });
+writeFileSync(join(media, 'movies', 'Film X (2018)', 'film.mkv'), 'x');
+mkdirSync(join(media, 'tv', 'Show B (2022)', 'Season 01'), { recursive: true });
+writeFileSync(join(media, 'tv', 'Show B (2022)', 'Season 01', 'Show B S01E01.mkv'), 'x');
+writeFileSync(join(media, 'Concert Rip (2024) 1080p.mkv'), 'x');
+
+console.log('\ncollection roots');
+const clib = new FilesystemLibrary({ roots: [media], stills: true });
+const clibs = await clib.libraries();
+check('collections survive a loose file in the root',
+  clibs.map((l) => l.name).sort(), ['movies', mediaName(media), 'tv'].sort());
+function mediaName(p) { return p.split('/').pop(); }
+
+const rootShelf = clibs.find((l) => l.name === mediaName(media));
+const rootItems = await clib.items(rootShelf.id);
+check('the root shelf lists ONLY the loose files',
+  rootItems.items.map((i) => [i.title, i.type]), [['Concert Rip (2024)', 'Movie']]);
+
+const movies = clibs.find((l) => l.name === 'movies');
+const movieItems = await clib.items(movies.id);
+check('the movies shelf is untouched',
+  movieItems.items.map((i) => [i.title, i.type]), [['Film X (2018)', 'Movie']]);
+
+// A loose file dropped INSIDE `movies/` lands on the Movies shelf.
+writeFileSync(join(media, 'movies', 'Bare Film (2017).mkv'), 'x');
+const clib2 = new FilesystemLibrary({ roots: [media], stills: true });
+const movies2 = (await clib2.libraries()).find((l) => l.name === 'movies');
+const movieItems2 = await clib2.items(movies2.id);
+check('a loose file inside movies/ joins that shelf',
+  movieItems2.items.map((i) => i.title).sort(), ['Bare Film (2017)', 'Film X (2018)']);
+
+// Without loose files, no extra shelf appears at all.
+rmSync(join(media, 'Concert Rip (2024) 1080p.mkv'));
+const clib3 = new FilesystemLibrary({ roots: [media], stills: true });
+check('no loose files, no extra shelf',
+  (await clib3.libraries()).map((l) => l.name).sort(), ['movies', 'tv']);
+
+rmSync(media, { recursive: true, force: true });
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');

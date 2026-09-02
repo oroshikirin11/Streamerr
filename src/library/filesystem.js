@@ -216,11 +216,24 @@ function isTitleDir(dir) {
   return false;
 }
 
+/** Folder names that are unmistakably collections, not titles. */
+const COLLECTION_NAME = /^(movies?|films?|tv|shows?|series|anime)$/i;
+
 /** A folder of collections (`media` holding `movies` and `tv`). */
 function isCollectionDir(dir) {
   const subs = listDirs(dir);
-  if (!subs.length || listVideos(dir).length) return false;
-  if (subs.some((n) => isTitleDir(join(dir, n)))) return false;
+  if (!subs.length) return false;
+  // A loose video beside anonymous folders keeps the root a single
+  // library, as ever — but it must NOT demote a root whose folders are
+  // plainly collections: one stray file dropped into `media` would
+  // otherwise collapse the Movies/Shows shelves into tiles named
+  // "movies" and "tv". Those roots stay collections; the stray files
+  // get their own shelf (see libraries()).
+  if (listVideos(dir).length && !subs.some((n) => COLLECTION_NAME.test(n))) return false;
+  // A folder NAMED like a collection is one even when a loose file sits
+  // directly inside it — isTitleDir would read `movies/Bare Film.mkv` as
+  // "movies is a film folder" and demote the whole root.
+  if (subs.some((n) => !COLLECTION_NAME.test(n) && isTitleDir(join(dir, n)))) return false;
   return subs.some((n) => hasVideosDeep(join(dir, n)));
 }
 
@@ -235,6 +248,9 @@ export class FilesystemLibrary {
     // dir is titled after its own filename — the generic folder rule
     // would name every one of them after the library ("Videos").
     this._libDirs = new Set(this.roots);
+    // Collection roots that ALSO hold loose files; their shelf lists
+    // only the files (see libraries()).
+    this._collectionRoots = new Set();
   }
 
   get configured() {
@@ -321,7 +337,8 @@ export class FilesystemLibrary {
       // `movies` and `tv` inside) becomes one library per collection, so
       // the grid shows films and shows instead of the words "movies" and
       // "tv". Picking the obvious folder in the browser then just works.
-      const dirs = isCollectionDir(r) ? listDirs(r).map((n) => join(r, n)) : [r];
+      const isColl = isCollectionDir(r);
+      const dirs = isColl ? listDirs(r).map((n) => join(r, n)) : [r];
       for (const d of dirs) {
         this._paths.set(id(d), d);
         this._libDirs.add(d);
@@ -330,6 +347,22 @@ export class FilesystemLibrary {
           name: basename(d) || d,
           type: guessCollectionType(d),
           locations: [d],
+        });
+      }
+      // Loose videos sitting in a collection root belong to no
+      // collection — they get a small shelf of their own, named after
+      // the root, instead of being silently invisible. items() lists
+      // ONLY the loose files for this shelf; the folders inside are
+      // whole libraries already shown above.
+      if (isColl && listVideos(r).length) {
+        this._collectionRoots.add(r);
+        this._paths.set(id(r), r);
+        this._libDirs.add(r);
+        out.push({
+          id: id(r),
+          name: basename(r) || r,
+          type: 'mixed',
+          locations: [r],
         });
       }
     }
@@ -350,8 +383,9 @@ export class FilesystemLibrary {
     // silently dropped every file lying at its top level. A loose file is
     // a Movie whose id is the file itself — exactly the shape a one-film
     // folder already produces, so the panel plays it directly the same way.
+    const filesOnly = this._collectionRoots.has(root);
     let rows = [
-      ...listDirs(root).map((name) => ({ name, dir: true })),
+      ...(filesOnly ? [] : listDirs(root).map((name) => ({ name, dir: true }))),
       ...listVideos(root).map((name) => ({ name, dir: false })),
     ];
     if (search) {
