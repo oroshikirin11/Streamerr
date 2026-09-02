@@ -3248,6 +3248,8 @@ export class PipelinePlayout extends EventEmitter {
       return;
     }
     this.profile = { ...this._box, ...shape };
+    // What a copied clip would hand the receiver to cut segments on.
+    this.profile.srcGopSeconds = this._gopByPath?.get(item?.srcPath) ?? null;
 
     this._killSource();
     this.holding = false;
@@ -3548,6 +3550,16 @@ export class PipelinePlayout extends EventEmitter {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
           + `bytes ship untouched (~${srcKbps ?? kbps} kbps); encode cost zero. An Apply `
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
+      } else if (this.profile?.codec === 'hevc'
+          && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
+          && !copyKeyframesFitLive(this.profile)) {
+        const cap = Number(this.profile?.copyMaxGopSeconds) > 0
+          ? Number(this.profile.copyMaxGopSeconds) : 4;
+        this.emit('log', `[passthrough] skipped — this file keyframes only every `
+          + `${this.profile.srcGopSeconds.toFixed(1)}s, and a copied stream is cut into `
+          + `segments exactly that long, which viewers sit several of behind live. `
+          + `Encoding it puts a keyframe every ${this.profile.gopSeconds ?? 2}s instead `
+          + `(encoder.copyMaxGopSeconds raises the bar if you prefer the free path).\n`);
       } else if (srcKbps != null && this.profile?.codec === 'hevc'
           && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
           && srcKbps > (Number(this.profile?.copyLimitKbps) > 0
@@ -4223,6 +4235,68 @@ export class PipelinePlayout extends EventEmitter {
       });
       this.emit('log', `[warm] ${item.title ?? item.srcPath} head read in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
     } catch { /* warming is best-effort */ }
+    // AWAITED, not detached: the copy decision is made when the clip
+    // spawns, and _warm is what runs before it. Detached, the answer for
+    // the first clip of a broadcast always arrived too late and it shipped
+    // untouched whatever its keyframes looked like. The probe reads the
+    // head the warm pass just pulled into cache, so it costs little, and
+    // it is bounded — a file it cannot measure simply keeps the old
+    // behaviour.
+    await this._measureGop(item.srcPath);
+  }
+
+  /**
+   * How often this file carries a keyframe, in seconds.
+   *
+   * Only a COPIED clip needs it, and it decides whether copying is
+   * viable at all. Live delivery cuts segments at keyframes — HLS, DASH,
+   * every packager, which is why this is not a question about any one
+   * ingest — so a copied stream's segment length IS the file's keyframe
+   * interval, and nothing downstream can shorten it. Measured against a
+   * real receiver: a 3.5s-keyframe source produced 3.5s segments even
+   * with the segment target set to 1s. A viewer then sits several of
+   * those behind the edge, and a file with sparse or uneven keyframes
+   * gives uneven segments, which is what makes a player stall and snap.
+   * Our own encode emits a keyframe every gopSeconds, which is why the
+   * same title behaves the moment anything forces a transcode.
+   *
+   * One ffprobe of the first seconds, cached per path, off the spawn
+   * path entirely.
+   */
+  async _measureGop(srcPath) {
+    if (!srcPath) return null;
+    this._gopByPath ??= new Map();
+    if (this._gopByPath.has(srcPath)) return this._gopByPath.get(srcPath);
+    this._gopByPath.set(srcPath, null);
+    try {
+      const { execFile } = await import('child_process');
+      const out = await new Promise((resolve) => {
+        const c = execFile('ffprobe', ['-v', 'error', '-read_intervals', '%+30',
+          '-select_streams', 'v:0', '-skip_frame', 'nokey',
+          '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', srcPath],
+        { maxBuffer: 1 << 20 }, (err, stdout) => resolve(err ? '' : stdout));
+        setTimeout(() => { try { c.kill(); } catch { /* gone */ } resolve(''); }, 15_000).unref?.();
+      });
+      const ks = out.split('\n').map((l) => parseFloat(l)).filter((n) => Number.isFinite(n));
+      if (ks.length < 3) return null;
+      // SORT first: ffprobe reports frames in DECODE order and a
+      // reordered stream's presentation stamps run out of order there,
+      // so raw consecutive differences are not intervals at all — they
+      // come out negative and, once those are dropped, two and three
+      // times the real gap. Measured on a 6s-keyframe file: unsorted it
+      // read 12s and 18s.
+      ks.sort((a, b) => a - b);
+      const gaps = ks.slice(1).map((v, i) => v - ks[i]).filter((g) => g > 0.02);
+      if (gaps.length < 2) return null;
+      // The worst ordinary gap, not the mean: one long stretch without a
+      // keyframe is one long segment, and that is what viewers feel.
+      gaps.sort((a, b) => a - b);
+      const gop = gaps[Math.min(gaps.length - 1, Math.floor(gaps.length * 0.9))];
+      this._gopByPath.set(srcPath, gop);
+      this.emit('log', `[keyframes] ${srcPath.split('/').pop()} — one every `
+        + `${gop.toFixed(2)}s\n`);
+      return gop;
+    } catch { return null; }
   }
 
   _subKey(srcPath) {
@@ -5446,7 +5520,15 @@ export function buildSourceArgs({
       // overrides for a different line.
       && (srcKbps == null
         || srcKbps <= (Number(profile.copyLimitKbps) > 0
-          ? Number(profile.copyLimitKbps) : 30000))) {
+          ? Number(profile.copyLimitKbps) : 30000))
+      // Keyframes decide segment length, everywhere. A copied stream is
+      // cut where the FILE has keyframes, so its segments are that long
+      // and no latency setting downstream can shorten them; sparse or
+      // uneven ones give long, uneven segments, and that is what a player
+      // reports as a stall and a snap. Encoding costs the GPU and buys a
+      // keyframe every gopSeconds — which is exactly why one of these
+      // titles behaves the moment subtitles force a transcode.
+      && copyKeyframesFitLive(profile)) {
     /**
      * THE SEAM ALIGNMENT. A copy-mode `-ss` splits the streams: the
      * demuxer starts VIDEO at whatever keyframe the cue table picks —
@@ -6336,6 +6418,26 @@ export function buildCountdownArgs({
 
 function lastLines(s, n) {
   return (s || '').split('\n').filter(Boolean).slice(-n).join('\n');
+}
+
+/**
+ * Are this file's keyframes frequent enough to deliver live by copying?
+ *
+ * `encoder.copyMaxGopSeconds` is the bar (default 4s). It is not a guess
+ * about any particular ingest: every live packager — HLS, DASH — starts
+ * segments on keyframes, so the interval IS the segment length, and a
+ * viewer sits a few segments behind it. Four seconds keeps the common
+ * WEB-DL and remux cases (1-2s keyframes) on the free path and sends the
+ * long-GOP encodes, where copying cannot be delivered smoothly at any
+ * latency, to the encoder. An unmeasured file answers yes, so a probe
+ * that could not run never silently disables passthrough.
+ */
+export function copyKeyframesFitLive(profile) {
+  const gop = Number(profile?.srcGopSeconds);
+  if (!Number.isFinite(gop) || gop <= 0) return true;
+  const cap = Number(profile?.copyMaxGopSeconds) > 0
+    ? Number(profile.copyMaxGopSeconds) : 4;
+  return gop <= cap;
 }
 
 /**

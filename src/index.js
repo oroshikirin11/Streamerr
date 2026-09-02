@@ -1498,6 +1498,9 @@ app.put('/api/config', (req, res) => {
   if (patch.encoder?.hdrOutput !== undefined) {
     patch.encoder.hdrOutput = Boolean(patch.encoder.hdrOutput);
   }
+  if (patch.encoder?.copyMaxGopSeconds !== undefined) {
+    patch.encoder.copyMaxGopSeconds = clamp(patch.encoder.copyMaxGopSeconds, 1, 30, 4);
+  }
   if (patch.encoder?.copyLimitKbps !== undefined) {
     patch.encoder.copyLimitKbps = clamp(patch.encoder.copyLimitKbps, 1000, 200000, 30000);
   }

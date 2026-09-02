@@ -100,6 +100,15 @@ const DEFAULTS = {
     // Passthrough ships the FILE's bitrate; above this it transcodes so a
     // remux cannot saturate the upload. Absolute on purpose — see pipeline.
     copyLimitKbps: 30000,
+    /**
+     * How sparse a file's keyframes may be and still ship untouched.
+     * Live segments start on keyframes, so a copied stream's segment
+     * length IS this interval and viewers sit several of them behind
+     * live; past this bar the clip goes through the encoder, which puts
+     * one every gopSeconds. Raise it to keep the free path on long-GOP
+     * files and accept the latency.
+     */
+    copyMaxGopSeconds: 4,
     // SVT-AV1 preset override; empty auto-sizes by core count (encoders.js).
     av1Preset: '',
     /**
