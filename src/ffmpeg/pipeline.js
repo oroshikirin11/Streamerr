@@ -4278,13 +4278,25 @@ export class PipelinePlayout extends EventEmitter {
     try {
       const { execFile } = await import('child_process');
       const out = await new Promise((resolve) => {
-        const c = execFile('ffprobe', ['-v', 'error', '-read_intervals', '%+30',
-          '-select_streams', 'v:0', '-skip_frame', 'nokey',
-          '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', srcPath],
-        { maxBuffer: 1 << 20 }, (err, stdout) => resolve(err ? '' : stdout));
+        // PACKET FLAGS, not `-skip_frame nokey`: the latter has to DECODE
+        // to find keyframes, and on a build without that decoder it
+        // returns nothing at all — silently, so the measurement would
+        // read "unknown" and the copy path would never be gated on the
+        // very machines this matters for (observed on the deploy box:
+        // empty output, no error). A packet's keyframe flag needs no
+        // decoder and measured identically here on both fixtures.
+        const c = execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+          '-read_intervals', '%+30', '-show_packets',
+          '-show_entries', 'packet=pts_time,dts_time,flags', '-of', 'json', srcPath],
+        { maxBuffer: 8 << 20 }, (err, stdout) => resolve(err ? '' : stdout));
         setTimeout(() => { try { c.kill(); } catch { /* gone */ } resolve(''); }, 15_000).unref?.();
       });
-      const ks = out.split('\n').map((l) => parseFloat(l)).filter((n) => Number.isFinite(n));
+      let packets = [];
+      try { packets = JSON.parse(out || '{}').packets ?? []; } catch { return null; }
+      const ks = packets
+        .filter((k) => String(k.flags ?? '').includes('K'))
+        .map((k) => parseFloat(k.pts_time ?? k.dts_time))
+        .filter((n) => Number.isFinite(n));
       if (ks.length < 3) return null;
       // SORT first: ffprobe reports frames in DECODE order and a
       // reordered stream's presentation stamps run out of order there,
