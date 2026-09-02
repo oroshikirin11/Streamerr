@@ -72,6 +72,12 @@ export class PairedLibrary {
       loose = ((await this.media.libraries?.(...a)) ?? []).filter((l) => l.loose);
     } catch { /* media browsing unavailable — the catalogue still lists */ }
     this._looseShelves = new Set(loose.map((l) => l.id));
+    // Each catalogue shelf's own directories, for the disk-truth pass.
+    // Item paths cannot stand in for these: a movie item's Path is the
+    // video FILE, so deriving the collection dir from it lands inside
+    // the movie's own folder — where the only "loose file" is the movie
+    // itself, promptly deduplicated into nothing.
+    this._catLocations = new Map(cat.map((l) => [l.id, l.locations ?? []]));
     return [...cat, ...loose];
   }
 
@@ -83,7 +89,7 @@ export class PairedLibrary {
       // mapping — the media half serves its own files directly.
       return { ...page, items: (page?.items ?? []).map((i) => ({ ...i, fromMedia: true })) };
     }
-    return this._diskTruth(await this.catalogue.items(libraryId, ...a), a[0] ?? {});
+    return this._diskTruth(await this.catalogue.items(libraryId, ...a), libraryId, a[0] ?? {});
   }
 
   /**
@@ -97,14 +103,14 @@ export class PairedLibrary {
    * exists to go stale. Costs: existsSync per row on a folder, one cached
    * readdir per directory on a share.
    */
-  async _diskTruth(page, { startIndex = 0, search = '' } = {}) {
+  async _diskTruth(page, libraryId, { startIndex = 0, search = '' } = {}) {
     const px = this.media?.pathExists;
-    if (typeof px !== 'function' || !page?.items?.length) return page;
+    if (typeof px !== 'function' || !page) return page;
     const canon = (s) => String(s).replace(/^\/+/, '');
     const kept = [];
     const catPaths = new Set();
     let dropped = 0;
-    for (const it of page.items) {
+    for (const it of page.items ?? []) {
       let mapped = null;
       try { mapped = it.path ? this.map(it.path) : null; } catch { /* unmapped */ }
       if (mapped) catPaths.add(canon(mapped));
@@ -115,23 +121,23 @@ export class PairedLibrary {
       if (gone) { dropped += 1; continue; }
       kept.push(it);
     }
-    let added = [];
-    const total = page.total ?? page.items.length;
-    const lastPage = startIndex + page.items.length >= total;
-    const sample = kept.find((it) => it.path);
-    if (lastPage && sample && typeof this.media.looseItemsIn === 'function') {
-      try {
-        // The RAW mapped path keeps its shape (absolute for a folder,
-        // leading-slash-relative for a share) — canon() is only for
-        // comparing the two halves' spellings.
-        const m = this.map(sample.path);
-        const dir = m.slice(0, Math.max(0, m.lastIndexOf('/')));
-        const q = String(search ?? '').toLowerCase();
-        added = (await this.media.looseItemsIn(dir || '/'))
-          .filter((r) => !catPaths.has(canon(r.path)))
-          .filter((r) => !q || r.title.toLowerCase().includes(q))
-          .map((r) => ({ ...r, fromMedia: true }));
-      } catch { /* media unavailable — the catalogue's listing stands */ }
+    const added = [];
+    const total = page.total ?? page.items?.length ?? 0;
+    const lastPage = startIndex + (page.items?.length ?? 0) >= total;
+    // The shelf's own directories, mapped to the media side — works even
+    // for an EMPTY catalogue shelf, where there is no row to derive from.
+    const locs = this._catLocations?.get(libraryId) ?? [];
+    if (lastPage && locs.length && typeof this.media.looseItemsIn === 'function') {
+      const q = String(search ?? '').toLowerCase();
+      for (const loc of locs) {
+        try {
+          const dir = this.map(loc);
+          added.push(...(await this.media.looseItemsIn(dir))
+            .filter((r) => !catPaths.has(canon(r.path)))
+            .filter((r) => !q || r.title.toLowerCase().includes(q))
+            .map((r) => ({ ...r, fromMedia: true })));
+        } catch { /* this location unmapped or unreadable — the rest stand */ }
+      }
     }
     return { ...page, total: total - dropped + added.length, items: [...kept, ...added] };
   }

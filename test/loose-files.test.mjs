@@ -121,13 +121,18 @@ console.log('\npaired union');
 const { PairedLibrary } = await import('../src/library/paired.js');
 const catalogue = {
   configured: true,
-  libraries: async () => [{ id: 'jf-movies', name: 'Movies' }, { id: 'jf-shows', name: 'Shows' }],
-  // Paths as the catalogue reports them (identity rules here): one row
-  // whose folder exists, one whose file was deleted from the disk.
+  // Locations are the shelves' own dirs — the disk-truth pass appends
+  // loose files from THERE, never from item paths: a movie item's Path
+  // is the video FILE (exactly as real Jellyfin reports it below), and
+  // deriving the dir from it found only the movie in its own folder.
+  libraries: async () => [
+    { id: 'jf-movies', name: 'Movies', locations: [join(media, 'movies')] },
+    { id: 'jf-shows', name: 'Shows', locations: [join(media, 'tv')] },
+  ],
   items: async (libId) => (libId === 'jf-movies'
     ? { total: 2,
       items: [
-        { id: 'jf-1', title: 'Catalogue Film', path: join(media, 'movies', 'Film X (2018)') },
+        { id: 'jf-1', title: 'Catalogue Film', path: join(media, 'movies', 'Film X (2018)', 'film.mkv') },
         { id: 'jf-2', title: 'Deleted Film', path: join(media, 'movies', 'Gone (2001)', 'gone.mkv') },
       ] }
     : { total: 0, items: [] }),
@@ -160,7 +165,7 @@ check('deleted catalogue rows are hidden by disk truth',
 check('unindexed loose files join the catalogue shelf, tagged',
   pMovies.items.filter((i) => i.fromMedia).map((i) => i.title), ['Bare Film (2017)']);
 check('the surviving catalogue row is untouched',
-  pMovies.items[0], { id: 'jf-1', title: 'Catalogue Film', path: join(media, 'movies', 'Film X (2018)') });
+  pMovies.items[0], { id: 'jf-1', title: 'Catalogue Film', path: join(media, 'movies', 'Film X (2018)', 'film.mkv') });
 check('the total reflects both reconciliations', pMovies.total, 2);
 
 // Without loose files, no extra shelf appears at all.
