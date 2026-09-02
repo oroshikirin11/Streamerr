@@ -499,3 +499,25 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
     needsComplex: false,
   };
 }
+
+/**
+ * Which WORK a queued item belongs to, for scoping a live track switch.
+ *
+ * A choice made during one show is about that show: switching Death Note
+ * to English subtitles must not decide anything for the film queued
+ * after it, which has its own languages, its own releases, and — since
+ * drawing subtitles rules out HDR passthrough — possibly its own picture
+ * quality. Episodes of one series share a work and carry the choice
+ * between them; every film is its own work, so one film never speaks for
+ * the next.
+ *
+ * The series NAME is the key, not an id, because the same show can be
+ * queued from different sources in one broadcast. A film has no series,
+ * so it falls back to its own item id, which no other item shares.
+ */
+export function workKeyOf(item) {
+  const series = String(item?.series ?? '').trim();
+  if (series) return `series:${series.toLowerCase()}`;
+  const id = String(item?.id ?? '').trim();
+  return id ? `item:${id}` : '';
+}

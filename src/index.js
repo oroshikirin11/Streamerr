@@ -40,7 +40,7 @@ import { StillSweeper } from './library/stillsweep.js';
 import { TmdbSweeper } from './library/tmdbsweep.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
-import { probeTracks, listSubtitles, selectTracks } from './ffmpeg/tracks.js';
+import { probeTracks, listSubtitles, selectTracks, workKeyOf } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
 import { makeLibrary, JellyfinLibrary, currentTmdbMeta } from './library/index.js';
 import { deriveMapping, describeMatch } from './library/match.js';
@@ -320,9 +320,20 @@ function tunedFields(p) {
   };
 }
 
-/** Track preferences for one clip, honouring any live switch. */
-function trackPrefs() {
+/**
+ * Track preferences for one clip, honouring any live switch made for the
+ * SAME work.
+ *
+ * A switch belongs to what was playing when it was made. Carrying it
+ * further turned "give Death Note English subtitles" into a decision
+ * about the film queued behind it — which had its own languages, and
+ * which lost HDR entirely, because a clip with subtitles to draw cannot
+ * take the passthrough path. Episodes of one series share a work and
+ * keep the choice between them; each film is its own.
+ */
+function trackPrefs(item = null) {
   const prefs = { ...(config.tracks ?? {}) };
+  if (!trackIntent.work || trackIntent.work !== workKeyOf(item)) return prefs;
   if (trackIntent.audioLanguage) {
     prefs.audioLanguages = [trackIntent.audioLanguage, ...(prefs.audioLanguages ?? [])];
   }
@@ -338,7 +349,7 @@ function trackPrefs() {
 async function selectionFor(item, profile = null) {
   const tracks = await probeTracks(item.srcPath);
   const subs = await listSubtitles(item.srcPath, tracks);
-  const selection = selectTracks(tracks, subs, trackPrefs());
+  const selection = selectTracks(tracks, subs, trackPrefs(item));
   selection.video = tracks.video[0] ?? null;
   if (profile) {
     await tuneProfile(profile, selection, item.srcPath);
@@ -351,9 +362,12 @@ async function selectionFor(item, profile = null) {
 }
 
 /** Remember a live switch as language + mode, for the clips that follow. */
-function rememberIntent(selection, subtitleMode) {
+function rememberIntent(selection, subtitleMode, item = null) {
   const sub = selection.subtitle ?? null;
   trackIntent = {
+    // What this choice is ABOUT. Everything below applies only while the
+    // queue stays inside it.
+    work: workKeyOf(item),
     audioLanguage: selection.audio?.language ?? null,
     subtitleLanguage: sub?.language ?? null,
     subtitleMode: subtitleMode ?? trackIntent.subtitleMode,
@@ -2518,7 +2532,8 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
 
   // Carry the CHOICE, not the index, into the rest of the queue.
   rememberIntent(selection,
-    req.body?.subtitleMode ?? (req.body?.subtitleKey == null ? 'off' : undefined));
+    req.body?.subtitleMode ?? (req.body?.subtitleKey == null ? 'off' : undefined),
+    playing);
 
   /**
    * Re-tune the profile against the NEW selection before the respawn.
