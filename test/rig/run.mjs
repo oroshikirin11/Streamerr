@@ -13,7 +13,7 @@
 //                 which is the N100 condition; most splice faults only show
 //                 with it OFF)
 //   THINBUF=s     shrink the cushion   SUBS=1 start with subtitles on
-//   CENSOR=1      one censor box on the picture
+//   CENSOR=1      one censor box on the picture   TITLE=1 a '{name} #{count}' caption
 //   ALLLOG=1      every engine log line, untruncated
 import { createServer } from 'net';
 import { createWriteStream, mkdirSync } from 'fs';
@@ -68,9 +68,16 @@ const profile = {
   gopSeconds: 2, overlayPipe: false,
   // CENSOR=1 puts one censor box mid-frame: a drawn thing with no canvas,
   // so passthrough must refuse and the transcode graphs must carry it.
-  overlay: process.env.CENSOR
-    ? [{ id: 'c1', type: 'censor', x: 0.5, y: 0.5, w: 0.3, h: 0.25, strength: 5, enabled: true }]
-    : [],
+  overlay: [
+    ...(process.env.CENSOR
+      ? [{ id: 'c1', type: 'censor', x: 0.5, y: 0.5, w: 0.3, h: 0.25, strength: 5, enabled: true }]
+      : []),
+    // TITLE=1: a caption naming the clip and its number, filled per clip.
+    ...(process.env.TITLE
+      ? [{ id: 't1', type: 'text', text: '{name} #{count}', x: 0.5, y: 0.1, size: 0.06,
+        colour: '#ffffff', outline: true, enabled: true }]
+      : []),
+  ],
   parallelChunks: 1, chunkSeconds: 20,
 };
 

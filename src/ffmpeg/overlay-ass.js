@@ -63,6 +63,31 @@ function windowFor(item, duration) {
  * @returns {string|null} an ASS script, or null if nothing is visible
  */
 /**
+ * Dynamic captions. A text may carry placeholders, filled per clip when the
+ * script is written, so a caption follows every transition and skip without
+ * the operator touching it:
+ *   {name}    what is on — "Series — S1E4 — title", or the film's title
+ *   {series}  the series alone (empty for a film)
+ *   {title}   the episode or film title
+ *   {count}   the clip's number in this broadcast, from 1
+ * Filled BEFORE overlayAss strips braces, so a title that itself contains
+ * braces cannot smuggle an override tag into the script.
+ */
+export const OVERLAY_FIELDS = /\{(name|series|title|count)\}/g;
+export function fillOverlayText(items, { item = null, count = null } = {}) {
+  const series = String(item?.series ?? '');
+  const title = String(item?.title ?? '');
+  const vals = {
+    series, title, count: count == null ? '' : String(count),
+    name: series && title ? `${series} — ${title}` : (series || title),
+  };
+  return (items ?? []).map((i) => (
+    i?.type === 'text' && typeof i.text === 'string' && OVERLAY_FIELDS.test(i.text)
+      ? { ...i, text: i.text.replace(OVERLAY_FIELDS, (_, k) => vals[k]) }
+      : i));
+}
+
+/**
  * A bouncing caption, as a run of \move legs.
  *
  * The picture path gets its bounce from an ffmpeg expression evaluated per

@@ -41,7 +41,7 @@ import { AAC_FRAME, BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './enco
 import { buildSubtitleFilter, escapeFilterPath, workKeyOf } from './tracks.js';
 import { censorBoxes, censorStage } from './censor.js';
 import { analyseAssBand, bandScript } from './subband.js';
-import { overlayAss } from './overlay-ass.js';
+import { overlayAss, fillOverlayText } from './overlay-ass.js';
 import {
   imageOverlayChain, vaapiImageOverlayChain, canvasImageChain,
   splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
@@ -858,6 +858,8 @@ export class PipelinePlayout extends EventEmitter {
 
     this.queue = [...items];
     this._stopping = false;
+    this._clipNos = new WeakMap();
+    this._clipCount = 0;
     clearTimeout(this._audioClose?.timer);
     this._audioClose = null;
     this._genShift = null;
@@ -1222,6 +1224,9 @@ export class PipelinePlayout extends EventEmitter {
       playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: this.queue.map((q, i) => ({ ...q, at: sched[i] ?? null })),
       position: air.position,
+      // The on-air clip's number in this broadcast (see _play), for the
+      // panel's preview of a {count} caption.
+      clipNo: air.item ? (this._clipNos?.get(air.item) ?? null) : null,
       // Encoded-but-unaired content in seconds: the run-ahead cushion the
       // player timeline shades ahead of the playhead. Zero on the
       // streaming path, where nothing encodes ahead.
@@ -3887,7 +3892,9 @@ export class PipelinePlayout extends EventEmitter {
    *   still opening it.
    */
   _overlayFile(item, offset, tag = '') {
-    const items = this.profile?.overlay ?? [];
+    // Per clip: captions may name what is on, and its number.
+    const items = fillOverlayText(this.profile?.overlay ?? [],
+      { item, count: this._clipNos?.get(item) ?? null });
     if (!items.length || !this.cacheDir) return null;
     try {
       const ass = overlayAss(items, {
@@ -4042,6 +4049,13 @@ export class PipelinePlayout extends EventEmitter {
     // re-derive its remaining length — it counts wall-clock time, not media.
     if (item?.countdown) {
       return this._playCountdown(item.until, { heading: item.heading });
+    }
+    // Clip numbering for the {count} caption: one number per queue entry,
+    // given the first time it plays, so seeks and respawns keep it. Reset
+    // with the broadcast (start()).
+    this._clipNos ??= new WeakMap();
+    if (item && !this._clipNos.has(item)) {
+      this._clipNos.set(item, (this._clipCount = (this._clipCount ?? 0) + 1));
     }
     // A playhead past the end of the clip is never a real request: seeking
     // there yields a clip a few seconds long that ends immediately and

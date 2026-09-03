@@ -832,6 +832,8 @@ function streamStatus() {
     playing: s.playing
       ? {
         title: s.playing.title,
+        series: s.playing.series ?? null,
+        clipNo: s.clipNo ?? null,
         duration: s.playing.duration,
         image: s.playing.image ?? null,
         ...(s.playing.countdown ? { countdown: true } : {}),

@@ -160,10 +160,46 @@
    */
   let onAir = $state(false);
   let closeStatus = null;
+  // What is on, for captions that name it. Off air the samples stand in.
+  let playing = $state(null);
+  const FIELDS = /\{(name|series|title|count)\}/g;
+  const fieldValues = () => {
+    if (!playing) return { name: 'Media title', series: 'Series', title: 'Title', count: '1' };
+    const series = playing.series ?? '';
+    const title = playing.title ?? '';
+    return {
+      series, title, count: String(playing.clipNo ?? ''),
+      name: series && title ? `${series} — ${title}` : (series || title),
+    };
+  };
+  /** A caption as the encoder will draw it now. */
+  const shown = (item) => {
+    const v = fieldValues();
+    return String(item.text ?? '').replace(FIELDS, (_, k) => v[k]);
+  };
+  const MODES = { '{name}': 'title', '{count}': 'count' };
+  const modeOf = (item) => MODES[String(item.text ?? '').trim()] ?? 'text';
+  const setMode = (item, mode) => patch(item.id, {
+    text: mode === 'title' ? '{name}' : mode === 'count' ? '{count}'
+      : (modeOf(item) === 'text' ? item.text : 'New text'),
+  });
+  /** How an item is named in the list. */
+  const listName = (i) => (i.type === 'image' ? (i.file || '(no picture)')
+    : i.type === 'censor' ? 'Censor box'
+      : modeOf(i) === 'title' ? 'Media title'
+        : modeOf(i) === 'count' ? 'Clip counter'
+          : (i.text.slice(0, 24) || '(empty)'));
+  const anyOn = $derived(items.some((i) => i.enabled !== false));
+  function toggleAll() {
+    const on = !anyOn;
+    items = items.map((i) => ({ ...i, enabled: on }));
+    dirty = true;
+  }
 
   function watchBroadcast() {
     closeStatus = connectStatus((msg) => {
       if (msg.type !== 'stream') return;
+      playing = msg.payload?.playing && !msg.payload.playing.countdown ? msg.payload.playing : null;
       const live = msg.payload?.status === 'running' || msg.payload?.status === 'preparing';
       if (live === onAir) return;
       onAir = live;
@@ -847,7 +883,7 @@
                      the template's own newline and indentation as real space,
                      which widened the box and pushed the glyphs off centre
                      from where the encoder puts them. -->
-                <span class="txt" class:outline={item.outline !== false}>{item.text}</span>
+                <span class="txt" class:outline={item.outline !== false}>{shown(item)}</span>
               {/if}
               {#if selected === item.id}
                 {#if item.type !== 'censor'}
@@ -914,9 +950,23 @@
             <input type="range" min="1" max="10" step="1" value={sel.strength ?? 5}
                    oninput={(e) => patch(sel.id, { strength: +e.currentTarget.value })} />
           {:else}
+            <!-- A caption can name what is on. It stays text underneath —
+                 {name} and {count} are filled per clip by the encoder — so
+                 the words around them are the operator's to add. -->
+            <label>Shows</label>
+            <select value={modeOf(sel)} onchange={(e) => setMode(sel, e.currentTarget.value)}>
+              <option value="text">What I type</option>
+              <option value="title">Media title</option>
+              <option value="count">Clip counter</option>
+            </select>
             <label>Text</label>
             <textarea rows="2" value={sel.text}
                       oninput={(e) => patch(sel.id, { text: e.currentTarget.value })}></textarea>
+            <p class="muted small">
+              {'{name}'} is the media title, {'{series}'} and {'{title}'} its
+              parts, {'{count}'} the clip number — filled on every clip
+              change and skip, and they mix with your own words.
+            </p>
           {/if}
 
           {#if sel.type !== 'censor'}
@@ -1010,17 +1060,21 @@
     <div class="side right">
       {#if items.length}
         <div class="card">
-          <h3>On screen</h3>
+          <div class="hdr">
+            <h3>On screen</h3>
+            <!-- One switch for the lot: off if any is on, on otherwise. -->
+            <button class="tog" role="switch" aria-checked={anyOn}
+                    title={anyOn ? 'Hide all overlays' : 'Show all overlays'}
+                    onclick={toggleAll}>
+              <span class="knob"></span>
+            </button>
+          </div>
           <ul class="list">
             {#each items as i (i.id)}
               <li class:on={selected === i.id} class:off={i.enabled === false}>
                 <button class="pick" onclick={() => (selected = i.id)}>
                   <span class="dot" style={`background:${i.type === 'text' ? i.colour : '#7b8794'}`}></span>
-                  <span class="nm">
-                    {i.type === 'image' ? (i.file || '(no picture)')
-                      : i.type === 'censor' ? 'Censor box'
-                        : (i.text.slice(0, 24) || '(empty)')}
-                  </span>
+                  <span class="nm">{listName(i)}</span>
                 </button>
                 <!-- A switch, not a delete. Turning something off to see the
                      frame without it is the common move; losing the item in
@@ -1194,6 +1248,8 @@
      picture overlay unclickable — no grab cursor, no drag, while text
      worked fine. */
   .item.isimg { font-size: 0; line-height: 0; padding: 0; }
+  .hdr { display: flex; align-items: center; justify-content: space-between; }
+  .hdr h3 { margin-bottom: 0; }
   /* The stand-in for the encoder's blur. Sized inline; the faint fill and
      the dashed edge exist so an empty box is still visible over a picture
      the blur barely changes (flat colour, the black of the bars). */
