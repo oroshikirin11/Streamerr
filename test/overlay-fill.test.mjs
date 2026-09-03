@@ -10,6 +10,10 @@ test('placeholders fill from the clip and its number', () => {
   assert.equal(a.text, 'Now: Mr. Robot — S1E1 — hellofriend · Mr. Robot / S1E1 — hellofriend · #3');
   const [f] = fillOverlayText([cap('{name}|{series}|{count}')], { item: { title: 'A Film' } });
   assert.equal(f.text, 'A Film||');
+  // The queue's own display title already leads with the series.
+  const [q] = fillOverlayText([cap('{name} / {title}')],
+    { item: { series: 'Death Note', title: 'Death Note — S1E1' } });
+  assert.equal(q.text, 'Death Note — S1E1 / S1E1');
 });
 
 test('plain captions and other item types are returned as they are', () => {

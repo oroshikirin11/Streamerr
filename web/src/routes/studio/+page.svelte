@@ -166,10 +166,12 @@
   const fieldValues = () => {
     if (!playing) return { name: 'Media title', series: 'Series', title: 'Title', count: '1' };
     const series = playing.series ?? '';
-    const title = playing.title ?? '';
+    const full = playing.title ?? '';
+    const led = series && full.startsWith(`${series} — `);
     return {
-      series, title, count: String(playing.clipNo ?? ''),
-      name: series && title ? `${series} — ${title}` : (series || title),
+      series, count: String(playing.clipNo ?? ''),
+      title: led ? full.slice(series.length + 3) : full,
+      name: led || !series || !full ? (full || series) : `${series} — ${full}`,
     };
   };
   /** A caption as the encoder will draw it now. */

@@ -76,10 +76,16 @@ function windowFor(item, duration) {
 export const OVERLAY_FIELDS = /\{(name|series|title|count)\}/g;
 export function fillOverlayText(items, { item = null, count = null } = {}) {
   const series = String(item?.series ?? '');
-  const title = String(item?.title ?? '');
+  const full = String(item?.title ?? '');
+  // The queue's display title already leads with the series ("Show —
+  // S1E2"); a title that does not is prefixed here. {title} is the part
+  // that is not the series either way.
+  const led = series && full.startsWith(`${series} — `);
   const vals = {
-    series, title, count: count == null ? '' : String(count),
-    name: series && title ? `${series} — ${title}` : (series || title),
+    series,
+    title: led ? full.slice(series.length + 3) : full,
+    name: led || !series || !full ? (full || series) : `${series} — ${full}`,
+    count: count == null ? '' : String(count),
   };
   return (items ?? []).map((i) => (
     i?.type === 'text' && typeof i.text === 'string' && OVERLAY_FIELDS.test(i.text)
