@@ -786,7 +786,11 @@
                onloadedmetadata={onMeta} onresize={onMeta}
                muted playsinline disablepictureinpicture></video>
         <div class="grid" aria-hidden="true"></div>
-        {#each items as item, idx (item.id)}
+        <!-- Switched-off items are gone from the frame, not dimmed: the
+             preview shows what the broadcast shows. They stay in the list
+             on the right, where the switch lives. The index counts only
+             what is on, matching the encoder, which never sees the rest. -->
+        {#each items.filter((i) => i.enabled !== false) as item, idx (item.id)}
           <!-- A picture gets no font-size: it is set inline for text, and an
                inline value would beat the class that collapses the line box.
                Left in, the box grew a whole line taller than the image and

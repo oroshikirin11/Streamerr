@@ -1577,7 +1577,7 @@ app.put('/api/config', (req, res) => {
         .slice(0, 32)
         .map((it, i) => ({
           id: String(it?.id ?? `ov${i}`).slice(0, 64),
-          type: it?.type === 'image' ? 'image' : 'text',
+          type: it?.type === 'image' ? 'image' : it?.type === 'censor' ? 'censor' : 'text',
           text: String(it?.text ?? '').slice(0, 300),
           // Stripped to a bare filename. This names a file that gets
           // composited into a public broadcast, so anything that could climb
@@ -1597,6 +1597,15 @@ app.put('/api/config', (req, res) => {
           font: String(it?.font ?? '').slice(0, 64),
           outline: it?.outline !== false,
           enabled: it?.enabled !== false,
+          // A censor box is sized on both axes and carries a blur strength.
+          // The encoder clamps these again, but they are pinned here for
+          // the same reason as the rest — and without them the box came
+          // back from disk as an empty caption.
+          ...(it?.type === 'censor' ? {
+            w: num(it?.w, 0.01, 1, 0.24),
+            h: num(it?.h, 0.01, 1, 0.18),
+            strength: num(it?.strength, 1, 10, 5),
+          } : {}),
         })),
     };
   }
