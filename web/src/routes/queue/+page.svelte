@@ -1126,8 +1126,10 @@
   .mh .find { flex: 1; min-width: 160px; }
   .mh select { padding: 5px 8px; font-size: 13px; }
   .results, .eps { list-style: none; padding: 0; margin: 0; }
+  .results { margin-top: 6px; }
   .results .line { display: flex; align-items: center; gap: 10px; }
-  .eps li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+  .eps { margin-top: 14px; border-top: 1px solid var(--border); }
+  .eps li { display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
   .eps li.sel { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .eps label { flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; }
   .eps input { width: auto; }
