@@ -351,5 +351,67 @@ console.log('\nthe frontier holds still between the splice and the spawn');
   check('...rather than freezing the frontier forever', p._tlLocked, false);
 }
 
+console.log('\nnothing reaches the wire past a decided splice');
+
+{
+  /**
+   * `this.source` is not replaced until the successor spawns, and a skip
+   * trims the bank, awaits track resolution, and only then gets there. The
+   * outgoing source appended through that whole window — bytes past the
+   * splice point, in the old process's packet phase. On air: the publisher
+   * had read to 254.344s when the successor arrived at 252.175s.
+   */
+  const src = { id: 'the-source' };
+  const p = Object.create(PipelinePlayout.prototype);
+  Object.assign(p, {
+    source: src, _fmt: 'ts', _bank: [], _bankBytes: 0, _published: 0,
+    position: 0, timeline: 0, current: { item: 'x' }, _srcGen: 1,
+    _bankFull: () => false, _bankDrain: () => {}, emit: () => {},
+  });
+  p._bankPush(src, Buffer.alloc(188, 0x47));
+  check('bytes are banked normally', p._bank.length, 1);
+
+  p._tlLocked = true;                       // a splice has just been decided
+  p._bankPush(src, Buffer.alloc(188, 0x47));
+  check('...and refused once a splice has chosen the point', p._bank.length, 1);
+
+  p._tlLocked = false;                      // the successor has spawned
+  p._bankPush(src, Buffer.alloc(188, 0x47));
+  check('...then accepted again for the new source', p._bank.length, 2);
+}
+
+console.log('\na fresh source never starts behind the wire');
+
+{
+  // A hold card publishes while the clip replacing it is prepared, and the
+  // clip used to spawn on the same stale number: card at 357.364, clip at
+  // 357.364, publisher reporting the clip 0.459s behind — which is how long
+  // the card had been on air.
+  const p = Object.create(PipelinePlayout.prototype);
+  Object.assign(p, {
+    _fmt: 'ts', timeline: 357.364, _sentVideoPts: null, _bank: [],
+    _published: 0, selection: { video: { frameRate: '24000/1001' } },
+  });
+  near('with nothing published, the frontier stands', p._spawnTimeline(), 357.364);
+
+  // The card's output is in the bank now.
+  p._bankLastPictureTime = () => 357.823;
+  near('a card that aired pushes the successor past it',
+    p._spawnTimeline(), 357.823 + 1 / 23.976, 1e-3);
+
+  // And what actually reached the wire outranks both.
+  p._bankLastPictureTime = () => null;
+  p._sentVideoPts = 358.5;
+  near('what is already sent outranks a stale frontier',
+    p._spawnTimeline(), 358.5 + 1 / 23.976, 1e-3);
+
+  // The ordinary case must be untouched: a fresh splice already set the
+  // frontier to the bank's end plus a frame, so the floor changes nothing.
+  p._sentVideoPts = null;
+  p.timeline = 100.042;
+  p._bankLastPictureTime = () => 100.0;
+  near('a normal splice is unaffected', p._spawnTimeline(), 100.042, 1e-3);
+}
+
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');

@@ -1920,6 +1920,23 @@ export class PipelinePlayout extends EventEmitter {
   _bankPush(src, chunk) {
     if (this.source !== src) return;   // superseded mid-flight
     /**
+     * Sealed between the splice and the spawn that follows it.
+     *
+     * `this.source` is not replaced until _spawnSource runs, and a skip
+     * trims the bank, then AWAITS track resolution, and only then gets
+     * there. Through that whole window the outgoing source kept appending
+     * behind the trim — bytes that reach the wire past the splice point and
+     * from the old process's packet phase. Measured on air: the publisher
+     * had read to 254.344s when the successor arrived at 252.175s, a 2.169s
+     * backward jump with no hold card involved, plus a torn junction the
+     * publisher reported as "Packet corrupt (stream = 0), dropping it".
+     *
+     * Dropping them is right in every case that splices: a skip is leaving
+     * this clip, and an apply re-renders from `resume`, so those bytes
+     * would be duplicated either way.
+     */
+    if (this._tlLocked) return;
+    /**
      * NUT head processing, once per source. The 25-byte fileid magic is
      * only legal at byte 0 of a file, so it is stripped before banking —
      * the demuxer keys on the main-header STARTCODE, measured working
@@ -2703,6 +2720,28 @@ export class PipelinePlayout extends EventEmitter {
     return tsGridStart(Buffer.concat(this._bank.map((c) => c.data)));
   }
 
+  /**
+   * Where a fresh source must start: never below what has already gone out.
+   *
+   * `this.timeline` is the splice point when one was just computed, but it
+   * is only as fresh as the last progress block otherwise — and a hold card
+   * publishes while the clip that replaces it is still being prepared. Both
+   * were spawned on the same number: card at 357.364s, clip at 357.364s,
+   * and the publisher reported the clip landing 0.459s behind — almost
+   * exactly how long the card had been on air. The bank and the wire know
+   * better than the progress feed, so take whichever is furthest.
+   */
+  _spawnTimeline() {
+    let tl = this.timeline ?? 0;
+    const frame = this._frameSeconds();
+    const bank = this._bankLastPictureTime();
+    if (bank != null) tl = Math.max(tl, bank + frame);
+    if (this._fmt === 'ts' && this._sentVideoPts != null) {
+      tl = Math.max(tl, this._sentVideoPts + frame);
+    }
+    return tl;
+  }
+
   /** One output frame, in seconds, from the selected video's rate. */
   _frameSeconds() {
     const m = /^(\d+)\/(\d+)$/.exec(this.selection?.video?.frameRate ?? '');
@@ -2964,7 +3003,7 @@ export class PipelinePlayout extends EventEmitter {
     this._spawnSource(buildCountdownArgs({
       profile: this.profile,
       selection: this.selection,
-      tsOffset: this.timeline,
+      tsOffset: this._spawnTimeline(),
       statsPeriodMs: this.statsPeriodMs,
       seconds,
       heading,
@@ -3753,7 +3792,7 @@ export class PipelinePlayout extends EventEmitter {
       ),
       profile: this.profile,
       selection: this.selection,
-      tsOffset: this.timeline,
+      tsOffset: this._spawnTimeline(),
       statsPeriodMs: this.statsPeriodMs,
       extractedPath: cached?.path ?? null,
       fontsDir: cached?.fontsDir ?? null,
@@ -4389,7 +4428,7 @@ export class PipelinePlayout extends EventEmitter {
       this._spawnSource(buildHoldArgs({
         profile: this.profile,
         selection: this.selection,
-        tsOffset: this.timeline,
+        tsOffset: this._spawnTimeline(),
         statsPeriodMs: this.statsPeriodMs,
         label: 'Loading',
       }), { kind: 'hold' });
@@ -4788,7 +4827,7 @@ export class PipelinePlayout extends EventEmitter {
     this._spawnSource(buildHoldArgs({
       profile: this.profile,
       selection: this.selection,
-      tsOffset: this.timeline,
+      tsOffset: this._spawnTimeline(),
       statsPeriodMs: this.statsPeriodMs,
       label,
     }), { kind: 'hold' });
