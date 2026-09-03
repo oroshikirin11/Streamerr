@@ -232,5 +232,44 @@ console.log('\nan implausible read can no longer drag the splice backwards');
   near('a drop the trim explains is still applied', p.timeline, 147.0, 0.05);
 }
 
+console.log('\nevery reader survives a desynced byte counter');
+
+{
+  /**
+   * The chain that failed on air: `_published` stops matching the bank head
+   * after a head trim, so EVERY reader derived from it goes blind at once —
+   * the cushion scan, the chunk stamps it is checked against, and the sent
+   * frontier that is supposed to be the last line of defence. All three
+   * returned nothing, nothing warned, and five consecutive skips spliced
+   * 1.46-1.92s behind bytes already on the wire.
+   *
+   * So: hand each reader a bank whose head is off the lattice while the
+   * counter still says zero, and require the true answer anyway.
+   */
+  const stream = Buffer.concat(
+    [3.0, 3.0417, 3.0834, 3.125, 3.1667].map((t) => packet(0x100, sec(t))),
+  );
+  for (const skew of [0, 1, 53, 94, 187]) {
+    const p = bankOf([stream.subarray(skew)], 0);
+    near(`head off the lattice by ${skew}B: the cushion still reads 3.1667`,
+      p._bankTailVideoPts(), 3.1667);
+    near(`...and the picture reader agrees`, p._bankLastPictureTime(), 3.1667);
+  }
+}
+
+{
+  // The sent frontier is read the same way, from a chunk that may itself
+  // begin mid-packet because pipe reads split wherever they like.
+  const stream = Buffer.concat(
+    [7.0, 7.0417, 7.0834].map((t) => packet(0x100, sec(t))),
+  );
+  for (const skew of [0, 17, 111]) {
+    const g = tsGridStart(stream.subarray(skew));
+    check(`a chunk split ${skew}B into a packet still finds its grid`, g >= 0, true);
+    near(`...and reads the right frontier`,
+      lastVideoPtsIn(stream.subarray(skew), g), 7.0834);
+  }
+}
+
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');

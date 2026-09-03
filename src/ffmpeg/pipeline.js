@@ -1947,9 +1947,13 @@ export class PipelinePlayout extends EventEmitter {
      * depth cap never engaged and a cushion "cut to 3s" left 54s on air
      * ahead of the splice. The bytes cannot lie about their own time.
      */
-    const stampAt = (this._published ?? 0) + (this._bankBytes ?? 0);
+    // Grid FOUND, not computed. Deriving it from `_published` breaks the
+    // moment a head trim drops bytes without adjusting that counter, and a
+    // stamp that falls back to `this.timeline` is the progress frontier,
+    // which lags the bytes -- so the splice guard was comparing a bad scan
+    // against an equally bad reference and passing it.
     const wireTl = this._fmt === 'ts'
-      ? lastVideoPtsIn(chunk, (188 - (stampAt % 188)) % 188)
+      ? (() => { const g = tsGridStart(chunk); return g < 0 ? null : lastVideoPtsIn(chunk, g); })()
       : null;
     this._bank.push({
       data: chunk, pos: this.position, tl: wireTl ?? this.timeline,
@@ -2052,11 +2056,20 @@ export class PipelinePlayout extends EventEmitter {
       }
       let ok = false;
       try { ok = w.write(c.data); } catch { break; /* publisher died mid-write */ }
-      // The wire's own record of how far the published stream reached.
-      // `_published` still holds this chunk's start offset, which is what
-      // aligns the 188-byte grid inside an arbitrary pipe-read split.
+      /**
+       * The wire's own record of how far the published stream reached.
+       *
+       * The grid is FOUND in the chunk, not derived from `_published`. That
+       * arithmetic goes wrong after a head trim, the scan then returns null,
+       * and this frontier simply stops advancing -- which silently turns the
+       * sentFloor clamp below into a no-op. On air that let five consecutive
+       * skips splice 1.46-1.92s BEHIND bytes the publisher already held,
+       * with no warning, because every check that should have caught it was
+       * reading through the same broken alignment.
+       */
       if (this._fmt === 'ts') {
-        const sent = lastVideoPtsIn(c.data, (188 - ((this._published ?? 0) % 188)) % 188);
+        const g = tsGridStart(c.data);
+        const sent = g < 0 ? null : lastVideoPtsIn(c.data, g);
         // Monotonic by construction: "the furthest the publisher has been
         // fed" cannot shrink within a session, whatever a container says.
         if (sent != null && !(sent < (this._sentVideoPts ?? -Infinity))) {
@@ -2361,9 +2374,14 @@ export class PipelinePlayout extends EventEmitter {
     this._bankTrimToPacket();
     if (!this._bank?.length) return 0;
     const whole = Buffer.concat(this._bank.map((c) => c.data));
+    // Start on the REAL lattice. Scanning from byte 0 assumes the bank head
+    // is packet-aligned, which stops being true after a head trim, and the
+    // scan then matches nothing and this trim quietly does nothing at all.
+    const g0 = tsGridStart(whole);
+    if (g0 < 0) return 0;
     let cut = -1;
     let frameCut = -1;
-    for (let o = 0; o + 188 <= whole.length; o += 188) {
+    for (let o = g0; o + 188 <= whole.length; o += 188) {
       if (whole[o] !== 0x47) continue;
       const pusi = (whole[o + 1] & 0x40) !== 0;
       const pid = ((whole[o + 1] & 0x1f) << 8) | whole[o + 2];
@@ -2440,8 +2458,8 @@ export class PipelinePlayout extends EventEmitter {
     const tail = Buffer.concat(tailChunks.map((c) => c.data));
     // The publisher's byte stream sets the grid; the tail begins wherever
     // the kept chunks do.
-    const before = (this._bankBytes ?? 0) - tail.length;
-    const grid = (188 - (((this._published ?? 0) + before) % 188)) % 188;
+    const grid = tsGridStart(tail);
+    if (grid < 0) return 0;                                 // no grid: leave it alone
 
     let pusiAt = -1;
     let declared = 0;
@@ -2680,7 +2698,14 @@ export class PipelinePlayout extends EventEmitter {
       // resend_headers re-emits PAT/PMT ahead of every keyframe, so one
       // is always right there.
       let lastPat = -1;
-      for (let o = 0; o + 188 <= whole.length; o += 188) {
+      // On the FOUND lattice. This trim SLICES at what it finds, so a
+      // wrong grid does not merely miss the keyframe — it cuts mid-packet
+      // and puts genuinely corrupt bytes on the wire, which the publisher
+      // reports as "Packet corrupt (stream = 0), dropping it" right after
+      // a skip. Found on air, once per skip, five skips in a row.
+      const g0 = tsGridStart(whole);
+      if (g0 < 0) return 0;
+      for (let o = g0; o + 188 <= whole.length; o += 188) {
         if (whole[o] !== 0x47) continue;
         const pusi = (whole[o + 1] & 0x40) !== 0;
         const pid = ((whole[o + 1] & 0x1f) << 8) | whole[o + 2];
