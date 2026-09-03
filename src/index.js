@@ -933,10 +933,17 @@ function wirePreview(e) {
    * memory advances. Ad-hoc plays are settled too, for the history.
    */
   const track = { key: null, item: null, max: 0, dur: null };
-  const finish = () => {
+  const finish = (reason = 'left') => {
     if (!track.item) return;
     const it = track.item;
     const ratio = track.dur > 0 ? track.max / track.dur : 1;
+    // Stopped under it before it counted as watched: not a skip, just
+    // not played yet.
+    if (reason === 'stopped' && ratio < sched.settings().watchedAt) {
+      sched.release(it.seg ?? null);
+      track.item = null; track.key = null; track.max = 0; track.dur = null;
+      return;
+    }
     sched.settle(it.seg ?? null, {
       id: it.id, title: it.title, series: it.series ?? null, duration: track.dur,
       seconds: track.max, outcome: ratio >= sched.settings().watchedAt ? 'aired' : 'skipped',
@@ -946,6 +953,9 @@ function wirePreview(e) {
   const observe = () => {
     if (engine !== e) return;
     const s = e.snapshot();
+    // A stopped engine reports its last clip at the end: not a sample,
+    // and whatever was on air was stopped under, not played out.
+    if (s.status === 'stopped') { finish('stopped'); return; }
     const p = s.playing;
     if (!p || p.countdown || !p.title) {
       // A break card took the air: the clip before it is done. A pause
@@ -965,7 +975,7 @@ function wirePreview(e) {
   e.on('progress', observe);
   e.on('nowplaying', observe);
   e.on('queue', observe);
-  e.on('ended', () => { finish(); sched.broadcastEnded(); broadcast('schedule', scheduleView()); });
+  e.on('ended', () => { finish('stopped'); sched.broadcastEnded(); broadcast('schedule', scheduleView()); });
 
   e.on('publisher-restart', () => {
     // The receiver's schedule/metadata/artwork live in memory — a

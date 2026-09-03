@@ -486,6 +486,16 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     save();
   }
 
+  /**
+   * The broadcast stopped under an item that had barely started: it goes
+   * back to upcoming, as if it had not played, and history says nothing.
+   * A skip is different — the broadcast went on without it.
+   */
+  function release(seg) {
+    const f = seg?.item ? findItem(seg.item) : null;
+    if (f && f.item.state === 'onair') { f.item.state = 'upcoming'; save(); }
+  }
+
   function broadcastEnded() {
     let changed = false;
     for (const seg of state.tonight.segments) {
@@ -547,7 +557,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     load, append, addItems, reorder, moveItem, moveSegment, removeItem, removeSegment,
     setItem, setSegment, setSegmentStart, clearTonight, saveTonightAs,
     // what happened
-    onAir, settle, broadcastEnded, clearHistory,
+    onAir, settle, release, broadcastEnded, clearHistory,
     // automation + settings
     dueAutoStarts, setSettings,
     onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },

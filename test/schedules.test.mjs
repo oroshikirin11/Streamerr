@@ -195,3 +195,15 @@ test('reordering rows moves only upcoming items among upcoming slots', () => {
   st.moveItem(after[2].key, 1);
   assert.deepEqual(st.tonight().segments[0].items.map((i) => i.id), ['jjk-1', 'jjk-2', 'jjk-3', 'jjk-6', 'jjk-4', 'jjk-5']);
 });
+
+test('a stop under a barely-started item releases it: upcoming again, no history', () => {
+  const st = createScheduleStore({ now });
+  const s = st.create({ name: 'A', items: eps(2) });
+  st.load(s.id);
+  const [e1] = st.upcomingEntries();
+  st.onAir(e1.seg.item);
+  st.release(e1.seg);
+  assert.equal(st.tonight().segments[0].items[0].state, 'upcoming');
+  assert.equal(st.history().length, 0);
+  assert.equal(st.get(s.id).start, 0);
+});
