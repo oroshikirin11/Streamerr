@@ -1212,7 +1212,7 @@
   .brkmode { padding: 1px 8px; font-size: 11.5px; border-radius: 999px; background: transparent; border: 1px solid color-mix(in srgb, currentColor 45%, transparent); color: var(--muted); }
 
   /* rail */
-  .rail .card { padding: 14px 16px; }
+  .rail .card { padding: 14px 16px; min-width: 0; overflow: hidden; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
   .tabs button { border: none; background: transparent; padding: 6px 10px; border-radius: 6px 6px 0 0; color: var(--muted); font-size: 13px; border-bottom: 2px solid transparent; }
   .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
@@ -1229,6 +1229,11 @@
   .progress i { display: block; height: 100%; background: var(--accent); }
   .progress.done i { background: var(--success); }
   .form { display: grid; gap: 8px; font-size: 13px; min-width: 0; }
+  /* Every child stays inside the column: a long title in the items list
+     or a select's longest option must not widen the panel. */
+  .form > * { min-width: 0; max-width: 100%; }
+  .form details { overflow: hidden; }
+  .form summary { cursor: pointer; }
   .form h3 { margin: 0 0 4px; }
   .form label { display: grid; gap: 3px; min-width: 0; }
   .form label.chk { display: flex; align-items: center; gap: 8px; }
@@ -1242,7 +1247,8 @@
   .days button { padding: 3px 0; width: 32px; font-size: 12px; border-radius: 6px; flex: 0 0 auto; }
   .days button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .edititems { list-style: none; padding: 0; margin: 6px 0 0; max-height: 200px; overflow: auto; font-size: 12.5px; }
-  .edititems li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .edititems li { display: flex; align-items: center; gap: 6px; padding: 2px 0; min-width: 0; }
+  .edititems li .qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hh { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .hist { list-style: none; margin: 0; padding: 0; font-size: 13px; }
   .hist li { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
