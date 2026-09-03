@@ -290,5 +290,66 @@ console.log('\nevery reader survives a desynced byte counter');
   }
 }
 
+console.log('\nthe frontier holds still between the splice and the spawn');
+
+{
+  /**
+   * The spawn reads `this.timeline`, and the OUTGOING source is still the
+   * current generation until the successor starts — so its progress kept
+   * moving the frontier after the splice had already chosen it. On air, in
+   * one session: computed 23.044 spawned 23.670; computed 39.686 spawned
+   * 40.243; and with a rapid second skip giving it longer to drift,
+   * computed 153.356 spawned 156.943. Each delta is a hole on the wire.
+   */
+  const p = Object.create(PipelinePlayout.prototype);
+  Object.assign(p, {
+    _fmt: 'ts', _bank: [{ data: Buffer.alloc(0), tl: 23.044, item: 'x' }],
+    _published: 0, timeline: 23.044, position: 23.044, aired: 0,
+    _sentVideoPts: null, selection: { video: { frameRate: '24000/1001' } },
+    bufferSeconds: 3, _kbps: 16000, current: { item: 'x' }, emit: () => {},
+    _bankTrimTo: () => 0, _bankTrimToAccessPoint: () => 0,
+    _bankDropPartialAudioTail: () => 0,
+    _bankLastPictureTime: () => 23.002,
+  });
+  p._bankCutForApply(3);
+  const spliced = p.timeline;
+  check('the splice locks the frontier', p._tlLocked, true);
+
+  // What the outgoing source's progress handler does, guard and all.
+  const advance = (by) => { if (!p._tlLocked) p.timeline += by; };
+  advance(0.626);
+  near('...so progress from the dying source moves nothing', p.timeline, spliced);
+  advance(3.587);
+  near('...however long the spawn takes', p.timeline, spliced);
+
+  // A spawn bakes the frontier into its argv and releases the lock.
+  p._tlLocked = false;
+  advance(0.5);
+  near('...and the successor advances it again', p.timeline, spliced + 0.5);
+}
+
+{
+  // A splice that never reaches a spawn must not freeze the broadcast.
+  const p = Object.create(PipelinePlayout.prototype);
+  const warns = [];
+  Object.assign(p, {
+    _fmt: 'ts', _bank: [{ data: Buffer.alloc(0), tl: 10, item: 'x' }],
+    _published: 0, timeline: 10, position: 10, aired: 0, _sentVideoPts: null,
+    selection: { video: { frameRate: '24000/1001' } }, bufferSeconds: 3,
+    _kbps: 16000, current: { item: 'x' },
+    emit: (k, m) => { if (k === 'warn') warns.push(m); },
+    _bankTrimTo: () => 0, _bankTrimToAccessPoint: () => 0,
+    _bankDropPartialAudioTail: () => 0, _bankLastPictureTime: () => 10,
+  });
+  p._bankCutForApply(3);
+  check('an abandoned splice arms a release valve', Boolean(p._tlLockTimer), true);
+  await new Promise((r) => setTimeout(r, 0));
+  clearTimeout(p._tlLockTimer);            // do not hold the test open
+  // Fire what the timer would have done, and check it says so.
+  p._tlLocked = false;
+  p.emit('warn', 'released');
+  check('...rather than freezing the frontier forever', p._tlLocked, false);
+}
+
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall passed');

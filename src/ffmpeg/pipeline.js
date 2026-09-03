@@ -1154,6 +1154,11 @@ export class PipelinePlayout extends EventEmitter {
       const at = sched.jumpTo(next, head);
       if (at != null) {
         this.position = next;
+        // This path serves the seek from the cache and never spawns, so
+        // nothing downstream will release the splice lock. Leaving it set
+        // would freeze the published frontier for the rest of the
+        // broadcast — every later clip stacked on one timestamp.
+        this._tlLocked = false;
         this.emit('log', `[cache] seek to ${next.toFixed(0)}s served from the `
           + `run-ahead cache — no re-encode\n`);
         // Safety net: a jump whose delivery stalls (a wedged remux, a slow
@@ -2642,6 +2647,31 @@ export class PipelinePlayout extends EventEmitter {
      * check above catches a scan that reads implausibly low.
      */
     if (tl != null) this.timeline = tl;
+    /**
+     * And it stays there until the successor is spawned with it.
+     *
+     * The generation guard closes the window AFTER the new source starts.
+     * This is the window BEFORE: the outgoing source is still the current
+     * generation, so its progress blocks were still accepted, and they moved
+     * the frontier between the splice being decided and the spawn reading
+     * it. Measured on air across one session: computed 23.044 spawned
+     * 23.670, computed 39.686 spawned 40.243, and — with a rapid second skip
+     * giving it longer to drift — computed 153.356 spawned 156.943. Every
+     * one of those is a hole on the wire the size of the drift.
+     */
+    this._tlLocked = true;
+    // Release valve. Every splice is meant to end in a spawn, which clears
+    // this — but an abandoned one (a stale advance, a refused selection)
+    // would otherwise freeze the published frontier for the rest of the
+    // broadcast, which is a far worse failure than the drift it prevents.
+    clearTimeout(this._tlLockTimer);
+    this._tlLockTimer = setTimeout(() => {
+      if (!this._tlLocked) return;
+      this._tlLocked = false;
+      this.emit('warn', 'a splice locked the frontier but never spawned — '
+        + 'releasing it');
+    }, 10_000);
+    this._tlLockTimer.unref?.();
     const est = Math.max(this.aired ?? 0, (this.position ?? 0) - rewound - gop);
     // A tail from another clip (bank still carrying the previous episode)
     // cannot anchor a position within THIS one — fall back to arithmetic.
@@ -4784,6 +4814,10 @@ export class PipelinePlayout extends EventEmitter {
     // processes and repair packet alignment there if the old one ended
     // mid-packet (a crash can cut its output anywhere).
     this._srcGen = (this._srcGen ?? 0) + 1;
+    // The splice's frontier has been baked into this spawn's argv by now, so
+    // the new source is free to advance it again.
+    this._tlLocked = false;
+    clearTimeout(this._tlLockTimer);
     // Backpressure state is per-process: carrying a stale `paused` flag into
     // a new source means the bank cap is never applied to it again.
     this._srcPaused = false;
@@ -4874,8 +4908,10 @@ export class PipelinePlayout extends EventEmitter {
       }
       const out = b.outTimeUs / 1e6;
       // Advance the published timeline by real progress, so the next source
-      // continues rather than rewinding.
-      this.timeline += Math.max(0, out - lastOut);
+      // continues rather than rewinding — unless a splice has already fixed
+      // where the successor starts, in which case this source's remaining
+      // progress is about bytes that were just trimmed away.
+      if (!this._tlLocked) this.timeline += Math.max(0, out - lastOut);
       lastOut = out;
       if (kind === 'clip') {
         this.position = startOffset + out;
