@@ -24,6 +24,8 @@ const configEnv = process.env.STREAMERR_CONFIG || process.env.JELLYSTREAMERR_CON
 const CONFIG_PATH = configEnv
   ? resolve(configEnv)
   : resolve(ROOT, 'config.json');
+/** Where the app keeps its other state files (schedules.json). */
+export const CONFIG_DIR = dirname(CONFIG_PATH);
 
 const DEFAULTS = {
   server: { port: 8099, host: '0.0.0.0' },

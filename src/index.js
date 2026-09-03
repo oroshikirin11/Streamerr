@@ -20,8 +20,9 @@ import { fileURLToPath } from 'url';
 import {
   config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, assertRtmpUrl,
   publishDestinations, publishTargetsRedacted, publishConfig,
-  normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT,
+  normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT, CONFIG_DIR,
 } from './config.js';
+import { createScheduleStore } from './schedules.js';
 import { redactPublish, restorePublishSecrets, targetUrl } from './publish.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
@@ -854,8 +855,10 @@ function streamStatus() {
     targets: publishTargetsRedacted(),
     playing: s.playing
       ? {
+        id: s.playing.id,
         title: s.playing.title,
         series: s.playing.series ?? null,
+        seg: s.playing.seg ?? null,
         clipNo: s.clipNo ?? null,
         duration: s.playing.duration,
         image: s.playing.image ?? null,
@@ -867,6 +870,8 @@ function streamStatus() {
       id: q.id,
       title: q.title,
       series: q.series ?? null,
+      seg: q.seg ?? null,
+      breakBefore: q.breakBefore ?? null,
       duration: q.duration ?? null,
       // Projected air time, and the pin that fixed it (both epoch seconds).
       at: q.at ?? null,
@@ -921,6 +926,47 @@ function wirePreview(e) {
   // RTMP session, so the byte stream restarts at zero. Without resetting
   // the counter here, every later rejoin computes its packet boundary from
   // the previous session's total and starts mid-packet.
+  /**
+   * Schedule bookkeeping. What is on air is watched by its tag; when the
+   * tag changes or the broadcast ends, the previous item is settled as
+   * aired or skipped by how much of it went out, and its schedule's
+   * memory advances. Ad-hoc plays are settled too, for the history.
+   */
+  const track = { key: null, item: null, max: 0, dur: null };
+  const finish = () => {
+    if (!track.item) return;
+    const it = track.item;
+    const ratio = track.dur > 0 ? track.max / track.dur : 1;
+    sched.settle(it.seg ?? null, {
+      id: it.id, title: it.title, series: it.series ?? null, duration: track.dur,
+      seconds: track.max, outcome: ratio >= sched.settings().watchedAt ? 'aired' : 'skipped',
+    });
+    track.item = null; track.key = null; track.max = 0; track.dur = null;
+  };
+  const observe = () => {
+    if (engine !== e) return;
+    const s = e.snapshot();
+    const p = s.playing;
+    if (!p || p.countdown || !p.title) {
+      // A break card took the air: the clip before it is done. A pause
+      // card is not the end of anything — the same clip comes back.
+      if (s.status !== 'paused') finish();
+      return;
+    }
+    const key = p.seg?.item ?? `adhoc:${p.id}:${s.clipNo ?? ''}`;
+    if (key !== track.key) {
+      finish();
+      track.key = key; track.item = p; track.max = 0; track.dur = p.duration ?? null;
+      sched.onAir(p.seg?.item ?? null);
+    }
+    if (s.position > track.max) track.max = s.position;
+    if (p.duration) track.dur = p.duration;
+  };
+  e.on('progress', observe);
+  e.on('nowplaying', observe);
+  e.on('queue', observe);
+  e.on('ended', () => { finish(); sched.broadcastEnded(); });
+
   e.on('publisher-restart', () => {
     // The receiver's schedule/metadata/artwork live in memory — a
     // reconnect is the moment to restate all three.
@@ -2281,7 +2327,8 @@ app.get('/api/library/tracks', wrap(async (req, res) => {
 
 app.get('/api/stream/status', (req, res) => res.json(streamStatus()));
 
-app.post('/api/stream/start', wrap(async (req, res) => {
+app.post('/api/stream/start', (req, res) => startStream(req, res));
+const startStream = wrap(async (req, res) => {
   if (engine) return res.status(409).json({ error: 'Already streaming' });
   // Make sure the previous broadcast has really let go of the connection.
   if (lastEngine) {
@@ -2289,7 +2336,13 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     lastEngine = null;
   }
 
-  const ids = req.body?.itemIds ?? [];
+  // Entries are bare ids or { id, startAt, breakOffline, breakBefore, seg }
+  // — the schedule store sends the latter so tonight's pins, breaks and
+  // the tag that ties an item back to its schedule ride along.
+  const entries = (req.body?.itemIds ?? [])
+    .map((e) => (typeof e === 'string' ? { id: e } : e))
+    .filter((e) => e && typeof e === 'object' && e.id);
+  const ids = entries.map((e) => e.id);
   if (!ids.length) return res.status(400).json({ error: 'Nothing selected' });
 
   // Scheduled start: broadcast a countdown card until this moment, then
@@ -2396,9 +2449,12 @@ app.post('/api/stream/start', wrap(async (req, res) => {
 
   // Resolve every item up front so a bad path fails before we go on air.
   const items = [];
-  for (const id of ids) {
+  for (const entry of entries) {
+    const id = entry.id;
     const item = await library.item(id);
     items.push({
+      ...queueExtras(entry),
+      ...(Number(entry.startAt) > 0 ? { startAt: Number(entry.startAt), ...(entry.breakOffline ? { breakOffline: true } : {}) } : {}),
       id: item.id,
       title: item.seriesName
         ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
@@ -2488,7 +2544,7 @@ app.post('/api/stream/start', wrap(async (req, res) => {
     if (engine === e) engine = null;
   });
   res.json({ ok: true, tracks: selection.reason, ...streamStatus() });
-}));
+});
 
 
 app.post('/api/stream/pause', wrap(async (req, res) => {
@@ -2659,8 +2715,11 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
     delete next.startAt;
     delete next.breakOffline;
     delete next.at;                       // projection, recomputed per snapshot
+    delete next.breakBefore;
+    delete next.seg;
     if (pin) next.startAt = pin;
     if (pin && offline) next.breakOffline = true;
+    Object.assign(next, queueExtras(entry));
     items.push(next);
   }
   if (engine !== e) {
@@ -2672,6 +2731,177 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
 }));
 
 // ── static UI ──────────────────────────────────────────────────────────
+
+/* ------------------------------------------------------------------------
+ * Schedules: saved lineups, tonight, history. State lives in the store;
+ * the engine's queue is derived from tonight whenever it changes.
+ * ---------------------------------------------------------------------- */
+const sched = createScheduleStore({ path: join(CONFIG_DIR, 'schedules.json') });
+
+/** Extra fields an entry may carry into the engine queue. */
+function queueExtras(entry) {
+  if (!entry || typeof entry !== 'object') return {};
+  const out = {};
+  if (entry.seg && typeof entry.seg === 'object') out.seg = entry.seg;
+  if (Number(entry.breakBefore) > 0) out.breakBefore = Math.round(Number(entry.breakBefore));
+  return out;
+}
+
+/** Library items in the shape schedules and the engine keep. */
+async function resolveItems(ids) {
+  const out = [];
+  for (const id of ids ?? []) {
+    const item = await library.item(String(id));
+    out.push({
+      id: item.id,
+      title: item.seriesName
+        ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
+        : item.title,
+      series: item.seriesName ?? null,
+      season: item.season ?? null,
+      episode: item.episode ?? null,
+      duration: item.duration ?? null,
+      image: item.image ?? null,
+    });
+  }
+  return out;
+}
+
+/** Tonight with the engine's projections folded in: air times and what is on. */
+function scheduleView() {
+  const at = new Map();
+  let onAirKey = null;
+  if (engine) {
+    const s = engine.snapshot();
+    for (const q of s.queue ?? []) if (q.seg?.item && q.at != null) at.set(q.seg.item, q.at);
+    onAirKey = s.playing?.seg?.item ?? null;
+  }
+  const t = sched.tonight();
+  return {
+    schedules: sched.list().map((x) => ({ ...x, nextRun: sched.nextRun(x.id) })),
+    tonight: {
+      segments: t.segments.map((seg) => ({
+        ...seg,
+        items: seg.items.map((it) => ({ ...it, at: at.get(it.key) ?? null, onAir: it.key === onAirKey })),
+      })),
+      entries: sched.upcomingEntries(),
+    },
+    history: sched.history(),
+    settings: sched.settings(),
+    live: Boolean(engine),
+  };
+}
+sched.onChange(() => broadcast('schedule', scheduleView()));
+
+/** While live, the engine plays what tonight says comes next. */
+async function syncTonight() {
+  const e = engine;
+  if (!e) return;
+  const entries = sched.upcomingEntries();
+  const items = [];
+  for (const entry of entries) {
+    const known = e.queue.find((q) => q.id === entry.id) ?? (e.current?.item?.id === entry.id ? e.current.item : null);
+    const base = known ? { ...known } : (await resolveItems([entry.id]))[0];
+    if (!known) base.srcPath = library.resolvePath(await library.item(entry.id));
+    delete base.startAt; delete base.breakOffline; delete base.breakBefore; delete base.seg; delete base.at;
+    if (entry.startAt) base.startAt = entry.startAt;
+    if (entry.startAt && entry.breakOffline) base.breakOffline = true;
+    Object.assign(base, queueExtras(entry));
+    items.push(base);
+  }
+  if (engine !== e) return;
+  e.setQueue(items);
+  broadcast('stream', streamStatus());
+}
+
+/** Express' res, for calling a route handler from inside the process. */
+function innerRes() {
+  const r = { code: 200, body: null };
+  r.status = (c) => { r.code = c; return r; };
+  r.json = (b) => { r.body = b; return r; };
+  return r;
+}
+
+/** Go live with tonight, or append it to a broadcast already running. */
+async function goLive({ startAt = null } = {}) {
+  const entries = sched.upcomingEntries();
+  if (!entries.length) return { code: 400, body: { error: 'Nothing is lined up for tonight' } };
+  if (engine) { await syncTonight(); return { code: 200, body: streamStatus() }; }
+  const r = innerRes();
+  await startStream({ body: { itemIds: entries, startAt } }, r);
+  if (r.code < 300) sched.onAir(entries[0].seg.item);
+  return r;
+}
+
+const sroute = (fn) => wrap(async (req, res) => {
+  try {
+    const out = await fn(req);
+    if (out && typeof out.code === 'number' && 'body' in out) return res.status(out.code).json(out.body);
+    await syncTonight();
+    res.json(scheduleView());
+  } catch (err) {
+    if (err?.status) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+});
+
+app.get('/api/schedule', (req, res) => res.json(scheduleView()));
+app.put('/api/schedule/settings', sroute((req) => sched.setSettings(req.body ?? {})));
+app.delete('/api/schedule/history', sroute(() => sched.clearHistory()));
+
+app.post('/api/schedule/schedules', sroute(async (req) => {
+  const b = req.body ?? {};
+  if (b.fromTonight) return sched.saveTonightAs(b.name);
+  const items = Array.isArray(b.itemIds) ? await resolveItems(b.itemIds) : (b.items ?? []);
+  return sched.create({ ...b, items });
+}));
+app.put('/api/schedule/schedules/:id', sroute(async (req) => {
+  const b = { ...(req.body ?? {}) };
+  if (Array.isArray(b.itemIds)) b.items = await resolveItems(b.itemIds);
+  return sched.update(req.params.id, b);
+}));
+app.delete('/api/schedule/schedules/:id', sroute((req) => sched.remove(req.params.id)));
+app.post('/api/schedule/schedules/:id/reset', sroute((req) => sched.resetProgress(req.params.id)));
+app.post('/api/schedule/schedules/:id/duplicate', sroute((req) => sched.duplicate(req.params.id)));
+app.post('/api/schedule/schedules/:id/load', sroute((req) => sched.load(req.params.id, { startAt: Number(req.body?.startAt) || null })));
+app.post('/api/schedule/schedules/:id/append', sroute((req) => sched.append(req.params.id, { startAt: Number(req.body?.startAt) || null })));
+
+app.post('/api/schedule/tonight/items', sroute(async (req) => sched.addItems(await resolveItems(req.body?.itemIds ?? []))));
+app.put('/api/schedule/tonight/order', sroute((req) => sched.reorder(req.body?.order ?? [])));
+app.post('/api/schedule/tonight/items/:key/move', sroute((req) => sched.moveItem(req.params.key, Number(req.body?.delta) || 1)));
+app.put('/api/schedule/tonight/items/:key', sroute((req) => sched.setItem(req.params.key, req.body ?? {})));
+app.delete('/api/schedule/tonight/items/:key', sroute((req) => sched.removeItem(req.params.key)));
+app.post('/api/schedule/tonight/segments/:key/move', sroute((req) => sched.moveSegment(req.params.key, Number(req.body?.delta) || 1)));
+app.put('/api/schedule/tonight/segments/:key', sroute((req) => sched.setSegment(req.params.key, req.body ?? {})));
+app.put('/api/schedule/tonight/segments/:key/start', sroute((req) => sched.setSegmentStart(req.params.key, Number(req.body?.index) || 0)));
+app.delete('/api/schedule/tonight/segments/:key', sroute((req) => sched.removeSegment(req.params.key)));
+app.delete('/api/schedule/tonight', sroute(() => sched.clearTonight()));
+app.post('/api/schedule/tonight/live', wrap(async (req, res) => {
+  const r = await goLive({ startAt: Number(req.body?.startAt) || null });
+  res.status(r.code).json(r.body);
+}));
+
+/**
+ * Auto-start. Every half minute, schedules inside their countdown lead go
+ * live with a countdown card until their time; if a broadcast is already
+ * running they are appended instead, pinned to that time.
+ */
+setInterval(() => {
+  for (const { schedule, at } of sched.dueAutoStarts(Date.now())) {
+    (async () => {
+      if (engine) {
+        sched.append(schedule.id, { startAt: at });
+        await syncTonight();
+        dpush('info', `auto-start: "${schedule.name}" appended for ${new Date(at * 1000).toLocaleTimeString()}`);
+        return;
+      }
+      sched.load(schedule.id);
+      const r = await goLive({ startAt: at });
+      if (r.code >= 300) dpush('warn', `auto-start of "${schedule.name}" failed: ${r.body?.error ?? r.code}`);
+      else dpush('info', `auto-start: "${schedule.name}" goes live at ${new Date(at * 1000).toLocaleTimeString()}`);
+    })().catch((err) => dpush('warn', `auto-start of "${schedule.name}" failed: ${err.message}`));
+  }
+}, 30_000).unref?.();
 
 if (existsSync(WEB_DIR)) {
   app.use(express.static(WEB_DIR, {

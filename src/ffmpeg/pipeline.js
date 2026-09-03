@@ -1778,6 +1778,7 @@ export class PipelinePlayout extends EventEmitter {
       else t += Math.max(0, dur - (this.aired ?? this.position ?? 0));
     }
     return this.queue.map((q) => {
+      if (q.breakBefore > 0 && q.startAt == null && known) t += Number(q.breakBefore);
       if (q.startAt != null && (!known || q.startAt > t)) {
         t = q.startAt;
         known = true;
@@ -5883,6 +5884,13 @@ export class PipelinePlayout extends EventEmitter {
     // rather than starting early. Peek, don't shift: the card's natural end
     // re-enters here, and by then the time has arrived.
     const pinned = this.queue[0];
+    // A relative break ("five minutes before this one") becomes a pin the
+    // moment it comes up, so the card's natural end re-enters here with
+    // the wait already spent — the same path a programmed time takes.
+    if (pinned && pinned.breakBefore > 0 && pinned.startAt == null) {
+      pinned.startAt = Date.now() / 1000 + Number(pinned.breakBefore);
+      delete pinned.breakBefore;
+    }
     if (pinned?.startAt != null && pinned.startAt - Date.now() / 1000 > 5) {
       this.emit('queue', this.snapshot());
       // Two kinds of break: a card keeps the stream up with a countdown,
