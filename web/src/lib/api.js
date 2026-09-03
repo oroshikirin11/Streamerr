@@ -105,6 +105,30 @@ export const api = {
   seek: (body) => request('POST', '/api/stream/seek', body),
   next: () => request('POST', '/api/stream/next'),
   setTracks: (body) => request('POST', '/api/stream/tracks', body),
+
+  // Schedules: saved lineups, tonight, history. Every mutation answers with
+  // the whole schedule view, so callers just adopt what comes back.
+  schedule: () => request('GET', '/api/schedule'),
+  scheduleSettings: (patch) => request('PUT', '/api/schedule/settings', patch),
+  clearHistory: () => request('DELETE', '/api/schedule/history'),
+  createSchedule: (body) => request('POST', '/api/schedule/schedules', body),
+  updateSchedule: (id, patch) => request('PUT', `/api/schedule/schedules/${encodeURIComponent(id)}`, patch),
+  deleteSchedule: (id) => request('DELETE', `/api/schedule/schedules/${encodeURIComponent(id)}`),
+  resetSchedule: (id) => request('POST', `/api/schedule/schedules/${encodeURIComponent(id)}/reset`),
+  duplicateSchedule: (id) => request('POST', `/api/schedule/schedules/${encodeURIComponent(id)}/duplicate`),
+  loadSchedule: (id, startAt = null) => request('POST', `/api/schedule/schedules/${encodeURIComponent(id)}/load`, { startAt }),
+  appendSchedule: (id, startAt = null) => request('POST', `/api/schedule/schedules/${encodeURIComponent(id)}/append`, { startAt }),
+  tonightAdd: (itemIds) => request('POST', '/api/schedule/tonight/items', { itemIds }),
+  tonightOrder: (order) => request('PUT', '/api/schedule/tonight/order', { order }),
+  tonightMove: (key, delta) => request('POST', `/api/schedule/tonight/items/${encodeURIComponent(key)}/move`, { delta }),
+  tonightSetItem: (key, patch) => request('PUT', `/api/schedule/tonight/items/${encodeURIComponent(key)}`, patch),
+  tonightRemove: (key) => request('DELETE', `/api/schedule/tonight/items/${encodeURIComponent(key)}`),
+  tonightSegMove: (key, delta) => request('POST', `/api/schedule/tonight/segments/${encodeURIComponent(key)}/move`, { delta }),
+  tonightSetSeg: (key, patch) => request('PUT', `/api/schedule/tonight/segments/${encodeURIComponent(key)}`, patch),
+  tonightSegStart: (key, index) => request('PUT', `/api/schedule/tonight/segments/${encodeURIComponent(key)}/start`, { index }),
+  tonightRemoveSeg: (key) => request('DELETE', `/api/schedule/tonight/segments/${encodeURIComponent(key)}`),
+  tonightClear: () => request('DELETE', '/api/schedule/tonight'),
+  goLive: (startAt = null) => request('POST', '/api/schedule/tonight/live', { startAt }),
 };
 
 /** Live status feed. Reconnects on drop — the panel is left open for hours. */

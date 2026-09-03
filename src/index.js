@@ -965,7 +965,7 @@ function wirePreview(e) {
   e.on('progress', observe);
   e.on('nowplaying', observe);
   e.on('queue', observe);
-  e.on('ended', () => { finish(); sched.broadcastEnded(); });
+  e.on('ended', () => { finish(); sched.broadcastEnded(); broadcast('schedule', scheduleView()); });
 
   e.on('publisher-restart', () => {
     // The receiver's schedule/metadata/artwork live in memory — a
@@ -2771,7 +2771,9 @@ async function resolveItems(ids) {
 function scheduleView() {
   const at = new Map();
   let onAirKey = null;
-  if (engine) {
+  // A stopped engine still answers snapshot() with its last clip; nothing
+  // is on air then.
+  if (engine && engine.status !== 'stopped') {
     const s = engine.snapshot();
     for (const q of s.queue ?? []) if (q.seg?.item && q.at != null) at.set(q.seg.item, q.at);
     onAirKey = s.playing?.seg?.item ?? null;
@@ -2788,7 +2790,7 @@ function scheduleView() {
     },
     history: sched.history(),
     settings: sched.settings(),
-    live: Boolean(engine),
+    live: Boolean(engine) && engine.status !== 'stopped',
   };
 }
 sched.onChange(() => broadcast('schedule', scheduleView()));

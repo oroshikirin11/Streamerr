@@ -2,150 +2,278 @@
   import { onMount, onDestroy } from 'svelte';
   import { api, connectStatus, fmtTime, clockTime, clockDay, maskClock, parseClock, audioLabel, subtitleLabel, subtitleChoice } from '$lib/api.js';
 
+  /**
+   * The Schedule page, timeline first.
+   *
+   * Two feeds drive it: the stream status (what is on air, tracks, the
+   * engine's projections) and the schedule view (saved schedules, tonight
+   * as segments, history, settings). Tonight is the plan; the engine's
+   * queue is derived from it on the server, so this page never edits the
+   * queue directly — every change goes to the schedule API and the view
+   * that comes back is adopted wholesale.
+   */
   let status = $state({ status: 'stopped', playing: null, queue: [] });
+  let view = $state({ schedules: [], tonight: { segments: [], entries: [] }, history: [], settings: { dnd: true, breakEvery: 0, breakMinutes: 5, breakOffline: false }, live: false });
   let error = $state('');
-  let tracks = $state(null);
-  let switching = $state(false);
   let note = $state('');
-  let editing = $state(false);
-  let skipping = $state(false);
-  let timer;
-
-  // Dev-only (`npm run dev` + ?mock): these controls only exist during a
-  // broadcast, which would otherwise make them impossible to style or click
-  // through without one. Stripped from production builds.
-  const mock = import.meta.env.DEV
-    && typeof location !== 'undefined'
-    && new URLSearchParams(location.search).has('mock');
+  let busy = $state(false);
+  let now = $state(Date.now() / 1000);
+  let stopFeed; let tick;
 
   async function refresh() {
-    if (mock) {
-      status = {
-        status: 'running',
-        position: 201,
-        playing: { title: "Frieren: Beyond Journey's End — S1E1", duration: 1563 },
-        tracks: {
-          audio: { language: 'jpn', title: null, codec: 'aac', channels: 2 },
-          subtitle: { language: 'eng', title: null, codec: 'ass', forced: false, external: false },
-        },
-        queue: (() => {
-          const t = Math.floor(Date.now() / 1000) + 1362;
-          return [
-            { id: 'a', title: "Frieren — S1E2", duration: 1420, at: t },
-            { id: 'b', title: "Frieren — S1E3", duration: 1435, at: t + 1420 },
-            { id: 'c', title: "Frieren — S1E4", duration: 1418,
-              at: t + 4200, startAt: t + 4200 },
-          ];
-        })(),
-      };
-      return;
-    }
-    try { applyStatus(await api.streamStatus()); }
-    catch (err) { error = err.message; }
+    try {
+      const [s, v] = await Promise.all([api.streamStatus(), api.schedule()]);
+      status = s; view = v;
+    } catch (err) { error = err.message; }
   }
-
-  let stopFeed;
   onMount(() => {
     refresh();
-    if (mock) return;
-    // Driven by the same push the transport bar uses, so the rundown moves
-    // the instant the engine advances rather than up to a poll later. The
-    // slow timer is only a safety net for a dropped socket.
     stopFeed = connectStatus((msg) => {
-      if (msg.type === 'stream') applyStatus(msg.payload);
+      if (msg.type === 'stream') status = msg.payload;
+      if (msg.type === 'schedule') view = msg.payload;
     });
-    timer = setInterval(refresh, 10000);
+    tick = setInterval(() => { now = Date.now() / 1000; }, 1000);
   });
-  onDestroy(() => { clearInterval(timer); stopFeed?.(); });
+  onDestroy(() => { stopFeed?.(); clearInterval(tick); });
+
+  /** Run a schedule mutation; the API answers with the fresh view. */
+  async function act(fn, okNote = '') {
+    busy = true; error = '';
+    try {
+      const v = await fn();
+      if (v?.tonight) view = v;
+      if (okNote) flash(okNote);
+    } catch (err) { error = err.message; }
+    finally { busy = false; }
+  }
+  function flash(text) {
+    note = text;
+    setTimeout(() => { if (note === text) note = ''; }, 5000);
+  }
+  const confirmOnce = $state({ key: null });
+  /** Two-step destructive buttons: first click arms, second fires. */
+  function armed(key, fn) {
+    if (confirmOnce.key === key) { confirmOnce.key = null; fn(); return; }
+    confirmOnce.key = key;
+    setTimeout(() => { if (confirmOnce.key === key) confirmOnce.key = null; }, 4000);
+  }
+
+  // ── derived ───────────────────────────────────────────────────────────
+  const live = $derived(status.status !== 'stopped');
+  const card = $derived(Boolean(status.playing?.countdown));
+  const dnd = $derived(view.settings?.dnd !== false);
+  const segments = $derived(view.tonight?.segments ?? []);
+  const upcomingCount = $derived(view.tonight?.entries?.length ?? 0);
+  const playingSeg = $derived(segments.find((s) => s.items.some((i) => i.onAir)) ?? null);
+  const clock = clockDay;
+  const hhmm = clockTime;
+  const fmtGap = (sec) => {
+    if (sec < 90) return `${Math.round(sec)}s`;
+    if (sec < 3600) return `${Math.round(sec / 60)} min`;
+    const h = Math.floor(sec / 3600); const m = Math.round((sec % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  };
+  const epName = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(i + 3) : t; };
+  const seriesName = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(0, i) : null; };
+
+  /** The next planned start across saved schedules. */
+  const nextStart = $derived.by(() => {
+    let best = null;
+    for (const s of view.schedules ?? []) {
+      if (s.nextRun && (!best || s.nextRun < best.at)) best = { at: s.nextRun, schedule: s };
+    }
+    return best;
+  });
 
   /**
-   * Adopt a status push, and abandon a time edit whose item is no longer
-   * in the queue.
-   *
-   * Rows are identified by item id rather than position precisely because
-   * of this moment: an item going on air shifts everything up, and an edit
-   * keyed by row would land on whichever item took the slot.
+   * Every tonight item with a time. Live: the engine's projection for
+   * upcoming items, the on-air item anchored at now minus its position,
+   * and what already aired laid back from there by duration. Offline: a
+   * projection from the first pin, the next auto-start, or now.
    */
-  function applyStatus(next) {
-    status = next;
-    if (pinId && !(next.queue ?? []).some((q) => q.id === pinId)) {
-      pinId = null;
-      note = 'That item went on air — its time can no longer be changed.';
-      setTimeout(() => {
-        if (note.startsWith('That item went on air')) note = '';
-      }, 5000);
+  const placed = $derived.by(() => {
+    const out = [];
+    const upcoming = [];
+    const before = [];
+    for (const seg of segments) {
+      for (const it of seg.items) {
+        const dur = it.duration ?? 0;
+        const row = { ...it, segKey: seg.key, segName: seg.name, scheduleId: seg.scheduleId, dur };
+        if (it.state === 'upcoming') upcoming.push(row);
+        else before.push(row);
+      }
+    }
+    // Forward projection for upcoming items.
+    let t;
+    if (live && status.playing && !card) {
+      t = now + Math.max(0, (status.playing.duration ?? 0) - (status.position ?? 0));
+    } else if (live && card) {
+      t = status.breakUntil ?? now;
+    } else {
+      const firstPin = upcoming.find((u) => u.startAt)?.startAt ?? segments.find((s) => s.startAt)?.startAt ?? null;
+      const firstSeg = segments.find((s) => s.items.some((i) => i.state === 'upcoming'));
+      const auto = firstSeg?.scheduleId ? view.schedules.find((s) => s.id === firstSeg.scheduleId)?.nextRun : null;
+      t = firstPin ?? auto ?? now;
+      if (firstPin == null && auto == null) t = now;
+    }
+    // A length nobody has measured yet makes every later time a guess:
+    // shown as "—:—" in the list and as a dashed nominal block on the strip.
+    let known = true;
+    let first = true;
+    for (const u of upcoming) {
+      if (u.at != null) { t = u.at; known = true; }
+      else {
+        if (u.breakBefore) t += u.breakBefore;
+        if (u.startAt != null && (u.startAt > t || !known)) { t = u.startAt; known = true; }
+        if (first && view.tonight.entries?.[0]?.startAt && view.tonight.entries[0].startAt > t) { t = view.tonight.entries[0].startAt; known = true; }
+      }
+      const nominal = u.dur || 1200;
+      out.push({ ...u, at: t, end: t + nominal, dur: nominal, ghost: !u.dur, sure: known });
+      if (!u.dur) known = false;
+      t += nominal; first = false;
+    }
+    // Backwards for what already played / is on air / lies before the marker.
+    let back = live && status.playing && !card ? now - (status.position ?? 0) : (out[0]?.at ?? now);
+    const onAir = before.find((b) => b.onAir);
+    const rest = before.filter((b) => !b.onAir);
+    if (onAir) {
+      const dur = status.playing?.duration ?? onAir.dur;
+      out.unshift({ ...onAir, at: back, end: back + dur, dur });
+    }
+    for (let i = rest.length - 1; i >= 0 && i >= rest.length - 4; i--) {
+      const b = rest[i];
+      back -= b.dur || 1200;
+      out.unshift({ ...b, at: back, end: back + (b.dur || 1200), ghost: !b.dur });
+    }
+    return out;
+  });
+
+  /** The strip's window: everything placed, plus margins, at least two hours. */
+  const win = $derived.by(() => {
+    if (!placed.length) { const a = now - 600; return { a, b: a + 7200 }; }
+    let a = Math.min(...placed.map((p) => p.at), live ? now : Infinity) - 600;
+    let b = Math.max(...placed.map((p) => p.end), nextStart?.at ?? 0) + 600;
+    if (b - a < 7200) b = a + 7200;
+    return { a, b };
+  });
+  const pct = (t) => `${((t - win.a) / (win.b - win.a)) * 100}%`;
+  const ticks = $derived.by(() => {
+    const span = win.b - win.a;
+    const step = span <= 4 * 3600 ? 1800 : span <= 10 * 3600 ? 3600 : 7200;
+    const out = [];
+    for (let t = Math.ceil(win.a / step) * step; t <= win.b; t += step) out.push(t);
+    return out;
+  });
+  const endsAt = $derived.by(() => {
+    const last = placed[placed.length - 1];
+    return last && last.sure !== false && !last.ghost ? last.end : null;
+  });
+  const startFlag = $derived.by(() => {
+    const seg = segments.find((s) => s.items.some((i) => i.state === 'upcoming'));
+    if (!seg) return null;
+    const first = placed.find((p) => p.segKey === seg.key && p.state === 'upcoming');
+    return first ? { at: first.at, seg } : null;
+  });
+
+  // ── strip drag: a block to a time, the start flag to an item ──────────
+  let stripEl = $state(null);
+  let drag = $state(null);   // { kind: 'block'|'flag', key, seg, x0, dx, at }
+  function stripTime(clientX) {
+    const r = stripEl.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return win.a + frac * (win.b - win.a);
+  }
+  function startBlockDrag(e, p) {
+    if (!dnd || p.state !== 'upcoming' || busy) return;
+    e.preventDefault();
+    drag = { kind: 'block', key: p.key, x0: e.clientX, dx: 0, at: p.at, from: p.at };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  }
+  function startFlagDrag(e) {
+    if (!dnd || !startFlag || busy) return;
+    e.preventDefault();
+    drag = { kind: 'flag', seg: startFlag.seg, x0: e.clientX, dx: 0, at: startFlag.at };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  }
+  function onDragMove(e) {
+    if (!drag) return;
+    drag = { ...drag, dx: e.clientX - drag.x0, at: stripTime(e.clientX) };
+  }
+  async function onDragEnd() {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (Math.abs(d.dx) < 4) return;
+    if (d.kind === 'block') {
+      // Snap to five minutes. Dragged earlier than it would play anyway:
+      // that is "as early as possible", so the pin is cleared.
+      const at = Math.round(d.at / 300) * 300;
+      const earliest = d.from - 60;
+      await act(() => api.tonightSetItem(d.key, { startAt: at <= earliest ? null : at }),
+        at <= earliest ? 'Pin cleared — it plays as soon as the one before ends.' : `Programmed for ${clock(at)}.`);
+    } else {
+      // The flag lands on the item whose block it was dropped in.
+      const seg = d.seg;
+      const rows = placed.filter((p) => p.segKey === seg.key && (p.state === 'upcoming' || p.state === 'past'));
+      let idx = rows.findIndex((r) => d.at < r.end);
+      if (idx < 0) idx = rows.length;
+      const target = rows[idx];
+      const index = target ? seg.items.findIndex((i) => i.key === target.key) : seg.items.length;
+      await act(() => api.tonightSegStart(seg.key, index), 'Start moved.');
     }
   }
 
-  /**
-   * Every edit is a full replacement of the upcoming list. Entries carry
-   * their pin as well as their id, so reordering or removing an item never
-   * silently drops the times someone programmed.
-   */
-  /** Drop a whole sitting in one go — 43 rows is not a per-row workflow. */
-  async function removeBlock(b) {
-    const ids = new Set(b.rows.map((r) => r.item.id));
-    if (expanded.has(b.key)) toggleBlock(b.key);
-    await editQueue((es) => es.filter((e) => !ids.has(e.id)));
+  // ── list drag (rows within a segment, segments among themselves) ─────
+  let rowDrag = $state(null);   // { seg, key }
+  let rowOver = $state(null);
+  let segDrag = $state(null);
+  let segOver = $state(null);
+  function rowDragStart(e, seg, it) {
+    if (!dnd || it.state !== 'upcoming') { e.preventDefault(); return; }
+    rowDrag = { seg: seg.key, key: it.key };
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', it.key); } catch { /* firefox needs data */ }
+  }
+  function rowDragOver(e, seg, it) {
+    if (!rowDrag || rowDrag.seg !== seg.key || it.state !== 'upcoming') return;
+    e.preventDefault(); rowOver = it.key;
+  }
+  async function rowDrop(e, seg, it) {
+    e.preventDefault();
+    if (!rowDrag || rowDrag.seg !== seg.key) { rowDrag = null; rowOver = null; return; }
+    const keys = seg.items.filter((i) => i.state === 'upcoming').map((i) => i.key);
+    const from = keys.indexOf(rowDrag.key); const to = keys.indexOf(it.key);
+    rowDrag = null; rowOver = null;
+    if (from < 0 || to < 0 || from === to) return;
+    keys.splice(to, 0, keys.splice(from, 1)[0]);
+    await act(() => api.tonightOrder([{ seg: seg.key, items: keys }]));
+  }
+  function segDragStart(e, seg) {
+    if (!dnd) { e.preventDefault(); return; }
+    segDrag = seg.key; e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', seg.key); } catch { /* firefox */ }
+  }
+  async function segDrop(e, seg) {
+    e.preventDefault();
+    if (!segDrag || segDrag === seg.key) { segDrag = null; segOver = null; return; }
+    const keys = segments.map((s) => s.key);
+    const from = keys.indexOf(segDrag); const to = keys.indexOf(seg.key);
+    segDrag = null; segOver = null;
+    keys.splice(to, 0, keys.splice(from, 1)[0]);
+    await act(() => api.tonightOrder(keys.map((k) => ({ seg: k, items: segments.find((s) => s.key === k).items.map((i) => i.key) }))));
   }
 
-  /** Flip the break ahead of a pinned block between card and off-air. */
-  const setBreakMode = (id, offline) => editQueue((es) =>
-    es.map((e) => (e.id === id ? { ...e, breakOffline: offline } : e)));
-
-  async function editQueue(fn) {
-    editing = true; error = '';
-    try {
-      const entries = (status.queue ?? [])
-        .map((q) => ({ id: q.id, startAt: q.startAt ?? null, breakOffline: q.breakOffline ?? false }));
-      await api.setQueue(fn(entries));
-      await refresh();
-    } catch (err) { error = err.message; }
-    finally { editing = false; }
-  }
-
-  const removeAt = (i) => editQueue((es) => es.filter((_, j) => j !== i));
-  const move = (i, d) => editQueue((es) => {
-    const next = [...es];
-    const [x] = next.splice(i, 1);
-    next.splice(i + d, 0, x);
-    return next;
-  });
-
-  // ── programmed air times ─────────────────────────────────────────────
-
-  /** Which ITEM is having its time edited, and the value being typed. */
-  let pinId = $state(null);
+  // ── pins ─────────────────────────────────────────────────────────────
+  let pinKey = $state(null);      // item key, or `seg:<key>`
   let pinValue = $state('');
-
-  const hhmm = clockTime;
-  const sameDay = (a, b) => new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
-
-  // A long queue runs past midnight — 50 episodes is the best part of a
-  // day — so a bare HH:MM would make tomorrow 02:14 look like today's.
-  // Anything off today's date carries its weekday. Both are 24-hour.
-  const clock = clockDay;
-
-  /** The day a pin is being typed against — the row's own, not today's. */
   let pinBase = $state(null);
-  /** The earliest this row could air — the anchor a typed time resolves from. */
   let pinFloor = $state(null);
-
-  function openPin(q, i) {
-    pinId = q.id;
-    pinBase = q.startAt ?? q.at ?? Math.floor(Date.now() / 1000);
-    pinFloor = earliestFor(i ?? (status.queue ?? []).findIndex((x) => x.id === q.id));
-    // Seed with the time it would air anyway, so nudging is the easy case.
-    pinValue = hhmm(pinBase);   // always 24-hour, whatever the browser locale
+  const sameDay = (a, b) => new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
+  function openPin(key, current, floor) {
+    pinKey = key;
+    pinBase = current ?? floor ?? Math.floor(now);
+    pinFloor = floor ?? Math.floor(now);
+    pinValue = hhmm(pinBase);
   }
-
-  /**
-   * Nudge the typed time with the arrow keys.
-   *
-   * Replacing <input type="time"> with a text field to force 24-hour cost
-   * the native stepper, and typing four digits to move an episode fifteen
-   * minutes is not a trade worth making.
-   */
   function stepTime(e) {
     if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
     const t = parseClock(pinValue) ?? parseClock(hhmm(pinBase));
@@ -153,797 +281,854 @@
     e.preventDefault();
     const step = (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 60 : 5);
     const mins = (((t.h * 60 + t.m + step) % 1440) + 1440) % 1440;
-    pinValue = `${String(Math.floor(mins / 60)).padStart(2, '0')}`
-      + `:${String(mins % 60).padStart(2, '0')}`;
+    pinValue = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
   }
-
-  /** Times worth offering for this row: the next quarter-hours, then hours. */
   function timeSuggestions(floor) {
     const out = [];
-    const start = new Date((floor ?? Date.now() / 1000) * 1000);
+    const start = new Date((floor ?? now) * 1000);
     start.setSeconds(0, 0);
     start.setMinutes(Math.ceil(start.getMinutes() / 15) * 15);
-    for (let i = 0; i < 5; i++) {
-      out.push(new Date(start.getTime() + i * 15 * 60_000));
-    }
-    const hour = new Date(start);
-    hour.setMinutes(0, 0, 0);
-    for (let i = 1; i <= 6; i++) {
-      out.push(new Date(hour.getTime() + i * 3_600_000));
-    }
-    return [...new Set(out.map((d) => `${String(d.getHours()).padStart(2, '0')}`
-      + `:${String(d.getMinutes()).padStart(2, '0')}`))];
+    for (let i = 0; i < 5; i++) out.push(new Date(start.getTime() + i * 15 * 60_000));
+    const hour = new Date(start); hour.setMinutes(0, 0, 0);
+    for (let i = 1; i <= 6; i++) out.push(new Date(hour.getTime() + i * 3_600_000));
+    return [...new Set(out.map((d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`))];
   }
-
-  /**
-   * "HH:MM" on the day this item was already going to air, so nudging an
-   * episode that falls after midnight does not yank it back to today.
-   *
-   * Deliberately does NOT roll an impossible time forward to the next day.
-   * Doing so turned a mistyped hour into a twenty-three hour gap filled
-   * with a test card — a silently absurd schedule instead of an error.
-   * An unreachable time is refused by repin(); moving something to another
-   * day is what the day-shift control is for.
-   */
-  /**
-   * "HH:MM" resolved to the next time it actually happens.
-   *
-   * Anchored to the earliest this row could air, not to today. An episode
-   * that lands at 23:56 on Friday and is given 02:00 obviously means two
-   * in the morning on Saturday — resolving that on Friday put it in the
-   * past and the editor refused it, which is technically defensible and
-   * completely wrong. Rolling forward is safe here in a way it was not
-   * before, because the resolved date is shown while it is typed.
-   */
   function epochFor(hm, base, floor) {
     const t = parseClock(hm);
     if (!t) return null;
-    const anchor = floor ?? base ?? Math.floor(Date.now() / 1000);
+    const anchor = floor ?? base ?? Math.floor(now);
     const d = new Date(anchor * 1000);
     d.setHours(t.h, t.m, 0, 0);
     let at = Math.floor(d.getTime() / 1000);
     while (at + 60 <= anchor) at += 86_400;
     return at;
   }
-
-  /** Shift a programmed time a whole day, for a multi-day marathon. */
-  async function nudgeDay(id, days) {
-    const q = status.queue.find((x) => x.id === id);
-    const base = (q?.startAt ?? q?.at ?? Math.floor(Date.now() / 1000)) + days * 86400;
-    if (base * 1000 <= Date.now()) return;
-    await repin(id, base);
+  const pinTarget = $derived(pinValue ? epochFor(pinValue, pinBase, pinFloor) : null);
+  async function savePin() {
+    const key = pinKey;
+    if (pinValue && pinTarget == null) { error = `"${pinValue}" is not a time. Use 24-hour HH:MM, like 20:30.`; return; }
+    const at = pinValue ? pinTarget : null;
+    pinKey = null;
+    if (key.startsWith('seg:')) await act(() => api.tonightSetSeg(key.slice(4), { startAt: at }));
+    else await act(() => api.tonightSetItem(key, { startAt: at }));
+  }
+  async function clearPin(key) {
+    pinKey = null;
+    if (key.startsWith('seg:')) await act(() => api.tonightSetSeg(key.slice(4), { startAt: null }));
+    else await act(() => api.tonightSetItem(key, { startAt: null }));
+  }
+  function nudgeDay() { pinBase = (pinTarget ?? pinBase) + 86400; pinFloor = pinBase - 60; pinValue = hhmm(pinBase); }
+  /** The earliest an item could air: the end of what comes before it. */
+  function floorFor(key) {
+    const i = placed.findIndex((p) => p.key === key);
+    if (i <= 0) return Math.floor(now);
+    return Math.floor(placed[i - 1].end);
   }
 
-  /**
-   * Programme one item, carrying every later programmed time with it.
-   *
-   * A rundown moves as a block. Pushing episode 21 back ten minutes while
-   * 22 and 23 keep their old times strands those pins in the past, where
-   * they stop being programmed at all and quietly revert to whatever the
-   * running order produces — the times you set simply stop meaning
-   * anything. Unpinned items already cascade, so only the pins need
-   * carrying.
-   */
-  /**
-   * The earliest a row could possibly air: when everything ahead of it
-   * finishes. A time before that is not a schedule, it is a wish — the
-   * engine never starts a clip early, so the pin would simply be ignored
-   * and the row would sit there looking programmed while meaning nothing.
-   */
-  function earliestFor(i) {
-    const q = status.queue ?? [];
-    const now = Date.now() / 1000;
-    if (i <= 0) {
-      const dur = status.playing?.duration;
-      return dur ? now + Math.max(0, dur - (status.position ?? 0)) : now;
-    }
-    const prev = q[i - 1];
-    if (prev?.at == null) return now;
-    return prev.duration ? prev.at + prev.duration : prev.at;
-  }
-
-  async function repin(id, at, typed = null) {
-    const q = status.queue ?? [];
-    const i = q.findIndex((x) => x.id === id);
-    if (i < 0) { pinId = null; return; }
-    if (typed && at == null) {
-      error = `"${typed}" is not a time. Use 24-hour HH:MM, like 20:30.`;
-      setTimeout(() => { if (error.startsWith('"')) error = ''; }, 6000);
-      return;
-    }
-
-    // Refuse rather than accept a time the broadcast cannot honour. The
-    // editor stays open so the time can be corrected in place.
-
-    const from = q[i]?.startAt ?? q[i]?.at ?? null;
-    const delta = at != null && from != null ? at - from : 0;
-    const now = Date.now() / 1000;
-    let carried = 0;
-    pinId = null;
-    // An item that aired while this was open is simply gone from the list,
-    // so the edit becomes a no-op instead of hitting the wrong episode.
-    await editQueue((es) => es.map((e, j) => {
-      if (e.id === id) return { ...e, startAt: at };
-      if (!delta || j <= i || e.startAt == null) return e;
-      const moved = e.startAt + delta;
-      if (moved <= now) return e;       // dragging it into the past helps nobody
-      carried++;
-      return { ...e, startAt: moved };
-    }));
-    if (carried) {
-      note = `Moved ${carried} later programmed time${carried > 1 ? 's' : ''} by the same amount.`;
-      setTimeout(() => { if (note.startsWith('Moved ')) note = ''; }, 6000);
-    }
-  }
-
-  const savePin = (id) =>
-    repin(id, pinValue ? epochFor(pinValue, pinBase, pinFloor) : null, pinValue || null);
-  async function clearPin(id) {
-    pinId = null;
-    await editQueue((es) => es.map((e) => (e.id === id ? { ...e, startAt: null } : e)));
-  }
-
-  /** Gaps run from seconds to most of a day; h:mm:ss suits neither end. */
-  function fmtGap(sec) {
-    if (sec < 90) return `${Math.round(sec)}s`;
-    if (sec < 3600) return `${Math.round(sec / 60)} min`;
-    const h = Math.floor(sec / 3600);
-    const m = Math.round((sec % 3600) / 60);
-    return m ? `${h}h ${m}m` : `${h}h`;
-  }
-
-  /** Dead air before row i, in seconds — a pin pushing past the natural end. */
-  function gapBefore(i) {
-    const q = status.queue[i];
-    if (!q?.at) return 0;
-    const prev = i === 0 ? null : status.queue[i - 1];
-    const prevEnd = i === 0
-      ? (status.position != null && status.playing?.duration
-        ? Date.now() / 1000 + (status.playing.duration - status.position) : null)
-      : (prev?.at != null && prev.duration ? prev.at + prev.duration : null);
-    if (prevEnd == null) return 0;
-    return Math.max(0, Math.round(q.at - prevEnd));
-  }
-
-  /** A pre-show or interval card is on air, not an episode. */
-  const card = $derived(Boolean(status.playing?.countdown));
-
-  // ── programme blocks ─────────────────────────────────────────────────
-  //
-  // Consecutive episodes with nothing between them are one sitting; only a
-  // break separates sittings. Grouping the list that way makes the breaks
-  // the loudest thing on the page, which is the point of a schedule.
-
-  /**
-   * What show a queued entry belongs to. The server sends `series` for
-   * episodes; a film has none, so it falls back to its own title and ends up
-   * a group of one, which is exactly right for a film.
-   */
-  const seriesOf = (item) => {
-    if (item?.series) return item.series;
-    const t = String(item?.title ?? '');
-    const i = t.lastIndexOf(' — ');
-    return i > 0 ? t.slice(0, i) : t;
-  };
-
-  const blocks = $derived.by(() => {
-    const q = status.queue ?? [];
-    const out = [];
-    q.forEach((item, i) => {
-      const gap = gapBefore(i);
-      // A new series starts a new block even with no wait between them.
-      // Appending three shows into one collapsible list made a evening's
-      // programming unreadable; the run of episodes is the unit people
-      // think in, and it should be the unit on screen.
-      const changed = out.length
-        && seriesOf(item) !== seriesOf(out[out.length - 1].rows[0].item);
-      if (!out.length || gap > 30 || changed) {
-        const startedBy = !out.length ? 'first' : gap > 30 ? 'gap' : 'series';
-        // Keyed by queue POSITION, not by library id: the same film can be
-        // queued twice, and two blocks (or two rows) sharing a key makes
-        // Svelte throw each_key_duplicate — which is what stopped a block
-        // of two identical entries from ever expanding.
-        out.push({ key: `${item.id}#${i}`, gap, startedBy, rows: [] });
-      }
-      out[out.length - 1].rows.push({ item, i });
+  // ── segments: show past, breaks, remove ───────────────────────────────
+  let showPast = $state({});
+  const pastOf = (seg) => seg.items.filter((i) => i.state === 'past' || i.state === 'aired' || i.state === 'skipped');
+  const PAST_SHOWN = 2;
+  const visibleRows = (seg) => {
+    const past = pastOf(seg);
+    const hide = showPast[seg.key] ? 0 : Math.max(0, past.length - PAST_SHOWN);
+    let skipped = 0;
+    return seg.items.filter((i) => {
+      const isPast = i.state === 'past' || i.state === 'aired' || i.state === 'skipped';
+      if (isPast && skipped < hide) { skipped++; return false; }
+      return true;
     });
-    for (const b of out) {
-      b.first = b.rows[0].item;
-      b.last = b.rows[b.rows.length - 1].item;
-      b.count = b.rows.length;
-      b.total = b.rows.every((r) => r.item.duration)
-        ? b.rows.reduce((t, r) => t + r.item.duration, 0) : null;
-      b.pinned = b.rows.some((r) => r.item.startAt != null);
-      b.end = b.first.at != null && b.total != null ? b.first.at + b.total : null;
-    }
-    return out;
-  });
+  };
+  const segCounts = (seg) => {
+    const watched = seg.items.filter((i) => i.watched || i.state === 'aired').length;
+    const up = seg.items.filter((i) => i.state === 'upcoming').length;
+    return { watched, up, total: seg.items.length };
+  };
+  const segRange = (seg) => {
+    const ups = seg.items.filter((i) => i.state === 'upcoming' || i.state === 'onair');
+    if (!ups.length) return 'nothing left to play';
+    const a = epName(ups[0].title), b = epName(ups[ups.length - 1].title);
+    return ups.length === 1 ? a : `${a} → ${b}`;
+  };
+  const isBreak = (it) => it.breakBefore > 0 || view.tonight.entries?.find((e) => e.seg.item === it.key)?.breakBefore > 0;
+  const breakOf = (it) => it.breakBefore ?? view.tonight.entries?.find((e) => e.seg.item === it.key)?.breakBefore ?? 0;
+  const autoBreak = (it) => !it.breakBefore && breakOf(it) > 0;
 
-  /** "24 episodes · 9h 26m · to Wed 03:44", built here so Svelte's
-   *  whitespace trimming around {#if} cannot glue the separators on. */
-  function blockMeta(b) {
-    const bits = [`${b.count} episodes`];
-    if (b.total) bits.push(fmtGap(b.total));
-    if (b.end) bits.push(`to ${clock(b.end)}`);
-    return bits.join(' · ');
-  }
-
-  /** "5:39 / 23:37", same reason. */
-  function airTime() {
-    const pos = fmtTime(status.position ?? 0);
-    const dur = status.playing?.duration;
-    return dur ? `${pos} / ${fmtTime(dur)}` : pos;
-  }
-
-  /** "Show — S4E16 – E30" when a block is one series, else first … last. */
-  function blockLabel(b) {
-    const cut = (t) => {
-      const i = String(t).lastIndexOf(' — ');
-      return i > 0 ? [t.slice(0, i), t.slice(i + 3)] : [null, t];
+  // ── saved schedules: rail, edit panel, picker ────────────────────────
+  let tab = $state('saved');
+  let editId = $state(null);
+  let edit = $state(null);
+  let newName = $state('');
+  let naming = $state(false);        // "Save lineup as…" inline input
+  let saveName = $state('');
+  let appendOpen = $state(false);
+  const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  const progress = (s) => (s.items.length ? Math.round((s.watched.length / s.items.length) * 100) : 0);
+  const startLabel = (s) => (s.start >= s.items.length ? 'finished' : `at ${epName(s.items[s.start]?.title ?? '')}`);
+  const recur = (s) => {
+    const a = s.autoStart;
+    if (!a?.enabled) return 'no auto-start';
+    if (a.date) return `once · ${a.date} ${a.time}`;
+    return `${a.days.map((d) => DAYS[d]).join(' ')} ${a.time} · weekly`;
+  };
+  function openEdit(s) {
+    editId = s.id;
+    edit = {
+      name: s.name, start: s.start,
+      auto: Boolean(s.autoStart?.enabled), time: s.autoStart?.time ?? '20:00',
+      days: [...(s.autoStart?.days ?? [])], date: s.autoStart?.date ?? '',
+      countdownMin: s.autoStart?.countdownMin ?? 15,
+      breaks: s.breaks === 'none' ? 'none' : s.breaks === 'global' ? 'global' : 'custom',
+      every: s.breaks?.every ?? 3, minutes: s.breaks?.minutes ?? 5,
+      items: s.items.map((i) => i.id),
     };
-    const [s1, e1] = cut(b.first.title);
-    const [s2, e2] = cut(b.last.title);
-    if (s1 && s1 === s2) return { series: s1, range: `${e1} – ${e2}` };
-    return { series: null, range: `${b.first.title} … ${b.last.title}` };
+    tab = 'saved';
+  }
+  async function saveEdit() {
+    const id = editId; const e = edit;
+    const autoStart = e.auto && parseClock(e.time) ? {
+      time: e.time, days: e.date ? [] : e.days, date: e.date || null, countdownMin: Number(e.countdownMin), enabled: true,
+    } : null;
+    if (e.auto && !autoStart) { error = 'Auto-start needs a time like 20:00.'; return; }
+    if (e.auto && !e.date && !e.days.length) { error = 'Pick the days it repeats on, or a date.'; return; }
+    const breaks = e.breaks === 'custom' ? { every: Number(e.every), minutes: Number(e.minutes) } : e.breaks;
+    const s = view.schedules.find((x) => x.id === id);
+    const itemsChanged = s && s.items.map((i) => i.id).join('|') !== e.items.join('|');
+    await act(() => api.updateSchedule(id, { name: e.name, start: e.start, autoStart, breaks, ...(itemsChanged ? { itemIds: e.items } : {}) }), 'Saved.');
+    editId = null; edit = null;
+  }
+  const editItems = $derived(edit ? edit.items.map((id) => view.schedules.find((x) => x.id === editId)?.items.find((i) => i.id === id)).filter(Boolean) : []);
+  function removeEditItem(i) {
+    edit.items.splice(i, 1);
+    if (edit.start > edit.items.length) edit.start = edit.items.length;
   }
 
-  let expanded = $state(new Set());
-  function toggleBlock(key) {
-    const next = new Set(expanded);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    expanded = next;
+  let picker = $state(null);   // { libraries, libraryId, q, results, series, episodes, selected, target }
+  async function openPicker() {
+    picker = { libraries: [], libraryId: null, q: '', results: [], series: null, episodes: [], selected: new Set(), target: 'tonight', loading: true };
+    try {
+      picker.libraries = await api.libraries();
+      picker.libraryId = picker.libraries[0]?.id ?? null;
+      await searchPicker();
+    } catch (err) { error = err.message; }
   }
-  /** Editing a row inside a collapsed block must reveal it first. */
-  function openBlockPin(b) {
-    if (!expanded.has(b.key)) toggleBlock(b.key);
-    openPin(b.first, b.rows[0].i);
+  let searchTimer;
+  async function searchPicker() {
+    if (!picker?.libraryId) return;
+    picker.loading = true;
+    try {
+      const r = await api.items(picker.libraryId, { search: picker.q, limit: 60 });
+      picker.results = r.items ?? r ?? [];
+    } catch (err) { error = err.message; }
+    finally { picker.loading = false; }
   }
-
-  /** When the last queued item finishes — the end of the evening. */
-  const endsAt = $derived.by(() => {
-    const q = status.queue ?? [];
-    for (let i = q.length - 1; i >= 0; i--) {
-      if (q[i].at != null && q[i].duration) return q[i].at + q[i].duration;
+  function pickerInput() { clearTimeout(searchTimer); searchTimer = setTimeout(searchPicker, 250); }
+  async function openPickSeries(item) {
+    picker.series = item; picker.episodes = []; picker.selected = new Set(); picker.loading = true;
+    try { picker.episodes = await api.episodes(item.id); }
+    catch (err) { error = err.message; }
+    finally { picker.loading = false; }
+  }
+  const lastAired = (seriesTitle) => (view.history ?? []).find((h) => h.outcome === 'aired' && (h.series === seriesTitle || seriesName(h.title) === seriesTitle));
+  function continueIndex() {
+    const la = lastAired(picker.series?.title);
+    if (!la) return 0;
+    const i = picker.episodes.findIndex((e) => e.id === la.id);
+    return i >= 0 ? Math.min(i + 1, picker.episodes.length) : 0;
+  }
+  function selectFrom(i) { picker.selected = new Set(picker.episodes.slice(i).map((e) => e.id)); }
+  function togglePick(id) { const n = new Set(picker.selected); if (n.has(id)) n.delete(id); else n.add(id); picker.selected = n; }
+  async function addPicked(ids) {
+    const list = ids ?? [...picker.selected];
+    if (!list.length) return;
+    const target = picker.target;
+    if (target === 'tonight') await act(() => api.tonightAdd(list), `Added ${list.length} to tonight.`);
+    else if (target === 'new') {
+      const name = picker.series?.title ?? 'New schedule';
+      await act(() => api.createSchedule({ name, itemIds: list }), `Saved as "${name}".`);
+    } else {
+      const s = view.schedules.find((x) => x.id === target);
+      if (s) await act(() => api.updateSchedule(s.id, { itemIds: [...s.items.map((i) => i.id), ...list] }), `Added ${list.length} to "${s.name}".`);
     }
-    return null;
-  });
+    picker.selected = new Set();
+  }
 
-  /**
-   * Opens the track panel, and closes it again.
-   *
-   * It only ever opened: a second click re-fetched the same list and redrew
-   * the panel that was already there, so the button looked broken. Anything
-   * that opens a panel from a single button has to close it too.
-   */
+  // ── on-air controls (as before) ──────────────────────────────────────
+  let tracks = $state(null);
+  let switching = $state(false);
+  let skipping = $state(false);
   async function loadTracks() {
     if (tracks) { tracks = null; return; }
-    error = '';
-    try { tracks = await api.liveTracks(); }
-    catch (err) { error = err.message; }
+    try { tracks = await api.liveTracks(); } catch (err) { error = err.message; }
   }
-
-  /**
-   * Track choice is fixed for the life of an ffmpeg process, so this restarts
-   * the encoder and resumes where it left off. Viewers see a short break.
-   */
   async function applyTracks(audioIndex, subtitleKey, subtitleMode) {
-    switching = true; error = ''; note = '';
+    switching = true; error = '';
     try {
       const r = await api.setTracks({ audioIndex, subtitleKey, subtitleMode });
-      note = `Now: ${r.tracks}`;
+      flash(`Now: ${r.tracks}`);
       status = await api.streamStatus();
       await loadTracks();
     } catch (err) { error = err.message; }
     finally { switching = false; }
   }
-
-  async function stop() {
-    try { await api.stop(); status = await api.streamStatus(); }
-    catch (err) { error = err.message; }
-  }
-
+  async function stop() { try { await api.stop(); } catch (err) { error = err.message; } }
   async function skipCurrent() {
-    skipping = true; error = ''; note = '';
-    try {
-      status = await api.next();
-      tracks = null;   // they describe the clip that just left the air
-    } catch (err) { error = err.message; }
+    skipping = true; error = '';
+    try { status = await api.next(); tracks = null; }
+    catch (err) { error = err.message; }
     finally { skipping = false; }
   }
+  let goTime = $state('');
+  let goAt = $state(false);
+  async function goLive() {
+    const at = goAt && goTime ? epochFor(goTime, null, Math.floor(now)) : null;
+    if (goAt && goTime && at == null) { error = `"${goTime}" is not a time.`; return; }
+    busy = true; error = '';
+    try { await api.goLive(at); flash(at ? `Going live at ${clock(at)} — countdown card until then.` : 'Going live.'); }
+    catch (err) { error = err.message; }
+    finally { busy = false; }
+  }
+  const airTime = () => {
+    const pos = fmtTime(status.position ?? 0);
+    const dur = status.playing?.duration;
+    return dur ? `${pos} / ${fmtTime(dur)}` : pos;
+  };
 </script>
 
+<svelte:window onpointermove={onDragMove} onpointerup={onDragEnd} />
 
-<div class="wrap">
-<h1>Schedule</h1>
-{#if error}<p class="err">{error}</p>{/if}
-
-{#if status.status === 'stopped'}
-  <p class="muted">Nothing is streaming. Pick something from the library.</p>
-{:else if status.status === 'break'}
-  <div class="card">
-    <p class="muted small" style="margin: 0 0 2px;">Off air</p>
-    <p style="margin: 0;"><strong>Back at {clock(status.breakUntil)}</strong></p>
-    <p class="muted small" style="margin: 2px 0 0;">
-      {#if status.queue?.length}
-        The broadcast reconnects by itself and opens with {status.queue[0].title}.
-      {:else}
-        The broadcast reconnects by itself.
-      {/if}
-    </p>
-    <div class="row">
-      <button onclick={skipCurrent} disabled={skipping}>
-        {skipping ? 'Going live…' : 'Go live now'}
-      </button>
-      <div style="flex:1"></div>
-      <button class="danger" onclick={stop}>Stop broadcast</button>
-    </div>
-  </div>
-
-  <div class="uphead">
-    <h2>Up next</h2>
-  </div>
-  <ul class="q">
-    {#each status.queue as item, qi (`${item.id}#${qi}`)}
-      <li class="ep">
-        <span class="tcell" style="color:var(--muted)">{clock(item.at) ?? '—:—'}</span>
-        <span class="qt">{item.title}</span>
-        {#if item.duration}<span class="muted small dur">{fmtTime(item.duration)}</span>{/if}
-      </li>
-    {/each}
-  </ul>
-{:else}
-  <div class="card">
-    <div class="onair-row">
-      {#if status.playing?.image}
-        <img class="cover" src={status.playing.image} alt="" />
-      {/if}
-      <div>
-        <p class="muted small" style="margin: 0 0 2px;">On air</p>
-        <p style="margin: 0;"><strong>{status.playing?.title ?? '—'}</strong></p>
-        <p class="muted small" style="margin: 2px 0 0;">
-          {#if card}
-            live in {fmtTime(Math.max(0, (status.playing.duration ?? 0) - (status.position ?? 0)))}
-          {:else}
-            {airTime()}
-          {/if}
-        </p>
-        <!-- Burned into the picture, so it is worth seeing at a glance:
-             viewers cannot switch this at their end. A pre-show or interval
-             card has no tracks worth reporting. -->
-        {#if !card}
-        <div class="chips">
-          <span class="chip" title="Audio track being broadcast">
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
-                 stroke-width="1.8" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4zM16 9a4 4 0 0 1 0 6"/></svg>
-            {audioLabel(status.tracks?.audio)}
-          </span>
-          <span class="chip" class:off={!status.tracks?.subtitle}
-                title="Subtitle track burned into the picture">
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
-                 stroke-width="1.8" aria-hidden="true"><path d="M3 5h18v14H3zM7 15h4M14 15h3"/></svg>
-            {subtitleLabel(status.tracks?.subtitle)}
-          </span>
-        </div>
-        {/if}
-      </div>
-    </div>
-    <div class="row">
-      <button onclick={skipCurrent} disabled={skipping || (!card && !status.queue?.length)}
-              title={card
-                ? 'Start the show now instead of waiting'
-                : status.queue?.length ? `Skip to ${status.queue[0].title}` : 'Nothing queued to skip to'}>
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"
-             style="vertical-align:-2px; margin-right:6px;"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
-        {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
-      </button>
-      {#if !card}
-        <button onclick={loadTracks} disabled={switching} class:on={Boolean(tracks)}>
-          {tracks ? 'Close' : 'Change audio or subtitles'}
-        </button>
-      {/if}
-      <div style="flex:1"></div>
-      <button class="danger" onclick={stop}>Stop broadcast</button>
-    </div>
-
-    {#if tracks}
-      <div class="tracks">
-        <p class="muted small">
-          Switching restarts the encoder and resumes at the same point, so
-          viewers see a few seconds of interruption.
-        </p>
-
-        <p class="muted small">Audio</p>
-        {#each tracks.audio as a}
-          <button class="line" class:on={a.typeIndex === tracks.chosen.audioIndex}
-                  disabled={switching}
-                  onclick={() => applyTracks(a.typeIndex, tracks.chosen.subtitleKey, undefined)}>
-            {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch{a.title ? ` — ${a.title}` : ''}
-          </button>
-        {/each}
-
-        <p class="muted small">Subtitles</p>
-        <button class="line" class:on={tracks.chosen.subtitleKey === null}
-                disabled={switching}
-                onclick={() => applyTracks(tracks.chosen.audioIndex, null, 'off')}>
-          None
-        </button>
-        {#each tracks.subtitles as s}
-          <button class="line" class:on={String(s.key) === String(tracks.chosen.subtitleKey)}
-                  disabled={switching}
-                  onclick={() => applyTracks(tracks.chosen.audioIndex, s.key, 'always')}>
-            {subtitleChoice(s)}
-          </button>
-        {/each}
-      </div>
-    {/if}
-
-    {#if switching}<p class="muted small">Restarting the encoder…</p>{/if}
-    {#if note}<p class="small">{note}</p>{/if}
-  </div>
-
-  <div class="uphead">
-    <h2>Up next</h2>
-    {#if endsAt}<span class="muted small">ends around {clock(endsAt)}</span>{/if}
-    {#if status.queue?.length > 1}
-      <span class="muted small" style="margin-left:auto">
-        {status.queue.length} queued
-      </span>
-    {/if}
-  </div>
-
-  {#if !status.queue?.length}
-    <p class="muted">
-      Nothing queued — the broadcast ends when this finishes.
-      Add more from the library at any time.
-    </p>
+<div class="ph">
+  <h1>Schedule</h1>
+  {#if playingSeg}<span class="chip ok">{playingSeg.name} · playing</span>{/if}
+  <span class="sp"></span>
+  <label class="switch" title="Drag blocks on the strip and rows in the lineup. Off, the arrow buttons do the same.">
+    <input type="checkbox" checked={dnd} onchange={(e) => act(() => api.scheduleSettings({ dnd: e.currentTarget.checked }))} />
+    Drag and drop
+  </label>
+  {#if naming}
+    <input class="tin wide" placeholder="Name this lineup" bind:value={saveName}
+           onkeydown={(e) => { if (e.key === 'Enter') { act(() => api.createSchedule({ fromTonight: true, name: saveName }), `Saved as "${saveName}".`); naming = false; } if (e.key === 'Escape') naming = false; }}
+           {@attach (el) => el.focus()} />
+    <button class="sm primary" disabled={!saveName.trim()} onclick={() => { act(() => api.createSchedule({ fromTonight: true, name: saveName }), `Saved as "${saveName}".`); naming = false; }}>Save</button>
+    <button class="sm ghost" onclick={() => (naming = false)}>Cancel</button>
   {:else}
-    <ul class="q">
-      {#snippet epRow(item, i)}
-        <li class="ep">
-          {#if pinId === item.id}
-            {@const floor = earliestFor(i)}
-            {@const target = pinValue ? epochFor(pinValue, pinBase, floor) : null}
-            {@const waitH = target != null ? (target - floor) / 3600 : 0}
-            <span class="tcell edit">
-              <input class="tin" type="text" inputmode="numeric" maxlength="5"
-                     placeholder="HH:MM" bind:value={pinValue}
-                     list={`ts-${item.id}`}
-                     class:bad={pinValue && !parseClock(pinValue)}
-                     {@attach (el) => {
-                       // Focus and offer the suggestions as soon as the
-                       // editor opens: waiting for a keystroke hides the
-                       // value help exactly when it is most useful.
-                       el.focus();
-                       el.select();
-                       try { el.showPicker?.(); } catch { /* needs a gesture */ }
-                     }}
-                     onfocus={(e) => { try { e.currentTarget.showPicker?.(); } catch { /* ignore */ } }}
-                     oninput={(e) => { pinValue = maskClock(e.currentTarget.value); }}
-                     onkeydown={(e) => {
-                       if (e.key === 'Enter') savePin(item.id);
-                       else if (e.key === 'Escape') pinId = null;
-                       else stepTime(e);
-                     }}
-                     aria-label="Air time (24-hour, HH:MM)"
-                     title={'24-hour, HH:MM. Arrow keys nudge by 5 minutes, '
-                       + `shift-arrow by an hour. Earliest ${clock(floor)}.`} />
-              <datalist id={`ts-${item.id}`}>
-                {#each timeSuggestions(floor) as t}<option value={t}></option>{/each}
-              </datalist>
-            </span>
-            {#if target && !sameDay(target, Date.now() / 1000)}
-              <!-- Rolling to another day is only safe because it is stated
-                   here as it is typed; amber once the wait gets long. -->
-              <span class="onday" class:far={waitH >= 6}>
-                {new Date(target * 1000)
-                  .toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}
-                {#if waitH >= 6}· {fmtGap(target - floor)} wait{/if}
-              </span>
-            {:else if waitH >= 6}
-              <span class="onday far">{fmtGap(target - floor)} wait</span>
-            {/if}
-          {:else}
-            {@const late = item.startAt && item.at && item.at > item.startAt + 30}
-            <button class="tcell t" class:pinned={item.startAt && !late} class:late disabled={editing}
-                    onclick={() => openPin(item, i)}
-                    title={late
-                      ? `Programmed for ${clock(item.startAt)}, but what runs before it does not finish until then`
-                      : item.startAt ? 'Programmed — click to change' : 'Click to program an air time'}>
-              {#if item.startAt}
-                <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
-                     stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-              {/if}
-              {clock(item.at) ?? '—:—'}
-            </button>
-          {/if}
-
-          <span class="qt">{item.title}</span>
-          {#if item.duration}<span class="muted small dur">{fmtTime(item.duration)}</span>{/if}
-
-          <span class="qctl" class:open={pinId === item.id}>
-            {#if pinId === item.id}
-              <button class="ic ok" onclick={() => savePin(item.id)} title="Set time" aria-label="Set time">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 13l4 4L19 7"/></svg>
-              </button>
-              <button class="ic" onclick={() => nudgeDay(item.id, 1)}
-                      title="Move a day later" aria-label="Move a day later">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-              </button>
-              {#if item.startAt}
-                <button class="ic rm" onclick={() => clearPin(item.id)} title="Clear the programmed time" aria-label="Clear time">
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
-                </button>
-              {:else}
-                <button class="ic" onclick={() => (pinId = null)} title="Cancel" aria-label="Cancel">
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
-                </button>
-              {/if}
-            {:else}
-              <button class="ic" disabled={editing || i === 0} onclick={() => move(i, -1)}
-                      title="Move up" aria-label="Move up">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-              </button>
-              <button class="ic" disabled={editing || i === status.queue.length - 1} onclick={() => move(i, 1)}
-                      title="Move down" aria-label="Move down">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
-              </button>
-              <button class="ic rm" disabled={editing} onclick={() => removeAt(i)}
-                      title="Remove from schedule" aria-label="Remove from schedule">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
-              </button>
-            {/if}
-          </span>
-        </li>
-      {/snippet}
-
-      {#each blocks as b (b.key)}
-        {#if b.startedBy === 'series'}
-          <li class="seriesbrk">
-            <span class="ln"></span>
-            <span class="lbl">then</span>
-            <span class="ln"></span>
-          </li>
-        {/if}
-        {#if b.gap > 30}
-          <!-- A break is the only thing that separates two blocks, so it
-               gets the full width: amber for a programmed interval, red
-               for dead air long enough to lose the audience. -->
-          {@const offline = b.first.breakOffline && b.first.startAt != null}
-          <li class="brk" class:bad={!offline && b.gap > 1200} class:off={offline}>
-            <span class="ln"></span>
-            {#if offline}
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                   stroke-width="1.7" aria-hidden="true"><path d="M18.4 5.6A9 9 0 1 1 5.6 5.6M12 2v8"/></svg>
-              off air · {fmtGap(b.gap)} · back {clock(b.first.at)}
-            {:else}
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                   stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>
-              {b.gap > 1200 ? 'dead air' : 'break'} · {fmtGap(b.gap)} of card
-            {/if}
-            {#if b.first.startAt != null}
-              <button class="brkmode" disabled={editing}
-                      onclick={() => setBreakMode(b.first.id, !offline)}
-                      title={offline
-                        ? 'Keep the stream up and show a countdown card instead'
-                        : 'Take the stream offline for this break — Owncast shows its offline page, and the broadcast comes back on its own'}>
-                {offline ? 'air a card instead' : 'go off air instead'}
-              </button>
-            {/if}
-            <span class="ln"></span>
-          </li>
-        {/if}
-
-        {#if b.count === 1}
-          {@render epRow(b.first, b.rows[0].i)}
-        {:else}
-          <li class="blkrow" class:pinned={b.first.startAt != null}>
-            <button class="bh" onclick={() => toggleBlock(b.key)}
-                    aria-expanded={expanded.has(b.key)}
-                    title={expanded.has(b.key) ? 'Collapse' : 'Show the episodes'}>
-              <svg class="chev" class:open={expanded.has(b.key)} viewBox="0 0 24 24" width="14" height="14"
-                   fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-              <span class="tcell bt" class:pin={b.first.startAt != null}>
-                {#if b.first.startAt != null}
-                  <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor"
-                       stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-                {/if}
-                {clock(b.first.at) ?? '—:—'}
-              </span>
-              {#if blockLabel(b).series}
-                <span class="bl"><strong>{blockLabel(b).series}</strong> — {blockLabel(b).range}</span>
-              {:else}
-                <span class="bl">{blockLabel(b).range}</span>
-              {/if}
-              <span class="bm">{blockMeta(b)}</span>
-            </button>
-            <span class="bctl">
-              <button class="ic rm" disabled={editing} onclick={() => removeBlock(b)}
-                      title={`Remove all ${b.count} episodes from the schedule`}
-                      aria-label={`Remove ${b.count} episodes`}>
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
-              </button>
-            </span>
-          </li>
-          {#if expanded.has(b.key)}
-            {#each b.rows as r (r.i)}
-              {@render epRow(r.item, r.i)}
-            {/each}
-          {/if}
-        {/if}
-      {/each}
-    </ul>
-    <p class="muted small hint">
-      Times are projected from each item's length. Click one to program it —
-      the broadcast then waits behind an interval card rather than starting early.
-    </p>
+    <button class="sm" disabled={!segments.length} onclick={() => { naming = true; saveName = ''; }}>Save lineup as…</button>
   {/if}
-{/if}
+</div>
+{#if error}<p class="err">{error}</p>{/if}
+{#if note}<p class="small note">{note}</p>{/if}
+
+<!-- ── the strip ─────────────────────────────────────────────────────── -->
+<div class="tl" class:dragging={Boolean(drag)}>
+  <div class="scale">
+    {#each ticks as t (t)}<span style:left={pct(t)}>{hhmm(t)}</span>{/each}
+  </div>
+  <div class="lane" bind:this={stripEl}>
+    {#if live && card && placed.find((p) => p.state === 'upcoming')}
+      {@const first = placed.find((p) => p.state === 'upcoming')}
+      <div class="cd2" style:left={pct(now)} style:width={`${Math.max(0.5, ((first.at - now) / (win.b - win.a)) * 100)}%`}>{status.status === 'break' ? 'off air' : 'countdown'}</div>
+    {:else if nextStart && !live && !placed.length}
+      <div class="cd2" style:left={pct(nextStart.at - nextStart.schedule.autoStart.countdownMin * 60)} style:width={`${Math.max(0.5, (nextStart.schedule.autoStart.countdownMin * 60 / (win.b - win.a)) * 100)}%`}>countdown</div>
+    {/if}
+    {#each placed as p (p.key)}
+      {#if breakOf(p) > 0 && p.state === 'upcoming'}
+        <div class="brk2" style:left={pct(p.at - breakOf(p))} style:width={`${(breakOf(p) / (win.b - win.a)) * 100}%`} title={`${fmtGap(breakOf(p))} break`}>{fmtGap(breakOf(p))}</div>
+      {/if}
+      {#if p.startAt}<div class="flag" style:left={pct(p.startAt)} data-t={`pinned ${hhmm(p.startAt)}`}></div>{/if}
+      <div class="blk" class:past={p.state === 'past' || p.state === 'aired' || p.state === 'skipped'} class:now={p.onAir}
+           class:seg2={p.scheduleId && p.segKey !== segments[0]?.key} class:ghost={p.ghost} class:grab={dnd && p.state === 'upcoming'}
+           class:lift={drag?.kind === 'block' && drag.key === p.key}
+           style:left={pct(drag?.kind === 'block' && drag.key === p.key ? drag.at : p.at)}
+           style:width={`${Math.max(0.6, ((p.dur || 1200) / (win.b - win.a)) * 100)}%`}
+           title={`${p.title}${!p.ghost ? ` · ${fmtTime(p.dur)}` : ''} · ${hhmm(p.at)}`}
+           role={dnd && p.state === 'upcoming' ? 'button' : undefined} tabindex={dnd && p.state === 'upcoming' ? 0 : undefined}
+           onpointerdown={(e) => startBlockDrag(e, p)}>
+        {#if p.image}<img class="cv" src={p.image} alt="" onerror={(e) => e.currentTarget.remove()} />{/if}
+        <span class="bt">{epName(p.title)}{#if p.onAir} · on air{/if}</span>
+      </div>
+    {/each}
+    {#if live && status.playing && !card}<div class="nowline" style:left={pct(now)}></div>{/if}
+    {#if startFlag}
+      <div class="startflag" class:grab={dnd} style:left={pct(drag?.kind === 'flag' ? drag.at : startFlag.at)}
+           title={dnd ? 'Drag to change where the schedule starts' : 'Where the schedule starts — move it with the arrows in the lineup'}
+           role={dnd ? 'button' : undefined} tabindex={dnd ? 0 : undefined}
+           onpointerdown={startFlagDrag}></div>
+    {/if}
+    {#if !placed.length}
+      <p class="empty">Nothing lined up. Load a saved schedule or add from the library.</p>
+    {/if}
+  </div>
+  <div class="legend">
+    <span><i class="l-now"></i>on air</span><span><i class="l-past"></i>watched</span><span><i class="l-brk"></i>break</span><span><i class="l-pin"></i>pin / start</span>
+    {#if endsAt && placed.some((p) => p.state === 'upcoming')}<span class="sp"></span><span class="num">ends around {clock(endsAt)}</span>{/if}
+  </div>
 </div>
 
+<div class="two">
+  <div>
+    <!-- ── on air ────────────────────────────────────────────────────── -->
+    {#if status.status === 'break'}
+      <div class="card">
+        <p class="muted small" style="margin:0 0 2px">Off air</p>
+        <p style="margin:0"><strong>Back at {clock(status.breakUntil)}</strong></p>
+        <div class="row">
+          <button onclick={skipCurrent} disabled={skipping}>{skipping ? 'Going live…' : 'Go live now'}</button>
+          <span class="sp"></span>
+          <button class="danger" onclick={stop}>Stop broadcast</button>
+        </div>
+      </div>
+    {:else if live}
+      <div class="card onair">
+        {#if status.playing?.image}<img class="cover" src={status.playing.image} alt="" />{/if}
+        <div class="np">
+          <p class="muted small" style="margin:0">On air</p>
+          <p style="margin:0"><strong>{status.playing?.title ?? '—'}</strong></p>
+          <p class="muted small num" style="margin:0">
+            {#if card}live in {fmtTime(Math.max(0, (status.playing.duration ?? 0) - (status.position ?? 0)))}{:else}{airTime()}{/if}
+          </p>
+          {#if !card}
+            <div class="chips">
+              <span class="chip" title="Audio track being broadcast">{audioLabel(status.tracks?.audio)}</span>
+              <span class="chip" class:off={!status.tracks?.subtitle} title="Subtitle track burned into the picture">{subtitleLabel(status.tracks?.subtitle)}</span>
+            </div>
+          {/if}
+        </div>
+        <div class="acts">
+          <button class="sm" onclick={skipCurrent} disabled={skipping || (!card && !status.queue?.length)}
+                  title={card ? 'Start the show now instead of waiting' : status.queue?.length ? `Skip to ${status.queue[0].title}` : 'Nothing queued to skip to'}>
+            {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip'}
+          </button>
+          {#if !card}<button class="sm" onclick={loadTracks} disabled={switching} class:on={Boolean(tracks)}>{tracks ? 'Close' : 'Tracks'}</button>{/if}
+          <button class="sm danger" onclick={stop}>Stop</button>
+        </div>
+        {#if tracks}
+          <div class="tracks">
+            <p class="muted small">Switching restarts the encoder and resumes at the same point, so viewers see a few seconds of interruption.</p>
+            <p class="muted small">Audio</p>
+            {#each tracks.audio as a}
+              <button class="line" class:on={a.typeIndex === tracks.chosen.audioIndex} disabled={switching}
+                      onclick={() => applyTracks(a.typeIndex, tracks.chosen.subtitleKey, undefined)}>
+                {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch{a.title ? ` — ${a.title}` : ''}
+              </button>
+            {/each}
+            <p class="muted small">Subtitles</p>
+            <button class="line" class:on={tracks.chosen.subtitleKey === null} disabled={switching}
+                    onclick={() => applyTracks(tracks.chosen.audioIndex, null, 'off')}>None</button>
+            {#each tracks.subtitles as s}
+              <button class="line" class:on={String(s.key) === String(tracks.chosen.subtitleKey)} disabled={switching}
+                      onclick={() => applyTracks(tracks.chosen.audioIndex, s.key, 'always')}>{subtitleChoice(s)}</button>
+            {/each}
+            {#if switching}<p class="muted small">Restarting the encoder…</p>{/if}
+          </div>
+        {/if}
+      </div>
+    {:else if nextStart}
+      <div class="cdbanner">
+        <div><div class="lbl">Next planned start</div><div class="big num">{clock(nextStart.at)}</div></div>
+        <div class="small">{nextStart.schedule.name}
+          {#if nextStart.schedule.autoStart.countdownMin} · countdown card from {hhmm(nextStart.at - nextStart.schedule.autoStart.countdownMin * 60)}{/if}
+          · {recur(nextStart.schedule)}</div>
+        <button class="sm" onclick={() => openEdit(nextStart.schedule)}>Edit</button>
+      </div>
+    {/if}
+
+    <!-- ── lineup ───────────────────────────────────────────────────── -->
+    <div class="uphead">
+      <h2>Lineup</h2>
+      {#if upcomingCount}<span class="muted small">{upcomingCount} to play{#if endsAt} · ends around {clock(endsAt)}{/if}</span>{/if}
+      <span class="sp"></span>
+      <button class="sm ghost" onclick={openPicker}>Add from library</button>
+      <span class="menu">
+        <button class="sm ghost" onclick={() => (appendOpen = !appendOpen)} disabled={!view.schedules.length}>Append schedule…</button>
+        {#if appendOpen}
+          <div class="pop">
+            {#each view.schedules as s (s.id)}
+              <button class="line" onclick={() => { appendOpen = false; act(() => api.appendSchedule(s.id), `Appended "${s.name}".`); }}>{s.name} <span class="muted">· {startLabel(s)}</span></button>
+            {/each}
+          </div>
+        {/if}
+      </span>
+      {#if !live && upcomingCount}
+        {#if goAt}
+          <input class="tin" type="text" inputmode="numeric" maxlength="5" placeholder="HH:MM" bind:value={goTime}
+                 oninput={(e) => { goTime = maskClock(e.currentTarget.value); }} aria-label="Go live at (24-hour)" />
+        {/if}
+        <button class="sm" class:on={goAt} onclick={() => (goAt = !goAt)} title="Go live at a time — a countdown card runs until then" aria-pressed={goAt}>⏱</button>
+        <button class="sm primary" disabled={busy} onclick={goLive}>{goAt && goTime ? `Go live at ${goTime}` : 'Go live'}</button>
+      {/if}
+    </div>
+
+    {#if !segments.length}
+      <p class="muted">Nothing lined up. Load a saved schedule from the right, or add from the library.</p>
+    {/if}
+
+    {#each segments as seg (seg.key)}
+      {@const c = segCounts(seg)}
+      {@const past = pastOf(seg)}
+      <div class="blkw" class:pinned={seg.startAt} class:over={segOver === seg.key} role="group"
+           ondragover={(e) => { if (segDrag) { e.preventDefault(); segOver = seg.key; } }}
+           ondrop={(e) => segDrop(e, seg)}>
+        <div class="bh" draggable={dnd} role="toolbar" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
+          {#if dnd}<span class="handle" title="Drag to move this schedule"></span>{/if}
+          <span class="bl"><strong>{seg.name}</strong> <span class="muted">· {segRange(seg)}</span></span>
+          <span class="bm">{c.up} to play{#if c.watched} · {c.watched} watched{/if}</span>
+          {#if seg.items.some((i) => i.onAir)}<span class="chip ok">playing</span>{/if}
+          {#if pinKey === `seg:${seg.key}`}
+            <span class="tcell edit">
+              <input class="tin" type="text" inputmode="numeric" maxlength="5" placeholder="HH:MM" bind:value={pinValue}
+                     oninput={(e) => { pinValue = maskClock(e.currentTarget.value); }}
+                     onkeydown={(e) => { if (e.key === 'Enter') savePin(); else if (e.key === 'Escape') pinKey = null; else stepTime(e); }}
+                     {@attach (el) => { el.focus(); el.select(); }} aria-label="Air time (24-hour, HH:MM)" />
+              <button class="ic ok" onclick={savePin} title="Set time">✓</button>
+              <button class="ic" onclick={nudgeDay} title="A day later">→</button>
+              {#if seg.startAt}<button class="ic rm" onclick={() => clearPin(`seg:${seg.key}`)} title="Clear the programmed time">×</button>{:else}<button class="ic" onclick={() => (pinKey = null)} title="Cancel">×</button>{/if}
+            </span>
+          {:else}
+            <button class="t" class:pinned={seg.startAt} onclick={() => openPin(`seg:${seg.key}`, seg.startAt, placed.find((p) => p.segKey === seg.key && p.state === 'upcoming') ? floorFor(placed.find((p) => p.segKey === seg.key && p.state === 'upcoming').key) : null)}
+                    title={seg.startAt ? 'Programmed — click to change' : 'Program when this schedule starts'}>
+              {seg.startAt ? clock(seg.startAt) : 'set time'}
+            </button>
+          {/if}
+          <span class="mv">
+            <button class="ic" disabled={busy || segments[0] === seg} onclick={() => act(() => api.tonightSegMove(seg.key, -1))} title="Move up">↑</button>
+            <button class="ic" disabled={busy || segments[segments.length - 1] === seg} onclick={() => act(() => api.tonightSegMove(seg.key, 1))} title="Move down">↓</button>
+          </span>
+          <button class="ic rm" disabled={busy} onclick={() => armed(`seg:${seg.key}`, () => act(() => api.tonightRemoveSeg(seg.key)))}
+                  title={confirmOnce.key === `seg:${seg.key}` ? 'Click again to remove this schedule from tonight' : 'Remove from tonight'}>
+            {confirmOnce.key === `seg:${seg.key}` ? '!' : '×'}
+          </button>
+        </div>
+        {#if past.length > PAST_SHOWN}
+          <button class="showpast" onclick={() => (showPast[seg.key] = !showPast[seg.key])}>
+            {showPast[seg.key] ? `Hide ${past.length - PAST_SHOWN} earlier` : `Show all ${past.length} earlier`}
+          </button>
+        {/if}
+        <ul class="q">
+          {#each visibleRows(seg) as it, i (it.key)}
+            {@const isPast = it.state === 'past' || it.state === 'aired' || it.state === 'skipped'}
+            {@const p = placed.find((x) => x.key === it.key)}
+            {#if it.state === 'upcoming' && seg.items.find((x) => x.state === 'upcoming') === it && !seg.items.some((x) => x.onAir || x.state === 'aired' || x.state === 'skipped')}
+              <li class="startbar">
+                <span>▶ starts here</span><span class="ln"></span>
+                <span class="mv">
+                  <button class="ic" disabled={busy || seg.items.indexOf(it) === 0} onclick={() => act(() => api.tonightSegStart(seg.key, seg.items.indexOf(it) - 1))} title="Start one earlier">↑</button>
+                  <button class="ic" disabled={busy || seg.items.indexOf(it) >= seg.items.length - 1} onclick={() => act(() => api.tonightSegStart(seg.key, seg.items.indexOf(it) + 1))} title="Start one later">↓</button>
+                </span>
+              </li>
+            {/if}
+            {#if it.state === 'upcoming' && breakOf(it) > 0}
+              <li class="brk">
+                <span class="ln"></span>
+                <span>break · {fmtGap(breakOf(it))}</span>
+                {#if autoBreak(it)}<span class="chip amber" title="From the break rule">auto</span>{/if}
+                {#if it.breakBefore}<button class="ic rm" onclick={() => act(() => api.tonightSetItem(it.key, { breakBefore: null }))} title="Remove this break">×</button>{/if}
+                <span class="ln"></span>
+              </li>
+            {/if}
+            <li class:past={isPast} class:start={it.onAir} class:over={rowOver === it.key} class:skipped={it.state === 'skipped'}
+                draggable={dnd && it.state === 'upcoming'}
+                ondragstart={(e) => rowDragStart(e, seg, it)} ondragover={(e) => rowDragOver(e, seg, it)}
+                ondrop={(e) => rowDrop(e, seg, it)} ondragend={() => { rowDrag = null; rowOver = null; }}>
+              {#if dnd && it.state === 'upcoming'}<span class="handle"></span>{/if}
+              {#if it.image}<img class="cv xs" src={it.image} alt="" onerror={(e) => e.currentTarget.remove()} />{/if}
+              <span class="qt">
+                {#if isPast}<span class="tick" class:sk={it.state === 'skipped'}>{it.state === 'skipped' ? '↷' : '✓'}</span>{/if}
+                {epName(it.title)}
+                {#if it.onAir}<small>on air</small>{:else if it.state === 'skipped'}<small>skipped</small>{:else if it.state === 'aired'}<small>aired</small>{:else if it.watched}<small>watched</small>{/if}
+              </span>
+              {#if it.state === 'upcoming'}
+                {#if pinKey === it.key}
+                  <span class="tcell edit">
+                    <input class="tin" type="text" inputmode="numeric" maxlength="5" placeholder="HH:MM" bind:value={pinValue}
+                           list={`ts-${it.key}`} class:bad={pinValue && !parseClock(pinValue)}
+                           oninput={(e) => { pinValue = maskClock(e.currentTarget.value); }}
+                           onkeydown={(e) => { if (e.key === 'Enter') savePin(); else if (e.key === 'Escape') pinKey = null; else stepTime(e); }}
+                           {@attach (el) => { el.focus(); el.select(); try { el.showPicker?.(); } catch { /* gesture */ } }}
+                           aria-label="Air time (24-hour, HH:MM)" title={`24-hour, HH:MM. Arrow keys nudge by 5 minutes, shift-arrow by an hour. Earliest ${clock(pinFloor)}.`} />
+                    <datalist id={`ts-${it.key}`}>{#each timeSuggestions(pinFloor) as t}<option value={t}></option>{/each}</datalist>
+                    {#if pinTarget && !sameDay(pinTarget, now)}<span class="onday">{new Date(pinTarget * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}</span>{/if}
+                  </span>
+                {:else}
+                  {@const late = it.startAt && p?.at && p.at > it.startAt + 30}
+                  <button class="t" class:pinned={it.startAt && !late} class:late disabled={busy}
+                          onclick={() => openPin(it.key, it.startAt ?? p?.at ?? null, floorFor(it.key))}
+                          title={late ? `Programmed for ${clock(it.startAt)}, but what runs before it does not finish until then` : it.startAt ? 'Programmed — click to change' : 'Click to program an air time'}>
+                    {it.startAt ? '⏱ ' : ''}{p?.at && p.sure !== false ? clock(p.at) : '—:—'}
+                  </button>
+                {/if}
+              {/if}
+              {#if it.duration}<span class="muted small dur num">{fmtTime(it.duration)}</span>{/if}
+              <span class="qctl">
+                {#if pinKey === it.key}
+                  <button class="ic ok" onclick={savePin} title="Set time">✓</button>
+                  <button class="ic" onclick={nudgeDay} title="A day later">→</button>
+                  {#if it.startAt}<button class="ic rm" onclick={() => clearPin(it.key)} title="Clear the programmed time">×</button>{:else}<button class="ic" onclick={() => (pinKey = null)} title="Cancel">×</button>{/if}
+                {:else if it.state === 'upcoming'}
+                  {#if it.startAt}
+                    <button class="brkmode" disabled={busy} onclick={() => act(() => api.tonightSetItem(it.key, { breakOffline: !it.breakOffline }))}
+                            title={it.breakOffline ? 'Keep the stream up with a countdown card instead' : 'Go off air until then instead of showing a card'}>
+                      {it.breakOffline ? 'card' : 'off air'}
+                    </button>
+                  {/if}
+                  {#if !breakOf(it) && seg.items.find((x) => x.state === 'upcoming') !== it}
+                    <button class="ic" disabled={busy} onclick={() => act(() => api.tonightSetItem(it.key, { breakBefore: (view.settings.breakMinutes || 5) * 60 }))} title={`Add a ${view.settings.breakMinutes || 5} minute break before this one`}>⏸</button>
+                  {/if}
+                  <span class="mv">
+                    <button class="ic" disabled={busy} onclick={() => act(() => api.tonightMove(it.key, -1))} title="Move up">↑</button>
+                    <button class="ic" disabled={busy} onclick={() => act(() => api.tonightMove(it.key, 1))} title="Move down">↓</button>
+                  </span>
+                  <button class="ic rm" disabled={busy} onclick={() => act(() => api.tonightRemove(it.key))} title="Remove from tonight">×</button>
+                {/if}
+              </span>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/each}
+    {#if segments.length}
+      <div class="row" style="justify-content:flex-end">
+        <button class="sm ghost" disabled={busy} onclick={() => armed('clear', () => act(() => api.tonightClear(), 'Tonight cleared.'))}>
+          {confirmOnce.key === 'clear' ? 'Really clear tonight?' : 'Clear tonight'}
+        </button>
+      </div>
+    {/if}
+  </div>
+
+  <!-- ── rail ─────────────────────────────────────────────────────────── -->
+  <div class="rail">
+    <div class="card">
+      <div class="tabs">
+        <button class:on={tab === 'saved'} onclick={() => (tab = 'saved')}>Saved</button>
+        <button class:on={tab === 'breaks'} onclick={() => (tab = 'breaks')}>Breaks</button>
+        <button class:on={tab === 'history'} onclick={() => (tab = 'history')}>History</button>
+      </div>
+
+      {#if tab === 'saved'}
+        {#if editId && edit}
+          {@const s = view.schedules.find((x) => x.id === editId)}
+          <div class="form">
+            <h3>Edit · {s?.name}</h3>
+            <label>Name <input bind:value={edit.name} /></label>
+            <label>Starts from
+              <select bind:value={edit.start}>
+                {#each editItems as it, i}<option value={i}>{epName(it.title)}{#if s?.watched.includes(i)} · watched{/if}</option>{/each}
+                <option value={editItems.length}>finished</option>
+              </select>
+            </label>
+            <label class="chk"><input type="checkbox" bind:checked={edit.auto} /> Auto-start</label>
+            {#if edit.auto}
+              <label>Time <input class="tin" type="text" inputmode="numeric" maxlength="5" bind:value={edit.time} oninput={(e) => { edit.time = maskClock(e.currentTarget.value); }} /></label>
+              <div class="l">
+                <span>Repeat</span>
+                <div class="days">
+                  {#each DAYS as d, i}
+                    <button type="button" class:on={edit.days.includes(i)} disabled={Boolean(edit.date)}
+                            onclick={() => { edit.days = edit.days.includes(i) ? edit.days.filter((x) => x !== i) : [...edit.days, i].sort(); }}>{d}</button>
+                  {/each}
+                </div>
+              </div>
+              <label>Or once on <input type="date" bind:value={edit.date} /></label>
+              <label>Countdown card
+                <select bind:value={edit.countdownMin}><option value={0}>Off</option><option value={5}>5 minutes before</option><option value={15}>15 minutes before</option><option value={30}>30 minutes before</option></select>
+              </label>
+            {/if}
+            <label>Breaks
+              <select bind:value={edit.breaks}><option value="global">Use the break rule</option><option value="none">None</option><option value="custom">Custom</option></select>
+            </label>
+            {#if edit.breaks === 'custom'}
+              <div class="l"><span>Every</span><span><input class="tin" bind:value={edit.every} /> episodes · <input class="tin" bind:value={edit.minutes} /> min</span></div>
+            {/if}
+            <details>
+              <summary>{editItems.length} items</summary>
+              <ul class="edititems">
+                {#each editItems as it, i (it.id + i)}
+                  <li><span class="qt">{i + 1}. {it.title}</span><button class="ic rm" onclick={() => removeEditItem(i)} title="Remove from this schedule">×</button></li>
+                {/each}
+              </ul>
+            </details>
+            <div class="row" style="justify-content:space-between">
+              <button class="sm danger" onclick={() => armed(`del:${editId}`, () => { const id = editId; editId = null; edit = null; act(() => api.deleteSchedule(id), 'Deleted.'); })}>
+                {confirmOnce.key === `del:${editId}` ? 'Really delete?' : 'Delete'}
+              </button>
+              <span><button class="sm ghost" onclick={() => { editId = null; edit = null; }}>Cancel</button> <button class="sm primary" onclick={saveEdit}>Save</button></span>
+            </div>
+          </div>
+        {:else}
+          <div class="saved">
+            {#each view.schedules as s (s.id)}
+              <div class="sv" class:playing={playingSeg?.scheduleId === s.id}>
+                <span class="nm">{s.name}</span>
+                {#if playingSeg?.scheduleId === s.id}<span class="chip ok">playing</span>
+                {:else if segments.some((g) => g.scheduleId === s.id)}<span class="chip">tonight</span>{/if}
+                <div class="progress" class:done={s.start >= s.items.length}><i style:width={`${progress(s)}%`}></i></div>
+                <div class="meta">
+                  <span>{s.items.length} items · {startLabel(s)}</span>
+                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}</span>
+                </div>
+                <div class="acts">
+                  <button onclick={() => act(() => api.loadSchedule(s.id), `Loaded "${s.name}".`)} disabled={busy} title="Replace tonight with this schedule">Load</button>
+                  <button onclick={() => act(() => api.appendSchedule(s.id), `Appended "${s.name}".`)} disabled={busy} title="Add it after what is already lined up">Append</button>
+                  <button onclick={() => openEdit(s)}>Edit</button>
+                  <button onclick={() => act(() => api.duplicateSchedule(s.id), 'Duplicated.')} disabled={busy}>Copy</button>
+                  {#if s.start >= s.items.length || s.watched.length}<button onclick={() => act(() => api.resetSchedule(s.id), 'Progress reset.')} disabled={busy} title="Forget what was watched; start from the first item">Reset</button>{/if}
+                </div>
+              </div>
+            {/each}
+            {#if !view.schedules.length}
+              <p class="muted small">No saved schedules yet. Line something up and use "Save lineup as…", or add from the library into a new schedule.</p>
+            {/if}
+          </div>
+        {/if}
+      {:else if tab === 'breaks'}
+        <div class="form">
+          <div class="l"><span>Every</span><span><input class="tin" type="number" min="0" max="99" value={view.settings.breakEvery} onchange={(e) => act(() => api.scheduleSettings({ breakEvery: +e.currentTarget.value }))} /> episodes</span></div>
+          <div class="l"><span>Length</span><span><input class="tin" type="number" min="1" max="180" value={view.settings.breakMinutes} onchange={(e) => act(() => api.scheduleSettings({ breakMinutes: +e.currentTarget.value }))} /> minutes</span></div>
+          <div class="l"><span>While waiting</span>
+            <select value={view.settings.breakOffline ? 'off' : 'card'} onchange={(e) => act(() => api.scheduleSettings({ breakOffline: e.currentTarget.value === 'off' }))}>
+              <option value="card">Countdown card</option><option value="off">Go off air</option>
+            </select>
+          </div>
+          <p class="muted tiny">{view.settings.breakEvery ? `A ${view.settings.breakMinutes}-minute break after every ${view.settings.breakEvery} episodes` : 'No automatic breaks'}. Schedules can override this in their own settings. Breaks you place by hand stay.</p>
+        </div>
+      {:else}
+        <div class="hh"><span class="muted tiny">{view.history.length} of 100 kept</span><span class="sp"></span>
+          <button class="sm ghost" disabled={!view.history.length} onclick={() => armed('hist', () => act(() => api.clearHistory(), 'History cleared.'))}>{confirmOnce.key === 'hist' ? 'Really clear?' : 'Clear'}</button></div>
+        <ul class="hist">
+          {#each view.history as h, i (h.at + ':' + i)}
+            <li class:sk={h.outcome === 'skipped'}>
+              <span class="when num">{sameDay(h.at / 1000, now) ? hhmm(h.at / 1000) : new Date(h.at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+              <span class="qt">{h.title}{#if h.schedule}<small> · {h.schedule}</small>{/if}</span>
+              <span class="v">{h.outcome === 'skipped' ? `skipped at ${fmtTime(h.seconds)}` : 'aired'}</span>
+            </li>
+          {/each}
+          {#if !view.history.length}<li class="muted small">Nothing has aired yet.</li>{/if}
+        </ul>
+      {/if}
+    </div>
+  </div>
+</div>
+
+<!-- ── picker ─────────────────────────────────────────────────────────── -->
+{#if picker}
+  <div class="backdrop" onclick={(e) => { if (e.target === e.currentTarget) picker = null; }} role="presentation">
+    <div class="modal" role="dialog" aria-label="Add from library">
+      <div class="mh">
+        {#if picker.series}<button class="sm ghost" onclick={() => (picker.series = null)}>← back</button><h3>{picker.series.title}</h3>
+        {:else}
+          <h3>Add from library</h3>
+          <select bind:value={picker.libraryId} onchange={searchPicker}>{#each picker.libraries as l}<option value={l.id}>{l.name}</option>{/each}</select>
+          <input class="find" placeholder="Search…" bind:value={picker.q} oninput={pickerInput} {@attach (el) => el.focus()} />
+        {/if}
+        <span class="sp"></span>
+        <label class="small">Add to
+          <select bind:value={picker.target}>
+            <option value="tonight">tonight</option>
+            {#each view.schedules as s}<option value={s.id}>{s.name}</option>{/each}
+            <option value="new">a new schedule</option>
+          </select>
+        </label>
+        <button class="ic" onclick={() => (picker = null)} title="Close">×</button>
+      </div>
+      {#if picker.series}
+        {@const ci = continueIndex()}
+        <div class="row">
+          <button class="sm primary" disabled={ci >= picker.episodes.length} onclick={() => { selectFrom(ci); addPicked(); }}>
+            {ci > 0 ? `Continue · ${epName(picker.episodes[ci]?.title ?? '')}` : 'Whole season'}
+          </button>
+          <button class="sm" onclick={() => selectFrom(0)}>Select all</button>
+          <button class="sm" disabled={!picker.selected.size} onclick={() => addPicked()}>Add {picker.selected.size} selected</button>
+          <span class="muted small">Click an episode to pick it, or "from here" to take the rest.</span>
+        </div>
+        <ul class="eps">
+          {#each picker.episodes as ep, i (ep.id)}
+            <li class:sel={picker.selected.has(ep.id)}>
+              <label><input type="checkbox" checked={picker.selected.has(ep.id)} onchange={() => togglePick(ep.id)} /> {ep.title}</label>
+              <button class="sm ghost" onclick={() => selectFrom(i)}>from here</button>
+            </li>
+          {/each}
+          {#if picker.loading}<li class="muted small">Loading…</li>{/if}
+        </ul>
+      {:else}
+        <ul class="results">
+          {#each picker.results as it (it.id)}
+            <li>
+              <button class="line" onclick={() => (it.type === 'Movie' ? addPicked([it.id]) : openPickSeries(it))}>
+                {#if it.image}<img class="cv xs" src={it.image} alt="" onerror={(e) => e.currentTarget.remove()} />{/if}
+                <span class="qt">{it.title}</span>
+                <span class="muted small">{it.type === 'Movie' ? 'add' : `${it.childCount ?? ''} episodes ›`}</span>
+              </button>
+            </li>
+          {/each}
+          {#if picker.loading}<li class="muted small">Loading…</li>{:else if !picker.results.length}<li class="muted small">Nothing found.</li>{/if}
+        </ul>
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <style>
-  .wrap { max-width: 680px; margin: 0 auto; }
-  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-  .onair-row { display: flex; gap: 14px; align-items: center; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-  .chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 2px 9px 2px 7px; border-radius: 999px;
-    background: var(--surface-2); border: 1px solid var(--border);
-    font-size: 12px; color: var(--text); max-width: 260px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .chip svg { color: var(--muted); flex-shrink: 0; }
+  .ph { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .ph h1 { margin: 0; }
+  .sp { flex: 1; }
+  .switch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .switch input { width: auto; }
+  .note { color: var(--success); margin: 0 0 8px; }
+  button.sm { padding: 4px 10px; font-size: 13px; }
+  button.ghost { background: transparent; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  .num { font-variant-numeric: tabular-nums; }
+  .tiny { font-size: 11.5px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; }
   .chip.off { color: var(--muted); }
-  .cover {
-    width: 52px; height: 74px; object-fit: cover; border-radius: 6px;
-    border: 1px solid var(--border); flex-shrink: 0;
-    box-shadow: 0 2px 8px rgba(0,0,0,.25);
-  }
-  .tracks { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
-  .line {
-    display: block; width: 100%; text-align: left; margin: 3px 0;
-    background: transparent; border-color: var(--border); font-size: 13px;
-  }
+  .chip.ok { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, transparent); background: color-mix(in srgb, var(--success) 12%, transparent); }
+  .chip.amber { color: #c98a2e; border-color: color-mix(in srgb, #c98a2e 45%, transparent); background: color-mix(in srgb, #c98a2e 14%, transparent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+
+  /* the strip */
+  .tl { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 12px 14px 12px; overflow-x: auto; user-select: none; }
+  .tl.dragging { cursor: grabbing; }
+  .scale { position: relative; height: 16px; margin-bottom: 6px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .scale span { position: absolute; top: 0; transform: translateX(-50%); }
+  .lane { position: relative; height: 56px; min-width: 640px; border-radius: 6px; background: repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 1px), var(--border) calc(12.5% - 1px) 12.5%); }
+  .blk { position: absolute; top: 9px; height: 38px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); display: flex; align-items: center; gap: 6px; padding: 0 7px; font-size: 12px; overflow: hidden; white-space: nowrap; box-sizing: border-box; }
+  .blk.grab { cursor: grab; }
+  .blk.lift { z-index: 3; box-shadow: 0 6px 18px rgba(0,0,0,.35); border-color: var(--accent); }
+  .blk.past { opacity: .5; }
+  .blk.ghost { border-style: dashed; }
+  .blk.now { border-color: var(--success); background: color-mix(in srgb, var(--success) 16%, var(--surface-2)); }
+  .blk.seg2 { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+  .blk .cv { width: 20px; height: 28px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
+  .blk .bt { overflow: hidden; text-overflow: ellipsis; }
+  .brk2 { position: absolute; top: 16px; height: 24px; border-radius: 4px; background: color-mix(in srgb, #c98a2e 14%, transparent); border: 1px dashed color-mix(in srgb, #c98a2e 60%, transparent); color: #c98a2e; font-size: 10.5px; display: grid; place-items: center; overflow: hidden; }
+  .cd2 { position: absolute; top: 9px; height: 38px; border-radius: 6px; border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-size: 11px; display: grid; place-items: center; }
+  .nowline { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--success); z-index: 2; }
+  .nowline::before { content: "now"; position: absolute; top: -13px; left: -10px; font-size: 10px; color: var(--success); }
+  .flag { position: absolute; top: 2px; width: 2px; height: 52px; background: var(--accent); z-index: 1; }
+  .flag::after { content: attr(data-t); position: absolute; top: -2px; left: 5px; font-size: 10px; color: var(--accent); white-space: nowrap; }
+  .startflag { position: absolute; top: 0; width: 3px; height: 56px; background: var(--accent); z-index: 2; border-radius: 2px; }
+  .startflag.grab { cursor: ew-resize; }
+  .startflag::before { content: "▶ starts here"; position: absolute; bottom: -15px; left: -3px; font-size: 10px; color: var(--accent); white-space: nowrap; letter-spacing: .04em; }
+  .empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--muted); font-size: 13px; }
+  .legend { display: flex; gap: 14px; margin-top: 22px; font-size: 11.5px; color: var(--muted); flex-wrap: wrap; align-items: center; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; border: 1px solid var(--border); }
+  .legend .l-now { background: color-mix(in srgb, var(--success) 40%, var(--surface-2)); }
+  .legend .l-past { background: var(--surface-2); opacity: .5; }
+  .legend .l-brk { background: color-mix(in srgb, #c98a2e 14%, transparent); border: 1px dashed #c98a2e; }
+  .legend .l-pin { background: var(--accent); }
+
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 22px; align-items: start; margin-top: 18px; }
+  @media (max-width: 980px) { .two { grid-template-columns: 1fr; } }
+
+  /* on air */
+  .onair { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; }
+  .onair .tracks { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 10px; }
+  .onair .acts { display: flex; flex-direction: column; gap: 6px; }
+  .cover { width: 52px; height: 74px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  .line { display: block; width: 100%; text-align: left; margin: 3px 0; background: transparent; border-color: var(--border); font-size: 13px; }
   .line.on { border-color: var(--accent); color: var(--accent); }
-  .uphead {
-    display: flex; align-items: baseline; gap: 10px;
-    margin: 22px 0 6px;
-  }
+  .cdbanner { display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: center; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent 70%); border-radius: 12px; padding: 12px 16px; }
+  .cdbanner .big { font-size: 24px; font-weight: 500; }
+  .cdbanner .lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+  /* lineup */
+  .uphead { display: flex; align-items: center; gap: 10px; margin: 20px 0 8px; flex-wrap: wrap; }
   .uphead h2 { margin: 0; }
+  .menu { position: relative; }
+  .pop { position: absolute; top: 110%; right: 0; z-index: 5; min-width: 260px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+  .blkw { border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: var(--radius); margin-top: 10px; overflow: hidden; }
+  .blkw.pinned { border-left-color: var(--accent); }
+  .blkw.over { outline: 2px dashed var(--accent); }
+  .bh { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--surface); flex-wrap: wrap; }
+  .bh .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bh .bm { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .handle { width: 12px; height: 18px; flex-shrink: 0; color: var(--muted); cursor: grab; background: radial-gradient(circle, currentColor 1.3px, transparent 1.5px) 0 0 / 6px 6px; opacity: .7; }
+  .showpast { display: block; width: 100%; text-align: left; background: transparent; border: none; border-bottom: 1px solid var(--border); border-radius: 0; color: var(--accent); font-size: 12px; padding: 4px 12px; }
   .q { list-style: none; padding: 0; margin: 0; }
-  .q li {
-    display: flex; align-items: center; gap: 12px;
-    padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px;
-    border-radius: var(--radius);
-    transition: background .12s ease;
-  }
+  .q li { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .q li:last-child { border-bottom: none; }
   .q li:hover { background: var(--surface-2); }
+  .q li.over { box-shadow: inset 0 2px 0 var(--accent); }
+  .q li.past { color: var(--muted); }
+  .q li.past .cv { filter: grayscale(1) brightness(.75); }
+  .q li.start { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .tick { color: var(--success); margin-right: 6px; font-size: 12px; }
+  .tick.sk { color: var(--muted); }
   .qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dur { font-variant-numeric: tabular-nums; }
-
-  /* The time column is the point of this view, so it leads every row and
-     keeps one width whether it is projected, programmed or being edited. */
-  .tcell {
-    display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px;
-    /* Wide enough for a weekday-qualified time ("Wed 14:26") plus the pin
-       marker, so a schedule crossing midnight never wraps. */
-    width: 106px; flex-shrink: 0; white-space: nowrap;
-    font-variant-numeric: tabular-nums; font-size: 13px;
-  }
-  .onday {
-    font-size: 11px; color: var(--accent);
-    white-space: nowrap; flex-shrink: 0;
-  }
-  /* A long wait is legal but rarely intended — say so before it is saved. */
-  .onday.far { color: #c98a2e; }
-  .t {
-    padding: 3px 6px; border: 1px solid transparent; border-radius: 6px;
-    background: transparent; color: var(--muted); cursor: pointer;
-  }
-  .t:hover:not(:disabled) { border-color: var(--border); color: var(--text); }
-  .t.pinned { color: var(--accent); font-weight: 500; }
-  /* Programmed, but the material ahead of it overruns that time. */
-  .t.late { color: var(--muted); text-decoration: underline dotted; }
-  .tin {
-    width: 74px; padding: 2px 4px; font-size: 13px;
-    font-variant-numeric: tabular-nums;
-  }
-  /* Not a real 24-hour time — say so while it is typed, not on save. */
-  .tin.bad { border-color: var(--danger); color: var(--danger); }
-
-  /* Break divider: the one thing allowed to interrupt the rundown. */
-  .q li.brk {
-    display: flex; align-items: center; gap: 8px;
-    border: none; padding: 8px 4px; font-size: 12px;
-    color: #c98a2e;
-  }
+  .qt small { color: var(--muted); margin-left: 6px; }
+  .cv.xs { width: 26px; height: 36px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
+  .dur { flex-shrink: 0; }
+  .startbar { display: flex; align-items: center; gap: 8px; padding: 3px 10px !important; font-size: 11px; color: var(--accent); letter-spacing: .06em; text-transform: uppercase; border-bottom: none !important; }
+  .startbar .ln { flex: 1; border-top: 2px solid var(--accent); }
+  .startbar:hover { background: transparent !important; }
+  .q li.brk { border-bottom: none; padding: 6px 8px; font-size: 12px; color: #c98a2e; }
   .q li.brk .ln { flex: 1; border-top: 1px dashed color-mix(in srgb, currentColor 45%, transparent); }
   .q li.brk:hover { background: transparent; }
-  .q li.brk.bad { color: var(--danger); }
-  .q li.brk.off { color: var(--muted); }
+  .t { padding: 3px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .t.pinned { color: var(--accent); font-weight: 500; }
+  .t.late { text-decoration: underline dotted; }
+  .tcell.edit { display: inline-flex; align-items: center; gap: 4px; }
+  .tin { width: 74px; padding: 3px 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .tin.wide { width: 220px; }
+  .tin.bad { border-color: var(--danger); color: var(--danger); }
+  .onday { font-size: 11px; color: var(--accent); white-space: nowrap; }
+  .qctl { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .mv { display: inline-flex; gap: 0; }
+  .ic { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border-radius: 999px; background: transparent; border: none; color: var(--muted); font-size: 13px; }
+  .ic:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+  .ic.rm:hover:not(:disabled) { color: var(--danger); }
+  .ic.ok { color: var(--success); }
+  .brkmode { padding: 1px 8px; font-size: 11.5px; border-radius: 999px; background: transparent; border: 1px solid color-mix(in srgb, currentColor 45%, transparent); color: var(--muted); }
 
-  /* One series running straight into the next — a boundary, not a wait,
-     so it stays quiet where the break divider is loud. */
-  .q li.seriesbrk {
-    display: flex; align-items: center; gap: 10px;
-    border: none; padding: 5px 4px;
-  }
-  .q li.seriesbrk:hover { background: transparent; }
-  .q li.seriesbrk .ln { flex: 1; border-top: 1px solid var(--border); }
-  .q li.seriesbrk .lbl {
-    font-size: 11px; color: var(--muted);
-    letter-spacing: .06em; text-transform: uppercase;
-  }
-  .brkmode {
-    padding: 1px 8px; font-size: 11.5px; border-radius: 999px;
-    background: transparent; border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
-    color: inherit; cursor: pointer; flex-shrink: 0;
-  }
-  .brkmode:hover:not(:disabled) { border-color: currentColor; }
+  /* rail */
+  .rail .card { padding: 14px 16px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+  .tabs button { border: none; background: transparent; padding: 6px 10px; border-radius: 6px 6px 0 0; color: var(--muted); font-size: 13px; border-bottom: 2px solid transparent; }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .saved { display: grid; gap: 8px; }
+  .sv { border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; }
+  .sv.playing { border-color: var(--success); }
+  .sv .nm { font-weight: 500; font-size: 14px; }
+  .sv .meta { grid-column: 1 / -1; font-size: 12px; color: var(--muted); display: grid; gap: 2px; }
+  .sv .meta .rec { color: var(--accent); }
+  .sv .acts { grid-column: 1 / -1; display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+  .sv .acts button { padding: 3px 8px; font-size: 12px; }
+  .sv .progress { grid-column: 1 / -1; }
+  .progress { height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin-top: 4px; }
+  .progress i { display: block; height: 100%; background: var(--accent); }
+  .progress.done i { background: var(--success); }
+  .form { display: grid; gap: 8px; font-size: 13px; }
+  .form h3 { margin: 0 0 4px; }
+  .form label { display: grid; gap: 3px; }
+  .form label.chk { display: flex; align-items: center; gap: 8px; }
+  .form label.chk input { width: auto; }
+  .form input, .form select { padding: 5px 8px; font-size: 13px; }
+  .form .l { display: grid; grid-template-columns: 90px 1fr; gap: 8px; align-items: center; }
+  .form .tin { width: 70px; }
+  .days { display: flex; gap: 3px; }
+  .days button { padding: 3px 0; width: 30px; font-size: 12px; border-radius: 6px; }
+  .days button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .edititems { list-style: none; padding: 0; margin: 6px 0 0; max-height: 200px; overflow: auto; font-size: 12.5px; }
+  .edititems li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .hh { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .hist { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .hist li { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
+  .hist li:last-child { border-bottom: none; }
+  .hist li.sk { color: var(--muted); }
+  .hist .when { color: var(--muted); font-size: 12px; }
+  .hist .v { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
-  /* A sitting: episodes with nothing between them, one card. */
-  .q li.blkrow {
-    display: flex; align-items: stretch; padding: 0;
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--success);
-    background: var(--surface); margin: 2px 0;
-    /* The remove control lives INSIDE the card, always. Nothing may escape
-       the rounded border, whatever the title and meta add up to. */
-    overflow: hidden;
-  }
-  .q li.blkrow.pinned { border-left-color: var(--accent); }
-  .q li.blkrow:hover { background: var(--surface-2); }
-  .bh {
-    display: flex; align-items: center; gap: 10px;
-    /* Not width:100% — that is a leftover from when this row was a block
-       element, and as a flex item it made the header demand the whole row
-       and push the remove control out past the border on any block whose
-       title and meta were too long to shrink. min-width:0 lets the title
-       give up space instead. */
-    flex: 1 1 auto; min-width: 0;
-    padding: 8px 10px 8px 8px; background: transparent; border: none;
-    font-size: 14px; color: var(--text); text-align: left; cursor: pointer;
-  }
-  .chev { color: var(--muted); flex-shrink: 0; transition: transform .15s ease; }
-  .chev.open { transform: rotate(90deg); }
-  .bt { color: var(--muted); }
-  .bt.pin { color: var(--accent); font-weight: 500; }
-  .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bl strong { font-weight: 500; }
-  .bm {
-    color: var(--muted); font-size: 12px; white-space: nowrap;
-    /* Truncates only after the title has given up everything it can. */
-    flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  }
-  /* Sits beside the expand button, not within it: a button cannot nest in
-     a button. Never shrinks, so it always has its full hit area. */
-  .bctl {
-    display: flex; align-items: center; flex-shrink: 0; padding-right: 8px;
-    opacity: 0; transition: opacity .12s ease;
-  }
-  .q li.blkrow:hover .bctl, .q li.blkrow:focus-within .bctl { opacity: 1; }
-
-
-  /* Episodes inside an expanded block sit slightly inset. */
-  .q li.ep { border-left: 3px solid transparent; }
-
-  .qctl { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
-  .q li:hover .qctl, .q li:focus-within .qctl, .qctl.open { opacity: 1; }
-  .hint { margin-top: 10px; }
-  /* Not scoped to .qctl: the block rows put their remove control in .bctl,
-     which missed these rules entirely and fell back to the default bordered
-     button — a boxed X sitting in a row that has no other borders in it. */
-  .ic {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 28px; height: 28px; padding: 0; border-radius: 999px;
-    background: transparent; border: none; color: var(--muted);
-    transition: background .12s ease, color .12s ease;
-  }
-  .ic:hover:not(:disabled) { background: var(--surface); color: var(--text); }
-  .ic:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .qctl .ok:hover:not(:disabled) { color: var(--success); }
-  .rm:hover:not(:disabled) {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 14%, transparent);
-  }
+  /* picker */
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 20px; z-index: 30; }
+  .modal { width: min(720px, 100%); max-height: 85vh; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .mh { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .mh h3 { margin: 0; }
+  .mh .find { flex: 1; min-width: 160px; }
+  .mh select { padding: 5px 8px; font-size: 13px; }
+  .results, .eps { list-style: none; padding: 0; margin: 0; }
+  .results .line { display: flex; align-items: center; gap: 10px; }
+  .eps li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+  .eps li.sel { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .eps label { flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .eps input { width: auto; }
 </style>

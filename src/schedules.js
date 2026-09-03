@@ -255,6 +255,10 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
       state.tonight.segments.push(seg);
     }
     seg.items.push(...list);
+    // Named after what it holds while that is one show; mixed content
+    // keeps the generic name.
+    const shows = new Set(seg.items.map((it) => it.series ?? it.title));
+    seg.name = shows.size === 1 ? [...shows][0] : name;
     save();
     return state.tonight;
   }
@@ -449,6 +453,10 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
       if (s) {
         scheduleName = s.name;
         s.lastRunAt = now();
+        // A measured length is worth keeping: the next load projects with it.
+        if (seg.idx != null && s.items[seg.idx]?.id === info.id && s.items[seg.idx].duration == null && info.duration > 0) {
+          s.items[seg.idx].duration = info.duration;
+        }
         if (outcome === 'aired' && seg.idx != null && s.items[seg.idx]?.id === info.id) {
           if (!s.watched.includes(seg.idx)) s.watched.push(seg.idx);
           s.watched.sort((a, b) => a - b);
