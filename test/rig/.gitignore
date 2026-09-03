@@ -1,0 +1,6 @@
+fixtures/*.mkv
+fixtures/*.ass
+*.ts
+*.log
+arrival.log
+cache/

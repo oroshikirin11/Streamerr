@@ -37,7 +37,7 @@ import { EventEmitter } from 'events';
 import { basename, join } from 'path';
 import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
-import { BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
+import { AAC_FRAME, BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter, escapeFilterPath, workKeyOf } from './tracks.js';
 import { analyseAssBand, bandScript } from './subband.js';
 import { overlayAss } from './overlay-ass.js';
@@ -513,14 +513,188 @@ export function scanVideoPesIn(buf, gridStart = 0) {
   return out;
 }
 
+const AUDIO_PID = 0x101;
+
 /**
- * How many frames a reorder trim may give back before it declines.
+ * One frame of AAC-LC silence, 48 kHz stereo, ADTS-framed — 1024 samples.
  *
- * A normal B-pyramid is two or three deep. Needing more than this means the
- * stream is not what the trim assumes, and silently eating a chunk of the
- * cushion is worse than the overlap it would cure.
+ * Our audio is always exactly this shape (`-c:a aac -ar 48000 -ac 2` on every
+ * spawn), so the frame is a constant, byte-for-byte what ffmpeg's own encoder
+ * emits for anullsrc. It is what closes the audio hole at a splice: a cushion
+ * cut at any byte holds more VIDEO than audio (pictures lead the audio the
+ * muxer interleaves behind them), and starting the successor past the last
+ * picture leaves audio missing for the difference — 65–95ms per splice,
+ * which accumulates: a session of six skips measured −436ms on the receiver.
  */
-const REORDER_TRIM_MAX_FRAMES = 12;
+export const SILENT_AAC_ADTS = Buffer.from('fff14c8001bffc211004608c1c', 'hex');
+
+/** Write one 33-bit MPEG timestamp field; `marker` is the 4-bit prefix. */
+function writeTs(b, at, T, marker) {
+  b[at] = marker | ((Math.floor(T / 2 ** 30) & 7) << 1) | 1;
+  b[at + 1] = Math.floor(T / 2 ** 22) & 0xff;
+  b[at + 2] = (((Math.floor(T / 2 ** 15) & 0x7f) << 1) | 1) & 0xff;
+  b[at + 3] = Math.floor(T / 2 ** 7) & 0xff;
+  b[at + 4] = (((T & 0x7f) << 1) | 1) & 0xff;
+}
+
+/** Add `deltaTicks` to a timestamp field in place, keeping its prefix bits. */
+function shiftTsField(b, at, deltaTicks) {
+  const v = readTs(b, at) * 90000;
+  let n = Math.round(v + deltaTicks) % 2 ** 33;
+  if (n < 0) n += 2 ** 33;
+  writeTs(b, at, n, b[at] & 0xf0);
+}
+
+/**
+ * Shift every PTS, DTS and PCR in a run of TS bytes by `deltaSec`, in place.
+ *
+ * How a successor gets moved by less than a frame after it has been spawned:
+ * its bytes sit behind the cushion for seconds before they reach the wire,
+ * and a timestamp field is a timestamp field. Whole audio frames close most
+ * of a splice's hole; this closes the sub-frame remainder exactly.
+ *
+ * @returns {number} fields rewritten
+ */
+export function restampTs(buf, deltaSec, gridStart = null) {
+  const d = Math.round(deltaSec * 90000);
+  if (!d) return 0;
+  const g = gridStart ?? tsGridStart(buf);
+  if (g < 0) return 0;
+  let n = 0;
+  for (let o = g; o + 188 <= buf.length; o += 188) {
+    if (buf[o] !== 0x47) {
+      const next = tsGridStart(buf.subarray(o));
+      if (next < 0) return n;
+      o = o + next - 188;
+      continue;
+    }
+    const hasAf = (buf[o + 3] & 0x20) !== 0;
+    let p = o + 4;
+    if (hasAf) {
+      const afLen = buf[o + 4];
+      if (afLen >= 7 && (buf[o + 5] & 0x10)) {
+        // PCR: 33-bit base across the top of six bytes, then a 9-bit extension.
+        const at = o + 6;
+        const base = buf[at] * 2 ** 25 + (buf[at + 1] << 17) + (buf[at + 2] << 9)
+          + (buf[at + 3] << 1) + (buf[at + 4] >> 7);
+        let nb = (base + d) % 2 ** 33;
+        if (nb < 0) nb += 2 ** 33;
+        buf[at] = Math.floor(nb / 2 ** 25) & 0xff;
+        buf[at + 1] = Math.floor(nb / 2 ** 17) & 0xff;
+        buf[at + 2] = Math.floor(nb / 2 ** 9) & 0xff;
+        buf[at + 3] = Math.floor(nb / 2) & 0xff;
+        buf[at + 4] = (buf[at + 4] & 0x7f) | ((nb & 1) << 7);
+        n += 1;
+      }
+      p = o + 5 + afLen;
+    }
+    if (!(buf[o + 1] & 0x40)) continue;                       // no PES header here
+    if (p + 14 > o + 188) continue;
+    if (buf[p] !== 0 || buf[p + 1] !== 0 || buf[p + 2] !== 1) continue;
+    const flags = buf[p + 7] & 0xc0;
+    if (flags === 0x80) { shiftTsField(buf, p + 9, d); n += 1; }
+    else if (flags === 0xc0 && p + 19 <= o + 188) {
+      shiftTsField(buf, p + 9, d); shiftTsField(buf, p + 14, d); n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * Where a run of TS bytes' audio ENDS: the last audio PES's pts plus one
+ * frame, and the continuity counter the next audio packet must continue.
+ */
+export function tsAudioTail(buf, pid = AUDIO_PID) {
+  const g = tsGridStart(buf);
+  if (g < 0) return null;
+  let lastPts = null;
+  let cc = null;
+  for (let o = g; o + 188 <= buf.length; o += 188) {
+    if (buf[o] !== 0x47) {
+      const next = tsGridStart(buf.subarray(o));
+      if (next < 0) break;
+      o = o + next - 188;
+      continue;
+    }
+    if ((((buf[o + 1] & 0x1f) << 8) | buf[o + 2]) !== pid) continue;
+    cc = buf[o + 3] & 0x0f;
+    if (!(buf[o + 1] & 0x40)) continue;
+    const p = o + 4 + ((buf[o + 3] & 0x20) ? 1 + buf[o + 4] : 0);
+    if (p + 14 > o + 188 || buf[p] !== 0 || buf[p + 1] !== 0 || buf[p + 2] !== 1) continue;
+    const flags = buf[p + 7] & 0xc0;
+    if (flags === 0x80 || flags === 0xc0) lastPts = readTs(buf, p + 9);
+  }
+  return lastPts == null ? null : { lastPts, end: lastPts + AAC_FRAME, cc };
+}
+
+/** The pts of the FIRST audio PES in a run of TS bytes, or null. */
+export function tsFirstAudioPts(buf, pid = AUDIO_PID) {
+  const g = tsGridStart(buf);
+  if (g < 0) return null;
+  for (let o = g; o + 188 <= buf.length; o += 188) {
+    if (buf[o] !== 0x47) {
+      const next = tsGridStart(buf.subarray(o));
+      if (next < 0) return null;
+      o = o + next - 188;
+      continue;
+    }
+    if ((((buf[o + 1] & 0x1f) << 8) | buf[o + 2]) !== pid || !(buf[o + 1] & 0x40)) continue;
+    const p = o + 4 + ((buf[o + 3] & 0x20) ? 1 + buf[o + 4] : 0);
+    if (p + 14 > o + 188 || buf[p] !== 0 || buf[p + 1] !== 0 || buf[p + 2] !== 1) continue;
+    const flags = buf[p + 7] & 0xc0;
+    if (flags === 0x80 || flags === 0xc0) return readTs(buf, p + 9);
+  }
+  return null;
+}
+
+/**
+ * The successor's opening pictures: the earliest pts and dts among its first
+ * `n` video PES. Its first KEYFRAME is not its first picture — leading
+ * B-frames follow it in decode order and precede it on screen — and its
+ * first dts can sit BELOW the predecessor's last (measured: a B-pyramid
+ * clip after a no-B card opened at the card's exact last dts).
+ */
+export function tsVideoHead(buf, n = 8, pid = 0x100) {
+  const g = tsGridStart(buf);
+  if (g < 0) return null;
+  const pes = scanVideoPesIn(buf, g).slice(0, n);
+  if (!pes.length) return null;
+  return {
+    minPts: Math.min(...pes.map((x) => x.pts)),
+    minDts: Math.min(...pes.map((x) => x.dts)),
+    count: pes.length,
+  };
+}
+
+/**
+ * `count` TS packets of silence on the audio pid, one AAC frame each, timed
+ * from `fromPts` and counting on from continuity counter `cc0`. Each PES is
+ * padded out to exactly one packet with adaptation-field stuffing, the way a
+ * muxer would.
+ */
+export function silentAudioPackets(fromPts, count, cc0, pid = AUDIO_PID) {
+  const frame = SILENT_AAC_ADTS;
+  const pesLen = 3 + 5 + frame.length;
+  const pes = Buffer.alloc(6 + pesLen);
+  pes[0] = 0; pes[1] = 0; pes[2] = 1; pes[3] = 0xc0;
+  pes[4] = pesLen >> 8; pes[5] = pesLen & 0xff;
+  pes[6] = 0x80; pes[7] = 0x80; pes[8] = 5;
+  frame.copy(pes, 14);
+  const out = Buffer.alloc(188 * count, 0xff);
+  let cc = cc0 ?? 0;
+  for (let i = 0; i < count; i += 1) {
+    const o = i * 188;
+    cc = (cc + 1) & 0x0f;
+    const afLen = 188 - 4 - pes.length - 1;
+    out[o] = 0x47; out[o + 1] = 0x40 | (pid >> 8); out[o + 2] = pid & 0xff;
+    out[o + 3] = 0x30 | cc;
+    out[o + 4] = afLen; out[o + 5] = 0x00;
+    const p = o + 5 + afLen;
+    pes.copy(out, p);
+    writeTs(out, p + 9, Math.round((fromPts + i * AAC_FRAME) * 90000), 0x20);
+  }
+  return out;
+}
 
 export class PipelinePlayout extends EventEmitter {
   /**
@@ -683,6 +857,12 @@ export class PipelinePlayout extends EventEmitter {
 
     this.queue = [...items];
     this._stopping = false;
+    clearTimeout(this._audioClose?.timer);
+    this._audioClose = null;
+    this._genShift = null;
+    this._genCarry = null;
+    this._sentAudio = null;
+    this._sentPicturePts = null;
     this._fillDurations();
 
     const first = this.queue.shift();
@@ -1159,6 +1339,8 @@ export class PipelinePlayout extends EventEmitter {
         // would freeze the published frontier for the rest of the
         // broadcast — every later clip stacked on one timestamp.
         this._tlLocked = false;
+        clearTimeout(this._audioClose?.timer);
+        this._audioClose = null;
         this.emit('log', `[cache] seek to ${next.toFixed(0)}s served from the `
           + `run-ahead cache — no re-encode\n`);
         // Safety net: a jump whose delivery stalls (a wedged remux, a slow
@@ -1906,6 +2088,12 @@ export class PipelinePlayout extends EventEmitter {
     }
     // Whoever was waiting on bank room will never be resumed now.
     if (this._bankRoom) { const cb = this._bankRoom; this._bankRoom = null; cb(); }
+    // A close already claimed by a generation dies with that generation; one
+    // still waiting for its spawn (this kill IS that spawn's first step) lives.
+    if (this._audioClose?.gen != null) {
+      clearTimeout(this._audioClose.timer);
+      this._audioClose = null;
+    }
     const s = this.source;
     this.source = null;
     if (!s) return;
@@ -1987,6 +2175,31 @@ export class PipelinePlayout extends EventEmitter {
     // stamp that falls back to `this.timeline` is the progress frontier,
     // which lags the bytes -- so the splice guard was comparing a bad scan
     // against an equally bad reference and passing it.
+    /**
+     * A generation the audio close shifted keeps arriving on ffmpeg's own
+     * clock; every chunk of it is moved before anything reads it.
+     *
+     * Moved as WHOLE packets. Pipe reads split anywhere, and a packet whose
+     * header straddles two chunks is a whole packet in neither — restamped
+     * per chunk, it was skipped, and that one packet went out on the old
+     * clock: a -9.7/+9.7ms audio seam twelve seconds after an otherwise
+     * perfect splice. So a chunk's partial tail packet is held back and
+     * put in front of the next chunk of the same generation.
+     */
+    if (this._fmt === 'ts' && this._genShift?.delta
+        && this._genShift.gen === (this._srcGen ?? 0)) {
+      const carry = this._genCarry?.gen === this._genShift.gen ? this._genCarry.data : null;
+      if (carry?.length) chunk = Buffer.concat([carry, chunk]);
+      this._genCarry = null;
+      const g = tsGridStart(chunk);
+      const rem = g < 0 ? 0 : (chunk.length - g) % 188;
+      if (rem) {
+        this._genCarry = { gen: this._genShift.gen, data: chunk.subarray(chunk.length - rem) };
+        chunk = chunk.subarray(0, chunk.length - rem);
+      }
+      if (!chunk.length) return;
+      restampTs(chunk, this._genShift.delta, g < 0 ? null : g);
+    }
     const wireTl = this._fmt === 'ts'
       ? (() => { const g = tsGridStart(chunk); return g < 0 ? null : lastVideoPtsIn(chunk, g); })()
       : null;
@@ -2001,6 +2214,9 @@ export class PipelinePlayout extends EventEmitter {
     this._bankBytes = (this._bankBytes ?? 0) + chunk.length;
     // Backpressure moves from the OS pipe to here: past the cap the source
     // pauses, and resumes once half the bank has aired.
+    if (this._audioClose?.gen != null && this._audioClose.gen === (this._srcGen ?? 0)) {
+      this._resolveAudioClose();
+    }
     if (this._bankFull() && !this._srcPaused) {
       this._srcPaused = true;
       try { src.stdout.pause(); } catch { /* dying */ }
@@ -2041,6 +2257,12 @@ export class PipelinePlayout extends EventEmitter {
     this._bankDraining = true;
     while (this._bank?.length) {
       const c = this._bank.shift();
+      // The successor waits behind the cushion until its audio seam is
+      // closed; its first bytes are what the close is measured from, and a
+      // shift cannot be applied to bytes already on the wire.
+      const ac = this._audioClose;
+      if (ac?.gen != null && c.gen === ac.gen) { this._bank.unshift(c); break; }
+      if (ac && ac.at > 0) ac.at -= 1;
       this._bankBytes -= c.data.length;
       this.aired = c.pos;
       this.airedTimeline = c.tl;
@@ -2105,6 +2327,21 @@ export class PipelinePlayout extends EventEmitter {
       if (this._fmt === 'ts') {
         const g = tsGridStart(c.data);
         const sent = g < 0 ? null : lastVideoPtsIn(c.data, g);
+        // And where the audio it has fed ends: what a transition with no
+        // cushion behind it (a flush, a natural end that drained) closes its
+        // seam against.
+        // And the furthest PICTURE fed. `_sentVideoPts` is decode order; a
+        // successor started one frame past it lands inside the pictures a
+        // B-pyramid had still to show.
+        if (g >= 0) {
+          for (const x of scanVideoPesIn(c.data, g)) {
+            if (!(x.pts <= (this._sentPicturePts ?? -Infinity))) this._sentPicturePts = x.pts;
+          }
+        }
+        const fedAudio = g < 0 ? null : tsAudioTail(c.data);
+        if (fedAudio && !(fedAudio.end < (this._sentAudio?.end ?? -Infinity))) {
+          this._sentAudio = { end: fedAudio.end, cc: fedAudio.cc };
+        }
         // Monotonic by construction: "the furthest the publisher has been
         // fed" cannot shrink within a session, whatever a container says.
         if (sent != null && !(sent < (this._sentVideoPts ?? -Infinity))) {
@@ -2664,6 +2901,8 @@ export class PipelinePlayout extends EventEmitter {
      * check above catches a scan that reads implausibly low.
      */
     if (tl != null) this.timeline = tl;
+    if (tl != null) this._armAudioClose();
+    else { clearTimeout(this._audioClose?.timer); this._audioClose = null; }
     /**
      * And it stays there until the successor is spawned with it.
      *
@@ -2685,6 +2924,8 @@ export class PipelinePlayout extends EventEmitter {
     this._tlLockTimer = setTimeout(() => {
       if (!this._tlLocked) return;
       this._tlLocked = false;
+      clearTimeout(this._audioClose?.timer);
+      this._audioClose = null;
       this.emit('warn', 'a splice locked the frontier but never spawned — '
         + 'releasing it');
     }, 10_000);
@@ -2740,6 +2981,222 @@ export class PipelinePlayout extends EventEmitter {
       tl = Math.max(tl, this._sentVideoPts + frame);
     }
     return tl;
+  }
+
+  /**
+   * Arm the audio close for the NEXT source, from wherever the audio ends
+   * right now: the cushion's tail if there is one, else the last audio the
+   * publisher was fed. Every transition is a seam the two sides never meet
+   * at on their own (see SILENT_AAC_ADTS) — a splice, a natural episode
+   * end, a card going up, a card coming down, a flush. Nothing to arm from
+   * means no predecessor: the first source of a broadcast.
+   */
+  _armAudioClose() {
+    clearTimeout(this._audioClose?.timer);
+    this._audioClose = null;
+    if (this._fmt !== 'ts') return;
+    const tail = this._bankAudioTail() ?? this._sentAudio ?? null;
+    if (!tail) return;
+    const v = this._bankVideoTail();
+    const ac = {
+      gen: null, at: this._bank.length, end: tail.end, cc: tail.cc, armedAt: Date.now(),
+      // Where the pictures and the decode order end: the successor's first
+      // picture and first dts must both land past these.
+      vPts: v?.maxPts ?? this._sentPicturePts ?? null,
+      vDts: v?.lastDts ?? this._sentVideoPts ?? null,
+    };
+    ac.timer = setTimeout(() => {
+      if (this._audioClose !== ac) return;
+      this._audioClose = null;
+      this.emit('warn', 'splice: no successor audio arrived to close the seam against');
+      this._bankDrain();
+    }, 2500);
+    ac.timer.unref?.();
+    this._audioClose = ac;
+  }
+
+  /** Where the cushion's pictures (max pts) and decode order (last dts) end. */
+  _bankVideoTail(endIndex = null) {
+    if (this._fmt !== 'ts' || !this._bank?.length) return null;
+    const end = Math.min(endIndex ?? this._bank.length, this._bank.length);
+    let from = end;
+    let scan = 0;
+    while (from > 0 && scan < (1 << 20)) { from -= 1; scan += this._bank[from].data.length; }
+    const whole = Buffer.concat(this._bank.slice(from, end).map((c) => c.data));
+    const g = tsGridStart(whole);
+    if (g < 0) return null;
+    let maxPts = null;
+    let lastDts = null;
+    for (const x of scanVideoPesIn(whole, g)) {
+      if (maxPts == null || x.pts > maxPts) maxPts = x.pts;
+      lastDts = x.dts;
+    }
+    return maxPts == null ? null : { maxPts, lastDts };
+  }
+
+  /** The cushion's audio end and continuity counter, from its last ~1MB. */
+  _bankAudioTail(endIndex = null) {
+    if (this._fmt !== 'ts' || !this._bank?.length) return null;
+    const end = Math.min(endIndex ?? this._bank.length, this._bank.length);
+    let from = end;
+    let scan = 0;
+    while (from > 0 && scan < (1 << 20)) { from -= 1; scan += this._bank[from].data.length; }
+    return tsAudioTail(Buffer.concat(this._bank.slice(from, end).map((c) => c.data)));
+  }
+
+  /**
+   * Give back the last `m` whole audio frames of the cushion (chunks before
+   * `endIndex`), every other pid untouched. Used when the successor's audio
+   * begins BEFORE the cushion's ends by more than a frame.
+   */
+  _bankDropAudioFrames(m, endIndex, pid = AUDIO_PID) {
+    if (m <= 0 || !this._bank?.length) return null;
+    const end = Math.min(endIndex ?? this._bank.length, this._bank.length);
+    let from = end;
+    let scan = 0;
+    while (from > 0 && scan < (1 << 20)) { from -= 1; scan += this._bank[from].data.length; }
+    const chunks = this._bank.slice(from, end);
+    if (!chunks.length) return null;
+    const tail = Buffer.concat(chunks.map((c) => c.data));
+    const g = tsGridStart(tail);
+    if (g < 0) return null;
+    const pusis = [];
+    for (let o = g; o + 188 <= tail.length; o += 188) {
+      if (tail[o] !== 0x47) return null;
+      if ((((tail[o + 1] & 0x1f) << 8) | tail[o + 2]) !== pid) continue;
+      if (tail[o + 1] & 0x40) pusis.push(o);
+    }
+    if (pusis.length < m) return null;
+    const cut = pusis[pusis.length - m];
+    const kept = [tail.subarray(0, g)];
+    for (let o = g; o + 188 <= tail.length; o += 188) {
+      const isAudio = tail[o] === 0x47 && ((((tail[o + 1] & 0x1f) << 8) | tail[o + 2]) === pid);
+      if (o >= cut && isAudio) continue;
+      kept.push(tail.subarray(o, o + 188));
+    }
+    const rem = (tail.length - g) % 188;
+    if (rem) kept.push(tail.subarray(tail.length - rem));
+    const rebuilt = Buffer.concat(kept);
+    const removed = tail.length - rebuilt.length;
+    if (removed <= 0) return null;
+    const last = chunks[chunks.length - 1];
+    this._bank.splice(from, chunks.length, { ...last, data: rebuilt });
+    this._bankBytes -= removed;
+    return { removed, at: from + 1 };
+  }
+
+  /**
+   * Close the audio seam at a splice, now that the successor's bytes are in.
+   *
+   * The cushion's audio ended at `ac.end`; the successor's begins at the
+   * first audio pts in its own bytes — which no constant predicts, since a
+   * copied file opens wherever its container says (measured: three AAC
+   * frames before its offset) and an encode opens one priming frame early.
+   * Whole silent frames fill a hole, whole cushion frames are given back
+   * for an overlap, and the sub-frame remainder is closed by moving the
+   * successor itself later by that much: its bytes are still in the bank,
+   * and a timestamp field is a timestamp field. The successor is always
+   * moved LATER (delta in [0, one frame)), never earlier, so it can never
+   * overlap the cushion's last pictures. Video pays at most one AAC frame
+   * of extra gap — under half a picture, invisible.
+   */
+  _resolveAudioClose() {
+    const ac = this._audioClose;
+    if (!ac || ac.gen == null || this._fmt !== 'ts') return;
+    const succ = this._bank.slice(ac.at);
+    if (!succ.length) return;
+    const whole = Buffer.concat(succ.map((c) => c.data));
+    const sa = tsFirstAudioPts(whole);
+    const vh = tsVideoHead(whole);
+    if (sa == null || vh == null) {
+      // A first chunk of video only is ordinary; a megabyte of it is not.
+      if (whole.length > (1 << 20) || Date.now() - ac.armedAt > 1500) {
+        clearTimeout(ac.timer);
+        this._audioClose = null;
+        this.emit('warn', 'splice: the successor produced no audio to close the seam against');
+        this._bankDrain();
+      }
+      return;
+    }
+    const f = AAC_FRAME;
+    /**
+     * Video first. The successor's opening picture must show after the
+     * cushion's last, and its first dts must follow the cushion's last dts:
+     * a B-pyramid clip after a no-B card arrived with its first dts EQUAL
+     * to the card's and two leading B-frames below its own keyframe. Both
+     * are satisfied by moving the successor later — never earlier — and
+     * the audio close then works on top of that shift.
+     */
+    const fv = this._frameSeconds();
+    let deltaV = 0;
+    if (ac.vPts != null) deltaV = Math.max(deltaV, ac.vPts + fv - vh.minPts);
+    if (ac.vDts != null) deltaV = Math.max(deltaV, ac.vDts + fv - vh.minDts);
+    deltaV = Math.max(0, deltaV);
+    const hole = (sa + deltaV) - ac.end;            // + missing audio, - overlapping
+    if (Math.abs(hole) > 2 || deltaV > 2) {
+      // Not a seam: the timeline was reset under us (a publisher restart
+      // starts the clock over). Moving a successor by seconds to "close"
+      // that would be the worst thing this code could do.
+      clearTimeout(ac.timer);
+      this._audioClose = null;
+      this.emit('warn', `splice: audio seam of ${hole.toFixed(2)}s is not a seam — leaving it`);
+      this._bankDrain();
+      return;
+    }
+    let end = ac.end;
+    let k = 0;
+    let m = 0;
+    if (hole >= 0) k = Math.ceil(hole / f - 1e-6);
+    else m = Math.floor(-hole / f + 1e-6);
+    if (m) {
+      const r = this._bankDropAudioFrames(m, ac.at);
+      if (r) { ac.at = r.at; end -= m * f; }
+    }
+    if (k) {
+      const cc = m ? (this._bankAudioTail(ac.at)?.cc ?? ac.cc) : ac.cc;
+      const fill = silentAudioPackets(end, k, cc);
+      const prev = this._bank[ac.at - 1] ?? succ[0];
+      this._bank.splice(ac.at, 0, { ...prev, data: fill });
+      this._bankBytes += fill.length;
+      ac.at += 1;
+      end += k * f;
+    }
+    const delta = end - sa;                          // >= deltaV, < deltaV + one frame
+    const shifted = Math.abs(delta) > 0.0005;
+    if (shifted) {
+      // As one stream, not chunk by chunk: a packet split across two chunks
+      // is whole in neither. The successor's chunks become one, and a
+      // partial packet at its end waits for the bytes that complete it.
+      const rest = this._bank.slice(ac.at);
+      let data = Buffer.concat(rest.map((c) => c.data));
+      const g = tsGridStart(data);
+      const rem = g < 0 ? 0 : (data.length - g) % 188;
+      if (rem) {
+        this._genCarry = { gen: ac.gen, data: data.subarray(data.length - rem) };
+        data = data.subarray(0, data.length - rem);
+      }
+      restampTs(data, delta, g < 0 ? null : g);
+      const last = rest[rest.length - 1];
+      this._bank.splice(ac.at, rest.length, { ...last, data, tl: last.tl != null ? last.tl + delta : last.tl });
+      this._bankBytes -= rem;
+      this._genShift = { gen: ac.gen, delta };
+      this.timeline = (this.timeline ?? 0) + delta;
+    }
+    const parts = [];
+    if (k) parts.push(`${k} silent frame${k === 1 ? '' : 's'}`);
+    if (m) parts.push(`${m} cushion frame${m === 1 ? '' : 's'} given back`);
+    if (shifted) {
+      parts.push(`successor moved ${(delta * 1000).toFixed(1)}ms later`
+        + (deltaV > 0.0005 ? ` (${(deltaV * 1000).toFixed(1)}ms of it so its pictures follow)` : ''));
+    }
+    this.emit('log', `[splice] audio ${hole >= 0 ? 'hole' : 'overlap'} ${(Math.abs(hole) * 1000).toFixed(1)}ms `
+      + `-> ${parts.length ? parts.join(', ') : 'already continuous'}`
+      + ` (gen=${ac.gen} aEnd=${ac.end.toFixed(3)} sa=${sa.toFixed(3)}`
+      + ` vPts=${ac.vPts == null ? 'null' : ac.vPts.toFixed(3)} vDts=${ac.vDts == null ? 'null' : ac.vDts.toFixed(3)}`
+      + ` sMinPts=${vh.minPts.toFixed(3)} sMinDts=${vh.minDts.toFixed(3)} n=${vh.count})\n`);
+    clearTimeout(ac.timer);
+    this._audioClose = null;
+    this._bankDrain();
   }
 
   /** One output frame, in seconds, from the selected video's rate. */
@@ -3556,6 +4013,12 @@ export class PipelinePlayout extends EventEmitter {
     this._clipBase = 0;
     // The sent frontier belongs to the OLD session's timeline — carrying
     // it across would drag every later flush back onto dead numbers.
+    this._sentAudio = null;
+    this._sentPicturePts = null;
+    clearTimeout(this._audioClose?.timer);
+    this._audioClose = null;
+    this._genShift = null;
+    this._genCarry = null;
     this._sentVideoPts = null;
     this._sentPos = null;
     this._spawnPublisher();
@@ -4834,6 +5297,11 @@ export class PipelinePlayout extends EventEmitter {
   }
 
   _spawnSource(args, { kind }) {
+    // Every source transition is a seam the audio close has to measure and
+    // fill — a splice armed it already; a natural end, a card going up or
+    // coming down, and anything after a flush arm it here, from wherever
+    // the audio currently ends.
+    if (!this._audioClose) this._armAudioClose();
     // A source process implies a publisher, always. Deciding that earlier —
     // from _chunkWorkers, before _play has resolved the geometry — was a
     // prediction, and it could disagree with the branch actually taken: a
@@ -4853,6 +5321,11 @@ export class PipelinePlayout extends EventEmitter {
     // processes and repair packet alignment there if the old one ended
     // mid-packet (a crash can cut its output anywhere).
     this._srcGen = (this._srcGen ?? 0) + 1;
+    // This is the successor the pending audio close was waiting for. A shift
+    // belongs to one generation only.
+    if (this._audioClose && this._audioClose.gen == null) this._audioClose.gen = this._srcGen;
+    this._genShift = null;
+    this._genCarry = null;
     // The splice's frontier has been baked into this spawn's argv by now, so
     // the new source is free to advance it again.
     this._tlLocked = false;
