@@ -28,6 +28,17 @@
   let busy = $state(false);
 
   let stream = $state({ status: 'stopped', playing: null, queue: [] });
+  // Tonight's draft lineup, for the tray that shows on every page while
+  // nothing is on air. Fed by the schedule push; the schedule page edits it.
+  let tonight = $state({ entries: [], segments: [] });
+  let goingLive = $state(false);
+  async function goLiveTray() {
+    goingLive = true;
+    try { await api.goLive(); }
+    catch (err) { toast = { kind: 'error', message: err.message }; setTimeout(() => { toast = null; }, 8000); }
+    finally { goingLive = false; }
+  }
+  const tonightNames = $derived((tonight.segments ?? []).map((s) => s.name).filter(Boolean).slice(0, 2).join(', '));
   let position = $state(0);
 
   // The clock ticks LOCALLY at exactly one second per second, like any
@@ -217,6 +228,7 @@
     api.streamStatus()
       .then((s) => { if (stream.status === 'stopped') stream = s; })
       .catch(() => { /* the socket is the primary path; it may still land */ });
+    api.schedule().then((v) => { tonight = v.tonight; }).catch(() => { /* tray stays empty */ });
   }
 
   function startFeed() {
@@ -236,6 +248,8 @@
         if (msg.payload.targets) targets = msg.payload.targets;
         syncPosition(msg.payload.position, { authoritative: true });
         if (msg.payload.status === 'stopped') bufPts = [];
+      } else if (msg.type === 'schedule') {
+        tonight = msg.payload.tonight ?? tonight;
       } else if (msg.type === 'progress') {
         syncPosition(msg.payload.position);
         speed = msg.payload.speed;
@@ -487,6 +501,14 @@
       {@render children()}
     </main>
 
+    {#if !stream.playing && tonight.entries?.length}
+      <div class="tray">
+        <span><strong>Tonight</strong> · {tonight.entries.length} lined up{#if tonightNames} · {tonightNames}{/if}</span>
+        <span class="tsp"></span>
+        <a href="/queue">Open schedule</a>
+        <button class="primary" onclick={goLiveTray} disabled={goingLive}>{goingLive ? 'Going live…' : 'Go live'}</button>
+      </div>
+    {/if}
     {#if stream.playing}
       <footer bind:clientHeight={footerH}>
         <div class="seek" class:seekable={stream.playing.duration}
@@ -852,6 +874,14 @@
 
   main { padding: 22px 26px; min-width: 0; min-height: 0; overflow-y: auto; }
 
+  .tray {
+    grid-column: 2; display: flex; align-items: center; gap: 14px;
+    border-top: 1px solid var(--border); background: var(--surface);
+    padding: 10px 20px; font-size: 14px;
+  }
+  .tray .tsp { flex: 1; }
+  .tray a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  .tray a:hover { text-decoration: underline; }
   footer {
     grid-column: 2; position: relative;
     border-top: 1px solid var(--border);

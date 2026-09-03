@@ -2825,12 +2825,12 @@ function innerRes() {
 }
 
 /** Go live with tonight, or append it to a broadcast already running. */
-async function goLive({ startAt = null } = {}) {
+async function goLive({ startAt = null, trackOverride = null } = {}) {
   const entries = sched.upcomingEntries();
   if (!entries.length) return { code: 400, body: { error: 'Nothing is lined up for tonight' } };
   if (engine) { await syncTonight(); return { code: 200, body: streamStatus() }; }
   const r = innerRes();
-  await startStream({ body: { itemIds: entries, startAt } }, r);
+  await startStream({ body: { itemIds: entries, startAt, trackOverride } }, r);
   if (r.code < 300) sched.onAir(entries[0].seg.item);
   return r;
 }
@@ -2879,7 +2879,7 @@ app.put('/api/schedule/tonight/segments/:key/start', sroute((req) => sched.setSe
 app.delete('/api/schedule/tonight/segments/:key', sroute((req) => sched.removeSegment(req.params.key)));
 app.delete('/api/schedule/tonight', sroute(() => sched.clearTonight()));
 app.post('/api/schedule/tonight/live', wrap(async (req, res) => {
-  const r = await goLive({ startAt: Number(req.body?.startAt) || null });
+  const r = await goLive({ startAt: Number(req.body?.startAt) || null, trackOverride: req.body?.trackOverride ?? null });
   res.status(r.code).json(r.body);
 }));
 

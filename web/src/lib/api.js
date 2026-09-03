@@ -128,7 +128,7 @@ export const api = {
   tonightSegStart: (key, index) => request('PUT', `/api/schedule/tonight/segments/${encodeURIComponent(key)}/start`, { index }),
   tonightRemoveSeg: (key) => request('DELETE', `/api/schedule/tonight/segments/${encodeURIComponent(key)}`),
   tonightClear: () => request('DELETE', '/api/schedule/tonight'),
-  goLive: (startAt = null) => request('POST', '/api/schedule/tonight/live', { startAt }),
+  goLive: (startAt = null, trackOverride = null) => request('POST', '/api/schedule/tonight/live', { startAt, trackOverride }),
 };
 
 /** Live status feed. Reconnects on drop — the panel is left open for hours. */

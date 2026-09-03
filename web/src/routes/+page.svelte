@@ -83,6 +83,55 @@
   async function refreshLive() {
     try { live = (await api.streamStatus()).status !== 'stopped'; }
     catch { live = false; }
+    refreshSched();
+  }
+
+  // Tonight and the saved schedules: the poster's button reads them. With
+  // nothing lined up and nothing on air, a click streams at once; with a
+  // draft or a broadcast, it adds to tonight, which the server plays next.
+  let sched = $state({ schedules: [], tonight: { entries: [], segments: [] }, history: [] });
+  async function refreshSched() {
+    try { sched = await api.schedule(); } catch { /* keep what we have */ }
+  }
+  onMount(refreshLive);
+  const adding = $derived(live || (sched.tonight?.entries?.length ?? 0) > 0);
+  const epName = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(i + 3) : t; };
+  /** The episode after the last one that aired from this series, from history. */
+  const continueAt = $derived.by(() => {
+    if (!series || series.type === 'Movie' || !episodes.length) return -1;
+    const la = (sched.history ?? []).find((h) => h.outcome === 'aired' && h.series === series.title);
+    if (!la) return -1;
+    const i = episodes.findIndex((e) => e.id === la.id);
+    return i >= 0 && i + 1 < episodes.length ? i + 1 : -1;
+  });
+  async function continueSeries() {
+    selectFrom(episodes[continueAt].id);
+    await stream();
+  }
+  let schedMenu = $state(false);
+  let schedName = $state('');
+  async function addToSchedule(id) {
+    schedMenu = false;
+    const ordered = episodes.filter((e) => selected.has(e.id)).map((e) => e.id);
+    if (!ordered.length) return;
+    starting = true; error = '';
+    try {
+      let name;
+      if (id === 'new') {
+        name = schedName.trim() || series?.title || 'New schedule';
+        await api.createSchedule({ name, itemIds: ordered });
+      } else {
+        const s = sched.schedules.find((x) => x.id === id);
+        name = s?.name ?? '';
+        await api.updateSchedule(id, { itemIds: [...(s?.items ?? []).map((i) => i.id), ...ordered] });
+      }
+      await refreshSched();
+      window.dispatchEvent(new CustomEvent('jsr-toast', { detail: {
+        kind: 'info', message: `Added ${ordered.length} to "${name}".`, href: '/queue', hrefLabel: 'Open Schedule',
+      } }));
+      selected = new Set();
+    } catch (err) { error = err.message; }
+    finally { starting = false; schedName = ''; }
   }
 
   // Drill-down state. Null series = showing the grid.
@@ -450,42 +499,30 @@
     error = '';
     try {
       const ordered = episodes.filter((e) => selected.has(e.id)).map((e) => e.id);
-      if (live) {
-        // Append behind whatever is already queued — the broadcast is not
-        // interrupted, the selection just plays when its turn comes.
-        const st = await api.streamStatus();
-        if (st.status === 'stopped') {
-          live = false;
-          await api.start(ordered, trackOverride, startAtEpoch());
-        } else {
-          // Entries, not bare ids: sending ids alone silently discarded
-          // every programmed air time and off-air break already set on the
-          // schedule, so adding one episode from the library wiped an
-          // evening's planning.
-          await api.setQueue([
-            ...(st.queue ?? []).map((q) => ({
-              id: q.id,
-              startAt: q.startAt ?? null,
-              breakOffline: q.breakOffline ?? false,
-            })),
-            ...ordered.map((id) => ({ id })),
-          ]);
-        }
+      // Decide on fresh facts: the broadcast may have ended, or tonight
+      // may have been lined up on another tab, since the button was drawn.
+      await refreshSched();
+      const st = await api.streamStatus();
+      live = st.status !== 'stopped';
+      const addOnly = live || (sched.tonight?.entries?.length ?? 0) > 0;
+      // Everything goes through tonight, so the schedule page shows it and
+      // history remembers it; with nothing lined up, tonight goes live at
+      // once. Adding behind a broadcast never interrupts it — the server
+      // hands the engine the new lineup and the selection plays its turn.
+      await api.tonightAdd(ordered);
+      if (!addOnly) {
+        await api.goLive(startAtEpoch(), trackOverride);
       } else {
-        await api.start(ordered, trackOverride, startAtEpoch());
-      }
-      // Queued behind a running broadcast: say where the air times live,
-      // because nothing else points at them. Raised through the layout so it
-      // lands in the corner you are already watching rather than at the
-      // bottom of whatever page you happen to be on.
-      if (live) {
         const n = ordered.length;
         window.dispatchEvent(new CustomEvent('jsr-toast', { detail: {
           kind: 'info',
-          message: `Added ${n} ${n === 1 ? 'title' : 'titles'} to the queue.`,
+          message: live
+            ? `Added ${n} ${n === 1 ? 'title' : 'titles'} — they play after what is lined up.`
+            : `Added ${n} ${n === 1 ? 'title' : 'titles'} to tonight.`,
           href: '/queue', hrefLabel: 'Open Schedule',
         } }));
       }
+      await refreshSched();
       selected = new Set();
       trackOverride = null;
       scheduling = false;
@@ -580,7 +617,7 @@
                     ? playMovie(item)
                     : openSeries(item, shelfTitle(sh.library)))}
                   aria-label={item.type === 'Movie'
-                    ? `${live ? 'Queue' : 'Stream'} ${item.title}`
+                    ? `${adding ? 'Add' : 'Stream'} ${item.title}`
                     : item.title}>
             <div class="art">
               {#if item.image}
@@ -622,8 +659,30 @@
     <button onclick={() => { series = null; error = ''; }}>← {fromLibrary ?? 'Library'}</button>
     <h1 style="margin:0">{series.title}</h1>
     <div class="spacer"></div>
+    {#if continueAt >= 0 && !selected.size}
+      <button class="primary" disabled={starting} onclick={continueSeries}
+              title="Pick up after the last episode that aired">
+        Continue · {epName(episodes[continueAt].title)}
+      </button>
+    {/if}
     {#if selected.size}
-      {#if !live}
+      <span class="menu">
+        <button class="ghost" onclick={() => (schedMenu = !schedMenu)} disabled={starting}
+                title="Keep these in a saved schedule instead of playing them now">Add to schedule…</button>
+        {#if schedMenu}
+          <div class="pop">
+            {#each sched.schedules as s (s.id)}
+              <button class="line" onclick={() => addToSchedule(s.id)}>{s.name} <span class="muted">· {s.items.length} items</span></button>
+            {/each}
+            <div class="newrow">
+              <input placeholder={series?.title ?? 'New schedule'} bind:value={schedName}
+                     onkeydown={(e) => { if (e.key === 'Enter') addToSchedule('new'); }} />
+              <button onclick={() => addToSchedule('new')}>New</button>
+            </div>
+          </div>
+        {/if}
+      </span>
+      {#if !adding}
         {#if scheduling}
           <input class="schedtime" type="text" inputmode="numeric" maxlength="5"
                  placeholder="HH:MM" bind:value={startTime}
@@ -642,8 +701,8 @@
       {/if}
       <button class="primary" disabled={starting} onclick={stream}>
         {#if starting}{live ? 'Queueing…' : 'Starting…'}
-        {:else if scheduling && startTime && !live}Go live at {startTime}
-        {:else}{live ? 'Add' : 'Stream'} {selected.size} episode{selected.size > 1 ? 's' : ''}{live ? ' to queue' : ''}{/if}
+        {:else if scheduling && startTime && !adding}Go live at {startTime}
+        {:else}{adding ? 'Add' : 'Stream'} {selected.size} episode{selected.size > 1 ? 's' : ''}{adding ? ' to tonight' : ''}{/if}
       </button>
     {/if}
   </header>
@@ -1048,4 +1107,10 @@
   .sched:hover { color: var(--text); }
   .sched.on { color: var(--accent); border-color: var(--accent); }
   .schedtime { width: auto; padding: 6px 8px; font-size: 13px; }
+  .menu { position: relative; }
+  .pop { position: absolute; top: 110%; right: 0; z-index: 5; min-width: 260px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+  .pop .line { display: block; width: 100%; text-align: left; margin: 2px 0; background: transparent; border-color: transparent; font-size: 13px; }
+  .pop .line:hover { background: var(--surface-2); }
+  .pop .newrow { display: flex; gap: 6px; margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
+  .pop .newrow input { flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px; }
 </style>
