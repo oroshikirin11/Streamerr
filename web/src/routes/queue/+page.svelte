@@ -698,14 +698,28 @@
               <span class="chip" class:off={!status.tracks?.subtitle} title="Subtitle track burned into the picture">{subtitleLabel(status.tracks?.subtitle)}</span>
             </div>
           {/if}
+          {#if status.queue?.length}
+            <p class="muted small next" style="margin:6px 0 0">
+              Next: {status.queue[0].title}{#if status.queue[0].at} · {clock(status.queue[0].at)}{/if}
+            </p>
+          {/if}
         </div>
         <div class="acts">
-          <button class="sm" onclick={skipCurrent} disabled={skipping || (!card && !status.queue?.length)}
+          <button onclick={skipCurrent} disabled={skipping || (!card && !status.queue?.length)}
                   title={card ? 'Start the show now instead of waiting' : status.queue?.length ? `Skip to ${status.queue[0].title}` : 'Nothing queued to skip to'}>
-            {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip'}
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
+            {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
           </button>
-          {#if !card}<button class="sm" onclick={loadTracks} disabled={switching} class:on={Boolean(tracks)}>{tracks ? 'Close' : 'Tracks'}</button>{/if}
-          <button class="sm danger" onclick={stop}>Stop</button>
+          {#if !card}
+            <button onclick={loadTracks} disabled={switching} class:on={Boolean(tracks)}>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h18v14H3zM7 15h4M14 15h3"/></svg>
+              {tracks ? 'Close tracks' : 'Audio & subtitles'}
+            </button>
+          {/if}
+          <button class="danger" onclick={stop}>
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            Stop broadcast
+          </button>
         </div>
         {#if tracks}
           <div class="tracks">
@@ -1149,7 +1163,9 @@
   /* on air */
   .onair { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; }
   .onair .tracks { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 10px; }
-  .onair .acts { display: flex; flex-direction: column; gap: 6px; }
+  .onair .acts { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; align-self: center; justify-content: flex-end; }
+  .onair .acts button { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; }
+  .onair .next { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cover { width: 52px; height: 74px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.25); }
   .line { display: block; width: 100%; text-align: left; margin: 3px 0; background: transparent; border-color: var(--border); font-size: 13px; }
   .line.on { border-color: var(--accent); color: var(--accent); }
