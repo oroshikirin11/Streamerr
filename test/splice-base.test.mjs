@@ -79,8 +79,27 @@ check('audio is not video', scanVideoPesIn(packet(0x101, sec(9))).length, 0);
 check('a PTS-only PES reports pts as its own dts',
   scanVideoPesIn(packet(0x100, sec(4))).map((x) => [Math.round(x.pts), Math.round(x.dts)]),
   [[4, 4]]);
-check('a torn grid ends the scan rather than guessing',
+check('trailing garbage with no lattice behind it ends the scan',
   scanVideoPesIn(Buffer.concat([packet(0x100, sec(2)), Buffer.alloc(188, 0x00)])).length, 1);
+
+{
+  /**
+   * A SEAM, which is the case that reached air: the bank carries one
+   * source's bytes followed by the next, and the junction was off-phase.
+   * Stopping at it made the reader report the cushion's HEAD as its end,
+   * and the splice landed at the START of a 3.0s cushion -- 2.6-3.0s
+   * backward. It must read across and find the true tail.
+   */
+  const before = Buffer.concat([packet(0x100, sec(10)), packet(0x100, sec(10.5))]);
+  const after = Buffer.concat(
+    [20, 20.5, 21, 21.5, 22, 22.5, 23].map((t) => packet(0x100, sec(t))),
+  );
+  const seam = Buffer.concat([before, Buffer.alloc(61, 0x00), after]);
+  check('a scan reads ACROSS a seam, not up to it',
+    scanVideoPesIn(seam).length, 9);
+  near('...so the reader finds the true tail, not the head',
+    lastVideoPtsIn(seam), 23);
+}
 
 console.log('\nwhere the successor is allowed to start');
 

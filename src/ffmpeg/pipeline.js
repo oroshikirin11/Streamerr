@@ -413,7 +413,15 @@ function readTs(buf, at) {
 export function lastVideoPtsIn(buf, gridStart = 0) {
   let dts = null;
   for (let o = gridStart; o + 188 <= buf.length; o += 188) {
-    if (buf[o] !== 0x47) return dts;
+    if (buf[o] !== 0x47) {
+      // Resync rather than give up. The bank legitimately carries a seam
+      // where one source's bytes meet the next, and stopping there returned
+      // the timestamp of the cushion's HEAD as if it were its end.
+      const next = tsGridStart(buf.subarray(o));
+      if (next < 0) return dts;
+      o = o + next - 188;
+      continue;
+    }
     const pusi = (buf[o + 1] & 0x40) !== 0;
     const pid = ((buf[o + 1] & 0x1f) << 8) | buf[o + 2];
     if (!pusi || pid !== 0x100) continue;
@@ -480,7 +488,12 @@ export function tsGridStart(buf, probes = 6) {
 export function scanVideoPesIn(buf, gridStart = 0) {
   const out = [];
   for (let o = gridStart; o + 188 <= buf.length; o += 188) {
-    if (buf[o] !== 0x47) return out;
+    if (buf[o] !== 0x47) {
+      const next = tsGridStart(buf.subarray(o));
+      if (next < 0) return out;
+      o = o + next - 188;
+      continue;
+    }
     const pusi = (buf[o + 1] & 0x40) !== 0;
     const pid = ((buf[o + 1] & 0x1f) << 8) | buf[o + 2];
     if (!pusi || pid !== 0x100) continue;
@@ -2331,7 +2344,22 @@ export class PipelinePlayout extends EventEmitter {
       this._bankBytes -= dropped;
       return dropped;
     }
-    let excess = (this._bankBytes ?? 0) % 188;
+    /**
+     * Measured from the bank's OWN lattice, not from byte zero.
+     *
+     * `_bankBytes % 188` is only the right amount when the bank happens to
+     * start on a packet boundary, and it stops doing so the moment a head
+     * trim drops an arbitrary number of bytes. The tail then keeps a partial
+     * packet, the successor's first byte continues from the wrong phase, and
+     * the junction on the wire is a torn packet — which the publisher reports
+     * as "Packet corrupt (stream = 0), dropping it" once per skip, and which
+     * stops every reader's scan dead AT the seam so it reports the head's
+     * timestamp as the cushion's end. That is a splice landing at the START
+     * of the cushion: 2.6-3.0s backward against a 3.0s cushion, on air.
+     */
+    const whole = Buffer.concat((this._bank ?? []).map((c) => c.data));
+    const g = tsGridStart(whole);
+    let excess = g < 0 ? (this._bankBytes ?? 0) % 188 : (whole.length - g) % 188;
     if (!excess) return 0;
     const dropped = excess;
     while (excess > 0 && this._bank?.length) {
@@ -2604,7 +2632,29 @@ export class PipelinePlayout extends EventEmitter {
     const resume = tl != null && (tail == null || tail.item === this.current?.item)
       ? Math.max(this.aired ?? 0, Math.min(tl - delta, this.position ?? tl))
       : est;
+    /**
+     * Every input the splice point was derived from, on one line.
+     *
+     * Written because three rounds of this were diagnosed from the
+     * PUBLISHER's complaints ("DTS a < b out of order") and a guess about
+     * which reader produced the number. The rig cannot reproduce the fault —
+     * it needs a box with no encode headroom and its exact chunk phasing —
+     * so the machine that HAS it has to be able to say what it computed.
+     */
+    this.emit('log', `[splice] bank=${(this._bankSeconds() ?? -1).toFixed(2)}s/`
+      + `${this._bankBytes ?? 0}B grid=${this._bankGridPhase()} `
+      + `scan=${exact == null ? 'null' : exact.toFixed(3)} `
+      + `stamp=${tail?.tl == null ? 'null' : tail.tl.toFixed(3)} `
+      + `sent=${this._sentVideoPts == null ? 'null' : this._sentVideoPts.toFixed(3)} `
+      + `frontier=${(this.timeline ?? 0).toFixed(3)} `
+      + `trimmed=${(rewound + gop).toFixed(2)}s -> splice=${tl == null ? 'null' : tl.toFixed(3)}\n`);
     return { rewound, gop, resume };
+  }
+
+  /** Where the bank's packet lattice starts, for diagnostics. -1 if none. */
+  _bankGridPhase() {
+    if (this._fmt !== 'ts' || !this._bank?.length) return -1;
+    return tsGridStart(Buffer.concat(this._bank.map((c) => c.data)));
   }
 
   /** One output frame, in seconds, from the selected video's rate. */
