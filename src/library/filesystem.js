@@ -549,8 +549,30 @@ export class FilesystemLibrary {
     return listVideos(dir).map((name) => this._looseRow(dir, name, stillCache));
   }
 
+  /**
+   * Ids are minted while browsing, so a fresh process asked for one it has
+   * not listed yet — a saved schedule going live after a restart — would
+   * answer "Unknown item". Walk everything once, then look again. The walk
+   * is remembered for a minute so a genuinely unknown id cannot trigger it
+   * over and over.
+   */
+  async _indexAll() {
+    this._indexing ??= (async () => {
+      const libs = await this.libraries();
+      for (const lib of libs) {
+        let page;
+        try { page = await this.items(lib.id, { startIndex: 0, limit: 1_000_000 }); } catch { continue; }
+        for (const it of page?.items ?? []) {
+          if (it.type === 'Series') { try { await this.episodes(it.id); } catch { /* one bad folder */ } }
+        }
+      }
+    })().finally(() => { setTimeout(() => { this._indexing = null; }, 60_000).unref?.(); });
+    return this._indexing;
+  }
+
   async item(itemId) {
-    const p = this._paths.get(itemId);
+    let p = this._paths.get(itemId);
+    if (!p) { await this._indexAll(); p = this._paths.get(itemId); }
     if (!p) throw new Error('Unknown item');
     const st = statSync(p);
     if (st.isDirectory()) {
