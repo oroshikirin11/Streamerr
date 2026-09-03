@@ -400,12 +400,45 @@
     if (a.date) return `once · ${a.date} ${a.time}`;
     return `${a.days.map((d) => DAYS[d]).join(' ')} ${a.time} · weekly`;
   };
+  // Dates are typed as day.month.year — what the operator's own calendar
+  // says — and stored as ISO. The browser's date picker formats by its own
+  // locale, which put the month first.
+  const isoToDmy = (iso) => (iso ? iso.split('-').reverse().join('.') : '');
+  const dmyToIso = (v) => {
+    const m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/.exec(String(v ?? '').trim());
+    if (!m) return null;
+    const d = new Date(+m[3], +m[2] - 1, +m[1]);
+    if (d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[1]) return null;
+    return `${m[3]}-${String(+m[2]).padStart(2, '0')}-${String(+m[1]).padStart(2, '0')}`;
+  };
+  let editError = $state('');
+  /** When the edited schedule would fire next, from what is typed. */
+  const editNext = $derived.by(() => {
+    if (!edit?.auto) return null;
+    const t = parseClock(edit.time);
+    if (!t) return null;
+    const nowD = new Date();
+    if (edit.date) {
+      const iso = dmyToIso(edit.date);
+      if (!iso) return null;
+      const [y, m, d] = iso.split('-').map(Number);
+      const at = new Date(y, m - 1, d, t.h, t.m).getTime();
+      return at > Date.now() ? at / 1000 : null;
+    }
+    if (!edit.days.length) return null;
+    for (let off = 0; off < 8; off++) {
+      const at = new Date(nowD.getFullYear(), nowD.getMonth(), nowD.getDate() + off, t.h, t.m);
+      if (edit.days.includes(at.getDay()) && at.getTime() > Date.now()) return at.getTime() / 1000;
+    }
+    return null;
+  });
   function openEdit(s) {
     editId = s.id;
+    editError = '';
     edit = {
       name: s.name, start: s.start,
       auto: Boolean(s.autoStart?.enabled), time: s.autoStart?.time ?? '20:00',
-      days: [...(s.autoStart?.days ?? [])], date: s.autoStart?.date ?? '',
+      days: [...(s.autoStart?.days ?? [])], date: isoToDmy(s.autoStart?.date),
       countdownMin: s.autoStart?.countdownMin ?? 15,
       breaks: s.breaks === 'none' ? 'none' : s.breaks === 'global' ? 'global' : 'custom',
       every: s.breaks?.every ?? 3, minutes: s.breaks?.minutes ?? 5,
@@ -415,15 +448,19 @@
   }
   async function saveEdit() {
     const id = editId; const e = edit;
+    editError = '';
+    const iso = e.date ? dmyToIso(e.date) : null;
+    if (e.auto && e.date && !iso) { editError = 'The date should read day.month.year, like 05.09.2026.'; return; }
     const autoStart = e.auto && parseClock(e.time) ? {
-      time: e.time, days: e.date ? [] : e.days, date: e.date || null, countdownMin: Number(e.countdownMin), enabled: true,
+      time: e.time, days: iso ? [] : e.days, date: iso, countdownMin: Number(e.countdownMin), enabled: true,
     } : null;
-    if (e.auto && !autoStart) { error = 'Auto-start needs a time like 20:00.'; return; }
-    if (e.auto && !e.date && !e.days.length) { error = 'Pick the days it repeats on, or a date.'; return; }
+    if (e.auto && !autoStart) { editError = 'Auto-start needs a time like 20:00.'; return; }
+    if (e.auto && !iso && !e.days.length) { editError = 'Pick the days it repeats on, or type a date.'; return; }
     const breaks = e.breaks === 'custom' ? { every: Number(e.every), minutes: Number(e.minutes) } : e.breaks;
     const s = view.schedules.find((x) => x.id === id);
     const itemsChanged = s && s.items.map((i) => i.id).join('|') !== e.items.join('|');
     await act(() => api.updateSchedule(id, { name: e.name, start: e.start, autoStart, breaks, ...(itemsChanged ? { itemIds: e.items } : {}) }), 'Saved.');
+    if (error) { editError = error; return; }
     editId = null; edit = null;
   }
   const editItems = $derived(edit ? edit.items.map((id) => view.schedules.find((x) => x.id === editId)?.items.find((i) => i.id === id)).filter(Boolean) : []);
@@ -847,7 +884,7 @@
             <label class="chk"><input type="checkbox" bind:checked={edit.auto} /> Auto-start</label>
             {#if edit.auto}
               <label>Time <input class="tin" type="text" inputmode="numeric" maxlength="5" bind:value={edit.time} oninput={(e) => { edit.time = maskClock(e.currentTarget.value); }} /></label>
-              <div class="l">
+              <div class="dayrow">
                 <span>Repeat</span>
                 <div class="days">
                   {#each DAYS as d, i}
@@ -856,7 +893,12 @@
                   {/each}
                 </div>
               </div>
-              <label>Or once on <input type="date" bind:value={edit.date} /></label>
+              <label>Or once on <input class="tin wide" placeholder="day.month.year" bind:value={edit.date} /></label>
+              <p class="muted tiny" style="margin:0">
+                {#if editNext}Next: {clock(editNext)}{#if edit.date} · once{:else} · then weekly{/if}
+                {:else if edit.date || edit.days.length}No start ahead — check the time and date.
+                {:else}Pick the days it repeats on, or type a date.{/if}
+              </p>
               <label>Countdown card
                 <select bind:value={edit.countdownMin}><option value={0}>Off</option><option value={5}>5 minutes before</option><option value={15}>15 minutes before</option><option value={30}>30 minutes before</option></select>
               </label>
@@ -875,6 +917,7 @@
                 {/each}
               </ul>
             </details>
+            {#if editError}<p class="err" style="margin:0">{editError}</p>{/if}
             <div class="row" style="justify-content:space-between">
               <button class="sm danger" onclick={() => armed(`del:${editId}`, () => { const id = editId; editId = null; edit = null; act(() => api.deleteSchedule(id), 'Deleted.'); })}>
                 {confirmOnce.key === `del:${editId}` ? 'Really delete?' : 'Delete'}
@@ -1128,16 +1171,18 @@
   .progress { height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin-top: 4px; }
   .progress i { display: block; height: 100%; background: var(--accent); }
   .progress.done i { background: var(--success); }
-  .form { display: grid; gap: 8px; font-size: 13px; }
+  .form { display: grid; gap: 8px; font-size: 13px; min-width: 0; }
   .form h3 { margin: 0 0 4px; }
-  .form label { display: grid; gap: 3px; }
+  .form label { display: grid; gap: 3px; min-width: 0; }
   .form label.chk { display: flex; align-items: center; gap: 8px; }
   .form label.chk input { width: auto; }
-  .form input, .form select { padding: 5px 8px; font-size: 13px; }
-  .form .l { display: grid; grid-template-columns: 90px 1fr; gap: 8px; align-items: center; }
+  .form input, .form select { padding: 5px 8px; font-size: 13px; width: 100%; max-width: 100%; box-sizing: border-box; min-width: 0; }
+  .form .l { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; align-items: center; }
   .form .tin { width: 70px; }
-  .days { display: flex; gap: 3px; }
-  .days button { padding: 3px 0; width: 30px; font-size: 12px; border-radius: 6px; }
+  .form .tin.wide { width: 140px; }
+  .form .dayrow { display: grid; gap: 4px; }
+  .days { display: flex; gap: 3px; flex-wrap: wrap; }
+  .days button { padding: 3px 0; width: 32px; font-size: 12px; border-radius: 6px; flex: 0 0 auto; }
   .days button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .edititems { list-style: none; padding: 0; margin: 6px 0 0; max-height: 200px; overflow: auto; font-size: 12.5px; }
   .edititems li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
