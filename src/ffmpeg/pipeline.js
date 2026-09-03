@@ -437,6 +437,44 @@ export function lastVideoPtsIn(buf, gridStart = 0) {
   return dts;
 }
 
+/**
+ * Every video PES start in a run of TS bytes, with BOTH timestamps and the
+ * offset it begins at. lastVideoPtsIn answers "how far has the stream been
+ * written"; this answers "which frames are in here, and when does each one
+ * show" — the question a splice has to ask, because the two orders differ.
+ */
+export function scanVideoPesIn(buf, gridStart = 0) {
+  const out = [];
+  for (let o = gridStart; o + 188 <= buf.length; o += 188) {
+    if (buf[o] !== 0x47) return out;
+    const pusi = (buf[o + 1] & 0x40) !== 0;
+    const pid = ((buf[o + 1] & 0x1f) << 8) | buf[o + 2];
+    if (!pusi || pid !== 0x100) continue;
+    const hasAf = (buf[o + 3] & 0x20) !== 0;
+    const p = o + 4 + (hasAf ? 1 + buf[o + 4] : 0);
+    if (p + 14 > o + 188) continue;
+    if (buf[p] !== 0 || buf[p + 1] !== 0 || buf[p + 2] !== 1) continue;
+    const flags = buf[p + 7] & 0xc0;
+    if (flags === 0xc0) {
+      if (p + 19 > o + 188) continue;
+      out.push({ at: o, pts: readTs(buf, p + 9), dts: readTs(buf, p + 14) });
+    } else if (flags === 0x80) {
+      const t = readTs(buf, p + 9);
+      out.push({ at: o, pts: t, dts: t });
+    }
+  }
+  return out;
+}
+
+/**
+ * How many frames a reorder trim may give back before it declines.
+ *
+ * A normal B-pyramid is two or three deep. Needing more than this means the
+ * stream is not what the trim assumes, and silently eating a chunk of the
+ * cushion is worse than the overlap it would cure.
+ */
+const REORDER_TRIM_MAX_FRAMES = 12;
+
 export class PipelinePlayout extends EventEmitter {
   /**
    * @param {object} o
@@ -2325,8 +2363,11 @@ export class PipelinePlayout extends EventEmitter {
      */
     if (cut <= 0) cut = frameCut;
     if (cut <= 0) return 0;
-    const dropBytes = whole.length - cut;
-    const perSecond = this._kbps * 125;
+    return this._bankDropTailBytes(whole.length - cut) / (this._kbps * 125);
+  }
+
+  /** Drop the last `dropBytes` from the bank, whole chunks first. */
+  _bankDropTailBytes(dropBytes) {
     let excess = dropBytes;
     while (excess > 0 && this._bank?.length) {
       const last = this._bank[this._bank.length - 1];
@@ -2335,7 +2376,7 @@ export class PipelinePlayout extends EventEmitter {
       }
     }
     this._bankBytes -= dropBytes;
-    return dropBytes / perSecond;
+    return dropBytes;
   }
 
   /**
@@ -2469,7 +2510,7 @@ export class PipelinePlayout extends EventEmitter {
     if (audioDropped) {
       this.emit('log', `[splice] dropped ${audioDropped}B of a half-cut audio frame\n`);
     }
-    const exact = this._bankTailVideoPts();
+    const exact = this._bankLastPictureTime();
     let tl = exact != null ? exact + this._frameSeconds() : tail?.tl ?? null;
     // Never below the sent frontier: with a THIN bank (the hold card's
     // trickle keeps it near-empty) the GOP trim can walk the kept tail
@@ -2502,6 +2543,38 @@ export class PipelinePlayout extends EventEmitter {
    * splice point, read from the kept bytes themselves. Null when the
    * format is not TS or no video PES start survives in the tail chunks.
    */
+  /**
+   * The latest PICTURE time in the cushion — the max pts, not the last dts.
+   *
+   * A splice must start past everything the cushion will SHOW, and with
+   * B-frames those are not the same instant: a cushion ending on a reference
+   * frame holds pictures scheduled later than anything decoded there.
+   * Measured on the rig at a skip, pts-dts ran to +0.25s and the successor
+   * re-emitted two frames the cushion already carried — pts 21.897 and
+   * 21.939 appearing twice, which a receiver remuxes as "non monotonically
+   * increasing dts to muxer" and settles by dropping or repeating pictures.
+   *
+   * Grid per chunk, like _bankTailVideoPts: a splice can leave the bank with
+   * an internal 188-boundary step, so one offset for the whole concat reads
+   * garbage (it counted 314 frames in a 3.5s cushion before this).
+   */
+  _bankLastPictureTime() {
+    const dts = this._bankTailVideoPts();
+    if (this._fmt !== 'ts' || !this._bank?.length) return dts;
+    let streamOff = this._published ?? 0;
+    let max = null;
+    for (const c of this._bank) {
+      for (const f of scanVideoPesIn(c.data, (188 - (streamOff % 188)) % 188)) {
+        if (max == null || f.pts > max) max = f.pts;
+      }
+      streamOff += c.data.length;
+    }
+    // Never below the decode frontier: a torn chunk scans as nothing, and
+    // understating would splice behind bytes the publisher already has.
+    if (max == null) return dts;
+    return dts == null ? max : Math.max(max, dts);
+  }
+
   _bankTailVideoPts() {
     if (this._fmt !== 'ts' || !this._bank?.length) return null;
     // The bank continues the publisher's byte stream, so its 188-grid is
