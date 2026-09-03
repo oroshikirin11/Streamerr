@@ -667,6 +667,12 @@
       <h2>Lineup</h2>
       {#if upcomingCount}<span class="muted small">{upcomingCount} to play{#if endsAt} · ends around {clock(endsAt)}{/if}</span>{/if}
       <span class="sp"></span>
+      {#if segments.length}
+        <button class="sm ghost" disabled={busy} onclick={() => armed('clear', () => act(() => api.tonightClear(), 'Tonight cleared.'))}
+                title="Empty tonight's lineup — saved schedules are not touched">
+          {confirmOnce.key === 'clear' ? 'Really clear?' : 'Clear'}
+        </button>
+      {/if}
       <button class="sm ghost" onclick={openPicker}>Add from library</button>
       <span class="menu">
         <button class="sm ghost" onclick={() => (appendOpen = !appendOpen)} disabled={!view.schedules.length}>Append schedule…</button>
@@ -815,13 +821,6 @@
         </ul>
       </div>
     {/each}
-    {#if segments.length}
-      <div class="row" style="justify-content:flex-end">
-        <button class="sm ghost" disabled={busy} onclick={() => armed('clear', () => act(() => api.tonightClear(), 'Tonight cleared.'))}>
-          {confirmOnce.key === 'clear' ? 'Really clear tonight?' : 'Clear tonight'}
-        </button>
-      </div>
-    {/if}
   </div>
 
   <!-- ── rail ─────────────────────────────────────────────────────────── -->
