@@ -370,6 +370,8 @@
 
   // ── segments: show past, breaks, remove ───────────────────────────────
   let showPast = $state({});
+  // Folded segments show only their header. Playing segments start open.
+  let folded = $state({});
   const pastOf = (seg) => seg.items.filter((i) => i.state === 'past' || i.state === 'aired' || i.state === 'skipped');
   const PAST_SHOWN = 2;
   const visibleRows = (seg) => {
@@ -763,7 +765,12 @@
            ondrop={(e) => (rowDrag ? rowDrop(e, seg, null) : segDrop(e, seg))}>
         <div class="bh" draggable={dnd} role="group" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
           {#if dnd}<span class="handle" title="Drag to move this schedule"></span>{/if}
-          <span class="bl"><strong>{seg.name}</strong> <span class="muted">· {segRange(seg)}</span></span>
+          <button class="fold" onclick={() => (folded[seg.key] = !folded[seg.key])} aria-expanded={!folded[seg.key]}
+                  title={folded[seg.key] ? 'Show the episodes' : 'Collapse'}>
+            <svg class="chev" class:closed={folded[seg.key]} viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/></svg>
+            <strong>{seg.name}</strong>
+          </button>
+          <span class="bl"><span class="muted">{segRange(seg)}</span></span>
           <span class="bm">{c.up} to play{#if c.watched} · {c.watched} watched{/if}</span>
           {#if seg.items.some((i) => i.onAir)}<span class="chip ok">playing</span>{/if}
           {#if pinKey === `seg:${seg.key}`}
@@ -791,6 +798,7 @@
             {confirmOnce.key === `seg:${seg.key}` ? '!' : '×'}
           </button>
         </div>
+        {#if !folded[seg.key]}
         {#if past.length > PAST_SHOWN}
           <button class="showpast" onclick={() => (showPast[seg.key] = !showPast[seg.key])}>
             {showPast[seg.key] ? `Hide ${past.length - PAST_SHOWN} earlier` : `Show all ${past.length} earlier`}
@@ -876,6 +884,7 @@
             </li>
           {/each}
         </ul>
+        {/if}
       </div>
     {/each}
   </div>
@@ -1139,6 +1148,10 @@
   .blkw.rowend { box-shadow: inset 0 -2px 0 var(--accent); }
   .bh { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--surface); flex-wrap: wrap; }
   .bh .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bh .fold { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; padding: 0; cursor: pointer; font: inherit; color: inherit; }
+  .bh .chev { color: var(--muted); transition: transform .14s ease; }
+  .bh .chev.closed { transform: rotate(-90deg); }
+  .bh .fold:hover .chev { color: inherit; }
   .bh .bm { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .handle { width: 12px; height: 18px; flex-shrink: 0; color: var(--muted); cursor: grab; background: radial-gradient(circle, currentColor 1.3px, transparent 1.5px) 0 0 / 6px 6px; opacity: .7; }
   .showpast { display: block; width: 100%; text-align: left; background: transparent; border: none; border-bottom: 1px solid var(--border); border-radius: 0; color: var(--accent); font-size: 12px; padding: 4px 12px; }
