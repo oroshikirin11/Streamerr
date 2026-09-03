@@ -6220,7 +6220,7 @@ export function buildRendererSpec({
   // The same head the inline canvas builds, with the base at input 0
   // instead of 1 — the renderer is its own process and numbers from zero.
   const head = sub.filter
-    ? `[0:v]setpts=PTS+${sh}/TB,${band ? band.filter : sub.filter}:alpha=1,`
+    ? `[0:v]setpts=PTS+${sh}/TB,${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
       + `setpts=PTS-STARTPTS+${rebase}/TB,format=rgba`
     : `[0:v]setpts=PTS+${rebase}/TB`;
   /**
@@ -6905,7 +6905,7 @@ export function buildSourceArgs({
       : '[1:v]';
     const canvasH = band ? band.height : rect.h;
     const canvasHead = `${layerSrc}setpts=PTS+${shift}/TB,`
-      + `${band ? band.filter : sub.filter}:alpha=1,`
+      + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
       + 'setpts=PTS-STARTPTS,format=rgba';
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to

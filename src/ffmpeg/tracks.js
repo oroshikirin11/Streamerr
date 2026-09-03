@@ -442,10 +442,11 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
     return overlayPath
       ? {
         filter: `subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}`,
+        canvasFilter: `subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}:alpha=1`,
         overlayInput: null,
         needsComplex: false,
       }
-      : { filter: null, overlayInput: null, needsComplex: false };
+      : { filter: null, canvasFilter: null, overlayInput: null, needsComplex: false };
   }
   // Studio overlays ride the subtitle chain: libass is already rendering
   // into this canvas, so a second pass costs one CPU pass and no GPU work
@@ -453,6 +454,20 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   const withOverlay = (f) => (f && overlayPath
     ? `${f},subtitles=filename=${escapeFilterPath(overlayPath)}`
     : f);
+  /**
+   * The same chain for a TRANSPARENT canvas: `:alpha=1` on EVERY subtitles
+   * filter, not appended once at the tail. A subtitles filter without it
+   * leaves the canvas's alpha channel untouched, and on an all-transparent
+   * canvas that is glyphs with alpha zero — drawn, and invisible once
+   * composited. Exactly that shipped: the canvas builders decorated the
+   * COMBINED string, so the moment a Studio text overlay chained a second
+   * filter on, only the overlay got alpha and the actual subtitles
+   * vanished from the stream. Pixel-measured: srt-then-overlay with tail
+   * alpha renders 0 visible subtitle pixels; with alpha on each, 1776.
+   */
+  const forCanvas = (f) => (f && overlayPath
+    ? `${f}:alpha=1,subtitles=filename=${escapeFilterPath(overlayPath)}:alpha=1`
+    : (f ? `${f}:alpha=1` : f));
 
   if (subtitle.bitmap) {
     // Bitmap subs cannot be handled by a simple -vf chain; the caller must
@@ -475,6 +490,7 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   if (subtitle.external) {
     return {
       filter: withOverlay(`subtitles=filename=${escapeFilterPath(subtitle.path)}${fonts}`),
+      canvasFilter: forCanvas(`subtitles=filename=${escapeFilterPath(subtitle.path)}${fonts}`),
       overlayInput: null,
       needsComplex: false,
     };
@@ -486,6 +502,7 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   if (extractedPath) {
     return {
       filter: withOverlay(`subtitles=filename=${escapeFilterPath(extractedPath)}${fonts}`),
+      canvasFilter: forCanvas(`subtitles=filename=${escapeFilterPath(extractedPath)}${fonts}`),
       overlayInput: null,
       needsComplex: false,
     };
@@ -495,6 +512,7 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
   // index, not the absolute stream index.
   return {
     filter: withOverlay(`subtitles=filename=${escapeFilterPath(mediaPath)}:si=${subtitle.typeIndex}${fonts}`),
+    canvasFilter: forCanvas(`subtitles=filename=${escapeFilterPath(mediaPath)}:si=${subtitle.typeIndex}${fonts}`),
     overlayInput: null,
     needsComplex: false,
   };
