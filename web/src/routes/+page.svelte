@@ -860,8 +860,10 @@
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
 
-  /* Shelves. The header is sticky so you always know which library you are
-     looking at once a long one runs past the top of the screen. */
+  /* Shelves. Headers scroll with their shelf. They used to stick to the
+     top of the screen, which inside the padded scroller left a band above
+     them for posters to show through — and pinned a title the operator had
+     already scrolled past. */
   .shelfbar {
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     margin: 0 0 18px;
@@ -888,8 +890,6 @@
   }
   .shead {
     display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px;
-    position: sticky; top: 0; z-index: 2;
-    background: linear-gradient(var(--bg) 72%, transparent);
     padding: 10px 0 12px;
   }
   .shead h2 { margin: 0; font-size: 17px; font-weight: 500; letter-spacing: .1px; }
@@ -1012,8 +1012,7 @@
   .overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.45);
     display: grid; place-items: center; padding: 20px;
-    /* Above the sticky shelf headers (z-index 2), which otherwise float
-       over the dimmed backdrop as bright horizontal bars. */
+    /* Above everything on the page. */
     z-index: 30;
   }
   .modal { width: min(460px, 100%); max-height: 80vh; overflow: auto; }
