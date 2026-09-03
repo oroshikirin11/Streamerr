@@ -177,3 +177,21 @@ test('persists atomically and reloads, dropping a stale on-air state', () => {
   assert.equal(again.tonight().segments[0].items[0].state, 'upcoming');
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, 1);
 });
+
+test('reordering rows moves only upcoming items among upcoming slots', () => {
+  const st = createScheduleStore({ now });
+  const s = st.create({ name: 'A', items: eps(6), watched: [0, 1], start: 2 });
+  st.load(s.id);
+  const seg = st.tonight().segments[0];
+  const up = seg.items.filter((i) => i.state === 'upcoming').map((i) => i.key);
+  // Drop the last upcoming row at the top, and hand over the past keys too, as a client might.
+  st.reorder([{ seg: seg.key, items: [seg.items[0].key, up[3], up[0], up[1], up[2]] }]);
+  const after = st.tonight().segments[0].items;
+  assert.deepEqual(after.map((i) => i.state), ['past', 'past', 'upcoming', 'upcoming', 'upcoming', 'upcoming']);
+  assert.deepEqual(after.map((i) => i.id), ['jjk-1', 'jjk-2', 'jjk-6', 'jjk-3', 'jjk-4', 'jjk-5']);
+  // The arrows cannot cross the marker either.
+  st.moveItem(after[2].key, -1);
+  assert.deepEqual(st.tonight().segments[0].items.map((i) => i.id), ['jjk-1', 'jjk-2', 'jjk-6', 'jjk-3', 'jjk-4', 'jjk-5']);
+  st.moveItem(after[2].key, 1);
+  assert.deepEqual(st.tonight().segments[0].items.map((i) => i.id), ['jjk-1', 'jjk-2', 'jjk-3', 'jjk-6', 'jjk-4', 'jjk-5']);
+});

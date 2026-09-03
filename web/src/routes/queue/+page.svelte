@@ -113,8 +113,9 @@
       const firstPin = upcoming.find((u) => u.startAt)?.startAt ?? segments.find((s) => s.startAt)?.startAt ?? null;
       const firstSeg = segments.find((s) => s.items.some((i) => i.state === 'upcoming'));
       const auto = firstSeg?.scheduleId ? view.schedules.find((s) => s.id === firstSeg.scheduleId)?.nextRun : null;
-      t = firstPin ?? auto ?? now;
-      if (firstPin == null && auto == null) t = now;
+      // Rounded up to the next five minutes, so the strip does not creep
+      // under the pointer with every tick of the clock.
+      t = firstPin ?? auto ?? Math.ceil(now / 300) * 300;
     }
     // A length nobody has measured yet makes every later time a guess:
     // shown as "—:—" in the list and as a dashed nominal block on the strip.
@@ -213,9 +214,12 @@
     return win.a + frac * (win.b - win.a);
   }
   function startBlockDrag(e, p) {
-    if (!dnd || p.state !== 'upcoming' || busy) return;
+    if (!dnd || p.state !== 'upcoming' || busy || e.button !== 0) return;
     e.preventDefault();
-    drag = { kind: 'block', key: p.key, x0: e.clientX, dx: 0, at: p.at, from: p.at };
+    // Keep the grab point: the block moves with the hand, it does not jump
+    // so its edge sits under the cursor.
+    const grab = stripTime(e.clientX) - p.at;
+    drag = { kind: 'block', key: p.key, x0: e.clientX, dx: 0, at: p.at, from: p.at, grab, earliest: floorFor(p.key) };
     e.currentTarget.setPointerCapture?.(e.pointerId);
   }
   function startFlagDrag(e) {
@@ -226,19 +230,26 @@
   }
   function onDragMove(e) {
     if (!drag) return;
-    drag = { ...drag, dx: e.clientX - drag.x0, at: stripTime(e.clientX) };
+    const at = stripTime(e.clientX) - (drag.grab ?? 0);
+    drag = { ...drag, dx: e.clientX - drag.x0, at: drag.kind === 'block' ? Math.round(at / 300) * 300 : at };
   }
+  function onDragCancel() { drag = null; }
   async function onDragEnd() {
     if (!drag) return;
     const d = drag; drag = null;
     if (Math.abs(d.dx) < 4) return;
     if (d.kind === 'block') {
-      // Snap to five minutes. Dragged earlier than it would play anyway:
-      // that is "as early as possible", so the pin is cleared.
-      const at = Math.round(d.at / 300) * 300;
-      const earliest = d.from - 60;
-      await act(() => api.tonightSetItem(d.key, { startAt: at <= earliest ? null : at }),
-        at <= earliest ? 'Pin cleared — it plays as soon as the one before ends.' : `Programmed for ${clock(at)}.`);
+      // Snapped to five minutes. Nothing plays before the one ahead of it
+      // ends, so a drag to the left of that lands there — and if it had a
+      // pin, the pin goes: "as early as possible" is the absence of one.
+      const at = d.at;
+      const it = segments.flatMap((sg) => sg.items).find((x) => x.key === d.key);
+      if (at <= d.earliest + 60) {
+        if (it?.startAt) await act(() => api.tonightSetItem(d.key, { startAt: null }), 'Pin cleared — it plays as soon as the one before ends.');
+        else flash(`It cannot start before ${clock(d.earliest)}, when the one ahead of it ends.`);
+        return;
+      }
+      await act(() => api.tonightSetItem(d.key, { startAt: at }), `Programmed for ${clock(at)}.`);
     } else {
       // The flag lands on the item whose block it was dropped in.
       const seg = d.seg;
@@ -266,11 +277,14 @@
     if (!rowDrag || rowDrag.seg !== seg.key || it.state !== 'upcoming') return;
     e.preventDefault(); rowOver = it.key;
   }
-  async function rowDrop(e, seg, it) {
+  /** Drop on a row: before it. Drop on the segment itself: at the end. */
+  async function rowDrop(e, seg, it = null) {
     e.preventDefault();
+    e.stopPropagation();
     if (!rowDrag || rowDrag.seg !== seg.key) { rowDrag = null; rowOver = null; return; }
     const keys = seg.items.filter((i) => i.state === 'upcoming').map((i) => i.key);
-    const from = keys.indexOf(rowDrag.key); const to = keys.indexOf(it.key);
+    const from = keys.indexOf(rowDrag.key);
+    const to = it ? keys.indexOf(it.key) : keys.length - 1;
     rowDrag = null; rowOver = null;
     if (from < 0 || to < 0 || from === to) return;
     keys.splice(to, 0, keys.splice(from, 1)[0]);
@@ -561,7 +575,7 @@
   };
 </script>
 
-<svelte:window onpointermove={onDragMove} onpointerup={onDragEnd} />
+<svelte:window onpointermove={onDragMove} onpointerup={onDragEnd} onpointercancel={onDragCancel} onblur={onDragCancel} />
 
 <div class="ph">
   <h1>Schedule</h1>
@@ -609,8 +623,11 @@
            title={`${p.title}${!p.ghost ? ` · ${fmtTime(p.dur)}` : ''} · ${hhmm(p.at)}`}
            role="button" tabindex="0"
            onpointerdown={(e) => startBlockDrag(e, p)}>
-        {#if p.image}<img class="cv" src={p.image} alt="" onerror={(e) => e.currentTarget.remove()} />{/if}
+        {#if p.image}<img class="cv" src={p.image} alt="" draggable="false" onerror={(e) => e.currentTarget.remove()} />{/if}
         <span class="bt">{epName(p.title)}{#if p.onAir} · on air{/if}</span>
+        {#if drag?.kind === 'block' && drag.key === p.key}
+          <span class="dt" class:early={drag.at <= drag.earliest + 60}>{drag.at <= drag.earliest + 60 ? `earliest ${hhmm(drag.earliest)}` : hhmm(drag.at)}</span>
+        {/if}
       </div>
     {/each}
     {#if live && status.playing && !card}<div class="nowline" style:left={pct(now)}></div>{/if}
@@ -738,9 +755,12 @@
     {#each segments as seg (seg.key)}
       {@const c = segCounts(seg)}
       {@const past = pastOf(seg)}
-      <div class="blkw" class:pinned={seg.startAt} class:over={segOver === seg.key} role="group"
-           ondragover={(e) => { if (segDrag) { e.preventDefault(); segOver = seg.key; } }}
-           ondrop={(e) => segDrop(e, seg)}>
+      <div class="blkw" class:pinned={seg.startAt} class:over={segOver === seg.key} class:rowend={rowDrag?.seg === seg.key && rowOver === `end:${seg.key}`} role="group"
+           ondragover={(e) => {
+             if (segDrag) { e.preventDefault(); segOver = seg.key; }
+             else if (rowDrag?.seg === seg.key) { e.preventDefault(); if (e.target === e.currentTarget || e.target.classList?.contains('q')) rowOver = `end:${seg.key}`; }
+           }}
+           ondrop={(e) => (rowDrag ? rowDrop(e, seg, null) : segDrop(e, seg))}>
         <div class="bh" draggable={dnd} role="group" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
           {#if dnd}<span class="handle" title="Drag to move this schedule"></span>{/if}
           <span class="bl"><strong>{seg.name}</strong> <span class="muted">· {segRange(seg)}</span></span>
@@ -1070,7 +1090,10 @@
   .blk.ghost { border-style: dashed; }
   .blk.now { border-color: var(--success); background: color-mix(in srgb, var(--success) 16%, var(--surface-2)); }
   .blk.seg2 { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
-  .blk .cv { width: 20px; height: 28px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
+  .blk .cv { width: 20px; height: 28px; object-fit: cover; border-radius: 3px; flex-shrink: 0; -webkit-user-drag: none; user-select: none; pointer-events: none; }
+  .blk .dt { position: absolute; top: -26px; left: 0; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .blk .dt.early { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+  .blk.lift { overflow: visible; }
   .blk .bt { overflow: hidden; text-overflow: ellipsis; }
   .brk2 { position: absolute; top: 16px; height: 24px; border-radius: 4px; background: color-mix(in srgb, #c98a2e 14%, transparent); border: 1px dashed color-mix(in srgb, #c98a2e 60%, transparent); color: #c98a2e; font-size: 10.5px; display: grid; place-items: center; overflow: hidden; }
   .cd2 { position: absolute; top: 9px; height: 38px; border-radius: 6px; border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-size: 11px; display: grid; place-items: center; }
@@ -1113,6 +1136,7 @@
   .blkw { border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: var(--radius); margin-top: 10px; overflow: hidden; }
   .blkw.pinned { border-left-color: var(--accent); }
   .blkw.over { outline: 2px dashed var(--accent); }
+  .blkw.rowend { box-shadow: inset 0 -2px 0 var(--accent); }
   .bh { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--surface); flex-wrap: wrap; }
   .bh .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bh .bm { color: var(--muted); font-size: 12px; white-space: nowrap; }

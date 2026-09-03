@@ -272,19 +272,28 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   };
   const findSeg = (key) => state.tonight.segments.find((s) => s.key === key) ?? null;
 
-  /** Reorder: every segment's items in the given order of keys. Missing keys keep their place. */
+  /**
+   * Reorder: segments in the given order, and within each the UPCOMING
+   * items in the given order of keys. Only upcoming items move, and only
+   * among the slots upcoming items occupy — what aired, what is on air and
+   * what lies before the start marker keep their places, so a drop can
+   * never push the watched episodes to the end of the segment.
+   */
   function reorder(order) {
-    // order: [{ seg: key, items: [itemKey, ...] }, ...] — segment order too.
+    // order: [{ seg: key, items: [itemKey, ...] }, ...]
     const segs = [];
     for (const o of order ?? []) {
       const seg = findSeg(o.seg);
       if (!seg) continue;
-      const wanted = (o.items ?? []).map((k) => seg.items.find((it) => it.key === k)).filter(Boolean);
-      const rest = seg.items.filter((it) => !wanted.includes(it));
-      // Items that already aired or are on air keep their spot in front.
-      const fixed = rest.filter((it) => it.state !== 'upcoming' && it.state !== 'past');
-      const fixedKeys = new Set(fixed.map((it) => it.key));
-      seg.items = [...fixed, ...wanted.filter((it) => !fixedKeys.has(it.key)), ...rest.filter((it) => !fixedKeys.has(it.key))];
+      const slots = seg.items.map((it, i) => (it.state === 'upcoming' ? i : -1)).filter((i) => i >= 0);
+      const wanted = [...new Set(o.items ?? [])]
+        .map((k) => seg.items.find((it) => it.key === k && it.state === 'upcoming'))
+        .filter(Boolean);
+      const rest = seg.items.filter((it) => it.state === 'upcoming' && !wanted.includes(it));
+      const ordered = [...wanted, ...rest];
+      const next = [...seg.items];
+      slots.forEach((slot, j) => { next[slot] = ordered[j]; });
+      seg.items = next;
       segs.push(seg);
     }
     for (const seg of state.tonight.segments) if (!segs.includes(seg)) segs.push(seg);
@@ -298,7 +307,9 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     if (!f) return state.tonight;
     const j = f.i + (delta < 0 ? -1 : 1);
     if (j < 0 || j >= f.seg.items.length) return state.tonight;
-    if (f.seg.items[j].state !== 'upcoming' && f.seg.items[j].state !== 'past') return state.tonight;
+    // Only upcoming swaps with upcoming: nothing crosses the start marker
+    // or what already aired.
+    if (f.item.state !== 'upcoming' || f.seg.items[j].state !== 'upcoming') return state.tonight;
     [f.seg.items[f.i], f.seg.items[j]] = [f.seg.items[j], f.seg.items[f.i]];
     save();
     return state.tonight;
