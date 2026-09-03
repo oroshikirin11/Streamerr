@@ -16,7 +16,7 @@
  *
  * Run: node test/splice-base.test.mjs
  */
-import { scanVideoPesIn, lastVideoPtsIn, PipelinePlayout } from '../src/ffmpeg/pipeline.js';
+import { scanVideoPesIn, lastVideoPtsIn, tsGridStart, PipelinePlayout } from '../src/ffmpeg/pipeline.js';
 
 let failures = 0;
 const check = (name, actual, expected) => {
@@ -118,14 +118,13 @@ const bankOf = (chunks, published = 0) => {
 }
 
 {
-  // A splice can leave the bank with an internal 188-boundary step, so the
-  // grid is computed per chunk. One offset for the whole concat read 314
-  // frames out of a 3.5s cushion.
+  // A chunk can begin off the lattice. The grid is DETECTED over the whole
+  // bank rather than derived from _published, which head trims invalidate.
   const p = bankOf([
     Buffer.concat([Buffer.alloc(40, 0xff), packet(0x100, sec(2.0), { dts90k: sec(2.0) })]),
     packet(0x100, sec(2.5), { dts90k: sec(2.0417) }),
   ], 148);   // 148 + 40 = 188: the first chunk's packet starts on the grid
-  near('the grid is taken per chunk from the published offset',
+  near('a ragged chunk head does not defeat the reader',
     p._bankLastPictureTime(), 2.5);
 }
 
@@ -142,6 +141,95 @@ const bankOf = (chunks, published = 0) => {
   const p = Object.create(PipelinePlayout.prototype);
   Object.assign(p, { _fmt: 'nut', _bank: [{ data: Buffer.alloc(10) }], _published: 0 });
   check('a NUT bank is not scanned as TS', p._bankLastPictureTime(), null);
+}
+
+console.log('\nfinding the packet grid when arithmetic cannot');
+
+{
+  const three = Buffer.concat([
+    packet(0x100, sec(1)), packet(0x100, sec(2)), packet(0x100, sec(3)),
+    packet(0x100, sec(4)), packet(0x100, sec(5)), packet(0x100, sec(6)),
+    packet(0x100, sec(7)),
+  ]);
+  check('an aligned buffer syncs at 0', tsGridStart(three), 0);
+  check('a buffer with a ragged head syncs past it',
+    tsGridStart(Buffer.concat([Buffer.alloc(37, 0x00), three])), 37);
+  // 0x47 appears constantly in payload bytes; one hit is not a lattice.
+  const decoy = Buffer.alloc(188 * 4, 0x47);
+  check('a lone 0x47 is not mistaken for a grid when the lattice fails',
+    tsGridStart(Buffer.concat([Buffer.from([0x47, 0x00]), Buffer.alloc(400, 0x11)])), -1);
+  check('...but a real repeating lattice is accepted', tsGridStart(decoy) >= 0, true);
+  check('garbage reports no grid rather than guessing',
+    tsGridStart(Buffer.alloc(600, 0x11)), -1);
+}
+
+console.log('\nthe fault that reached air: a head trim invalidates the arithmetic');
+
+{
+  /**
+   * _bankTrimHeadToAccessPoint drops bytes off the bank head and adjusts
+   * _bankBytes but NOT _published, so a grid derived from _published is
+   * wrong for the whole bank afterwards. The scan then found no PES, the
+   * reader carried a stale timestamp forward, and the splice landed 2.085s
+   * behind bytes the publisher already had -- two seconds of picture and
+   * sound sent twice, measured on air.
+   */
+  const frames = Buffer.concat(
+    [1.0, 1.0417, 1.0834, 1.125, 1.1667, 1.2084, 1.25].map((t) => packet(0x100, sec(t))),
+  );
+  const p = bankOf([frames], 0);
+  near('a clean bank reads its true end', p._bankTailVideoPts(), 1.25);
+
+  // Now the head loses 53 bytes -- not a multiple of 188, exactly what a
+  // head trim leaves behind -- while _published stays where it was.
+  const trimmed = bankOf([frames.subarray(53)], 0);
+  near('...and still does after a head trim desynced the arithmetic',
+    trimmed._bankTailVideoPts(), 1.25);
+  near('...including the picture reader', trimmed._bankLastPictureTime(), 1.25);
+}
+
+console.log('\nan implausible read can no longer drag the splice backwards');
+
+{
+  // The on-air numbers: the kept bytes stamped 150.213s, and a scan claiming
+  // the cushion ends at 148.128s. That claim is 2.085s of overlap.
+  const p = Object.create(PipelinePlayout.prototype);
+  const warns = [];
+  Object.assign(p, {
+    _fmt: 'ts', _bank: [{ data: Buffer.alloc(0), tl: 150.213, item: 'x' }],
+    _published: 0, timeline: 150.213, position: 150.213, aired: 0,
+    _sentVideoPts: null, selection: { video: { frameRate: '24000/1001' } },
+    bufferSeconds: 3, _kbps: 16000, current: { item: 'x' },
+    emit: (kind, m) => { if (kind === 'warn') warns.push(m); },
+    _bankTrimTo: () => 0.0,            // nothing given back...
+    _bankTrimToAccessPoint: () => 0.0,
+    _bankDropPartialAudioTail: () => 0,
+    _bankLastPictureTime: () => 148.128,   // ...but the read claims -2.085s
+  });
+  p._bankCutForApply(3);
+  check('the frontier is NOT dragged back by an unexplained 2.085s',
+    Math.round(p.timeline * 1000), 150213);
+  check('...and it says so out loud', warns.length, 1);
+  check('...naming the numbers', /148\.17\d*s.*150\.213s/.test(warns[0] ?? ''), true);
+}
+
+{
+  // A drop the trim DOES explain must still be honoured, or every splice
+  // leaves a gap the size of the cushion.
+  const p = Object.create(PipelinePlayout.prototype);
+  Object.assign(p, {
+    _fmt: 'ts', _bank: [{ data: Buffer.alloc(0), tl: 147.0, item: 'x' }],
+    _published: 0, timeline: 150.0, position: 150.0, aired: 0,
+    _sentVideoPts: null, selection: { video: { frameRate: '24000/1001' } },
+    bufferSeconds: 3, _kbps: 16000, current: { item: 'x' },
+    emit: () => {},
+    _bankTrimTo: () => 3.0,             // three seconds genuinely given back
+    _bankTrimToAccessPoint: () => 0.0,
+    _bankDropPartialAudioTail: () => 0,
+    _bankLastPictureTime: () => 146.96,
+  });
+  p._bankCutForApply(3);
+  near('a drop the trim explains is still applied', p.timeline, 147.0, 0.05);
 }
 
 if (failures) { console.log(`\n${failures} failure(s)`); process.exit(1); }

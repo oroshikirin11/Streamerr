@@ -445,6 +445,38 @@ export function lastVideoPtsIn(buf, gridStart = 0) {
  * written"; this answers "which frames are in here, and when does each one
  * show" — the question a splice has to ask, because the two orders differ.
  */
+/**
+ * Where the 188-byte lattice actually begins in `buf` — by DETECTION.
+ *
+ * Every reader used to compute this from `_published`, which is wrong the
+ * moment _bankTrimHeadToAccessPoint drops bytes off the head: it adjusts
+ * `_bankBytes` and never `_published`, so the head stops being where the
+ * arithmetic says. A wrong grid makes the scan find no PES at all, and the
+ * callers read that as "no news" and carried a stale timestamp forward.
+ * Seen on air: the cushion's end under-read by ~2s, the successor spliced
+ * BEHIND it, and two seconds of picture and sound went out twice.
+ *
+ * Sync points are cheap to verify — real TS repeats 0x47 every 188 bytes —
+ * so confirm several before believing an offset, and say so when there is
+ * no lattice at all rather than returning a plausible lie.
+ *
+ * @returns {number} offset of the first packet, or -1 if none is found
+ */
+export function tsGridStart(buf, probes = 6) {
+  const limit = Math.min(188, buf.length);
+  for (let o = 0; o < limit; o += 1) {
+    if (buf[o] !== 0x47) continue;
+    let ok = true;
+    for (let i = 1; i <= probes; i += 1) {
+      const at = o + i * 188;
+      if (at >= buf.length) break;          // short buffer: what we saw held
+      if (buf[at] !== 0x47) { ok = false; break; }
+    }
+    if (ok) return o;
+  }
+  return -1;
+}
+
 export function scanVideoPesIn(buf, gridStart = 0) {
   const out = [];
   for (let o = gridStart; o + 188 <= buf.length; o += 188) {
@@ -2523,6 +2555,30 @@ export class PipelinePlayout extends EventEmitter {
       ? this._sentVideoPts + this._frameSeconds()
       : null;
     if (tl != null && sentFloor != null && tl < sentFloor) tl = sentFloor;
+    /**
+     * A read far below the kept chunk's own stamp is a bad read, not news.
+     *
+     * Each chunk was stamped from its own bytes when it was banked, so the
+     * last kept chunk already carries an independent answer for where the
+     * cushion ends. When the fresh scan disagrees with it by a wide margin
+     * the scan lost the packet grid, and believing it put the successor
+     * 2.085s BEHIND bytes the publisher already held — two seconds of
+     * picture and sound delivered twice, measured on air twice in one
+     * session. The stamp is the coarser number and wins anyway, because it
+     * cannot be catastrophically wrong.
+     *
+     * Compared against the STAMP and not against `this.timeline`: the
+     * run-ahead cache decouples the timeline from the cushion's real end,
+     * and a first attempt at this guard referenced it and fired on every
+     * healthy seek — 0ms audio seams became 806ms.
+     */
+    const stamp = tail?.tl ?? null;
+    if (tl != null && stamp != null && tl < stamp - 0.25) {
+      this.emit('warn', `the cushion scans as ending at ${tl.toFixed(3)}s but its `
+        + `last kept bytes were stamped ${stamp.toFixed(3)}s — distrusting the `
+        + 'scan and splicing on the stamp');
+      tl = stamp;
+    }
     if (tl != null && tl < this.timeline) this.timeline = tl;
     const est = Math.max(this.aired ?? 0, (this.position ?? 0) - rewound - gop);
     // A tail from another clip (bank still carrying the previous episode)
@@ -2563,16 +2619,17 @@ export class PipelinePlayout extends EventEmitter {
   _bankLastPictureTime() {
     const dts = this._bankTailVideoPts();
     if (this._fmt !== 'ts' || !this._bank?.length) return dts;
-    let streamOff = this._published ?? 0;
+    // One concat, one sync. The bank is a contiguous TS stream -- the
+    // publisher parses it as one -- so it has exactly one lattice, and
+    // finding it beats deriving it from a byte counter that head trims
+    // silently invalidate.
+    const whole = Buffer.concat(this._bank.map((c) => c.data));
+    const gs = tsGridStart(whole);
+    if (gs < 0) return dts;
     let max = null;
-    for (const c of this._bank) {
-      for (const f of scanVideoPesIn(c.data, (188 - (streamOff % 188)) % 188)) {
-        if (max == null || f.pts > max) max = f.pts;
-      }
-      streamOff += c.data.length;
+    for (const f of scanVideoPesIn(whole, gs)) {
+      if (max == null || f.pts > max) max = f.pts;
     }
-    // Never below the decode frontier: a torn chunk scans as nothing, and
-    // understating would splice behind bytes the publisher already has.
     if (max == null) return dts;
     return dts == null ? max : Math.max(max, dts);
   }
@@ -2588,14 +2645,17 @@ export class PipelinePlayout extends EventEmitter {
     // sent (measured on the rig as an out-of-order DTS at the seam). A
     // chunk whose grid was torn by a crashed source scans as null and is
     // simply skipped — understating is safe, overstating never happens.
-    let streamOff = this._published ?? 0;
-    let pts = null;
-    for (const c of this._bank) {
-      const p = lastVideoPtsIn(c.data, (188 - (streamOff % 188)) % 188);
-      if (p != null) pts = p;
-      streamOff += c.data.length;
+    const whole = Buffer.concat(this._bank.map((c) => c.data));
+    const gs = tsGridStart(whole);
+    if (gs < 0) {
+      // No lattice at all. Saying so is the point: the callers now treat a
+      // null as "I do not know" and fall back to arithmetic, where they
+      // used to carry a stale timestamp and splice into the past.
+      this.emit('warn', 'the cushion has no readable packet grid — '
+        + 'splicing on the arithmetic frontier instead');
+      return null;
     }
-    return pts;
+    return lastVideoPtsIn(whole, gs);
   }
 
   /**
