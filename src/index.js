@@ -975,7 +975,15 @@ function wirePreview(e) {
   e.on('progress', observe);
   e.on('nowplaying', observe);
   e.on('queue', observe);
-  e.on('ended', () => { finish('stopped'); sched.broadcastEnded(); broadcast('schedule', scheduleView()); });
+  e.on('ended', (info) => {
+    finish('stopped');
+    sched.broadcastEnded();
+    // A broadcast that ended on purpose — stopped, or played out — leaves
+    // tonight empty: what a saved schedule needs to remember it already
+    // has. A crash keeps the lineup, so the night can be resumed.
+    if (!info || info.code === 0) sched.clearTonight();
+    broadcast('schedule', scheduleView());
+  });
 
   e.on('publisher-restart', () => {
     // The receiver's schedule/metadata/artwork live in memory — a

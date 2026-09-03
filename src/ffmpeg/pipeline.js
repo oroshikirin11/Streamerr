@@ -3478,18 +3478,60 @@ export class PipelinePlayout extends EventEmitter {
     for (let i = this.queue.length - 1; i >= 0; i--) {
       if (proj[i] != null && this.queue[i].duration) { endsAt = proj[i] + this.queue[i].duration; break; }
     }
-    this._spawnSource(buildCountdownArgs({
-      profile: this.profile,
-      selection: this.selection,
-      tsOffset: this._spawnTimeline(),
-      statsPeriodMs: this.statsPeriodMs,
-      seconds,
-      heading,
-      nextTitle: this.queue[0]?.title ?? '',
-      when,
-      lineup,
-      endsAt,
-    }), { kind: 'clip' });
+    const spec = { profile: this.profile, heading, nextTitle: this.queue[0]?.title ?? '', when, lineup, endsAt };
+    const card = this.current.item;
+    /**
+     * The card's ground — gradient, grid, vignette, posters, every word but
+     * the clock — is rendered ONCE to a PNG and looped, so the live process
+     * draws only the clock per frame, as the colour-bar card did. Drawn
+     * live, the same picture cost the N100 more than real time: the
+     * gradient source regenerates every frame and the vignette is per-pixel
+     * work, and the publisher starved behind it. The render is asynchronous
+     * so the event loop keeps feeding the publisher; a card that is no
+     * longer current by the time it finishes is simply not spawned.
+     */
+    const spawnCard = (background) => {
+      if (this._stopping || this.current?.item !== card) return;
+      const left = Math.max(1, until - Date.now() / 1000);
+      this.current.duration = left;
+      card.duration = left;
+      this._spawnSource(buildCountdownArgs({
+        ...spec,
+        selection: this.selection,
+        tsOffset: this._spawnTimeline(),
+        statsPeriodMs: this.statsPeriodMs,
+        seconds: left,
+        background,
+      }), { kind: 'clip' });
+    };
+    this._renderCardBackground(spec).then(spawnCard, () => spawnCard(null));
+  }
+
+  /** The card's static picture as a cached PNG, or null (the live chain draws it). */
+  _renderCardBackground(spec) {
+    if (!this.cacheDir) return Promise.resolve(null);
+    const key = createHash('sha1').update(JSON.stringify([
+      spec.profile.width, spec.profile.height, spec.heading, spec.nextTitle, spec.when, spec.endsAt,
+      spec.lineup.map((l) => [l.path, l.title, l.at]),
+    ])).digest('hex').slice(0, 16);
+    const out = join(this.cacheDir, `card-${key}.png`);
+    if (existsSync(out)) return Promise.resolve(out);
+    return new Promise((resolve) => {
+      const tmp = `${out}.tmp.png`;
+      const c = spawn('ffmpeg', countdownBackgroundArgs(spec, tmp), { stdio: ['ignore', 'ignore', 'pipe'] });
+      let err = '';
+      c.stderr.on('data', (d) => { err += d; });
+      const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 15000);
+      c.on('error', () => { clearTimeout(t); resolve(null); });
+      c.on('close', (code) => {
+        clearTimeout(t);
+        if (code === 0 && existsSync(tmp)) {
+          try { renameSync(tmp, out); resolve(out); return; } catch { /* fall through */ }
+        }
+        this.emit('warn', `countdown card: could not render its background (${String(err).trim().slice(0, 160) || `exit ${code}`}) — drawing it live`);
+        resolve(null);
+      });
+    });
   }
 
   /**
@@ -7419,13 +7461,17 @@ const HOLD_FONTS = [
  * 4K. The only per-frame cost is the clock, as before; posters are single
  * frames the overlay repeats.
  */
-export function buildCountdownArgs({
-  profile, selection = null, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
-  heading = 'STARTING SOON', when = '', lineup = [], endsAt = null,
-}) {
+/**
+ * The countdown card's static picture: gradient ground with a faint grid
+ * and vignette, the heading and start time as an eyebrow, the coming
+ * title, the label under the clock, and along the bottom what follows as
+ * posters with their air times, the first outlined. Everything but the
+ * clock. Placed in fractions of the frame so it looks the same at 720p
+ * and 4K. Returns the parts the two builders share.
+ */
+function countdownGround({ profile, nextTitle = '', heading = 'STARTING SOON', when = '', lineup = [], endsAt = null }) {
   const W = profile.width;
   const H = profile.height;
-  const R = Math.ceil(seconds);
   const font = fontArg();
   const px = (f) => Math.round(H * f);
   // drawtext text: no quotes, backslashes or percent (expansion), and a
@@ -7436,45 +7482,35 @@ export function buildCountdownArgs({
     const d = new Date(epoch * 1000);
     return `${String(d.getHours()).padStart(2, '0')}\\:${String(d.getMinutes()).padStart(2, '0')}`;
   };
-  const clock = R >= 3600
-    ? `%{eif\\:trunc((${R}-t)/3600)\\:d\\:1}\\:%{eif\\:mod(trunc((${R}-t)/60),60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`
-    : `%{eif\\:trunc((${R}-t)/60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`;
+  const text = (t, { size, x, y, alpha = 1 }) =>
+    `drawtext=${font}text='${t}':fontcolor=white@${alpha}:fontsize=${size}:x=${x}:y=${y}`;
   // "Series — S1E8" reads as the series over the episode; a film is one line.
   const cut = String(nextTitle ?? '').indexOf(' — ');
   const series = (cut > 0 ? nextTitle.slice(0, cut) : String(nextTitle ?? '')).slice(0, 26);
   const episode = (cut > 0 ? nextTitle.slice(cut + 3) : '').slice(0, 40);
   const eyebrow = `${heading}${when ? `  ·  ${heading === 'UP NEXT' ? 'AT' : 'LIVE AT'} ${when}` : ''}`;
   const under = heading === 'UP NEXT' ? 'UNTIL NEXT' : 'UNTIL WE START';
-  const text = (t, { size, x, y, alpha = 1 }) =>
-    `drawtext=${font}text='${t}':fontcolor=white@${alpha}:fontsize=${size}:x=${x}:y=${y}`;
 
-  // Ground: a radial gradient off-centre, a faint grid, darkened edges.
-  const ground = [
-    `drawgrid=w=${px(0.06)}:h=${px(0.06)}:color=white@0.035:t=1`,
-    'vignette=angle=PI/4.5',
-  ];
-  // Words.
   const words = [
     text(esc(eyebrow), { size: px(1 / 34), x: px(0.10), y: px(0.09), alpha: 0.62 }),
     text(esc(series), { size: px(1 / 14), x: px(0.10), y: px(0.34) }),
     ...(episode ? [text(esc(episode), { size: px(1 / 22), x: px(0.10), y: px(0.34 + 1 / 14 + 0.025), alpha: 0.78 })] : []),
-    text(clock, { size: px(1 / 5.5), x: `w-${px(0.10)}-text_w`, y: px(0.29) }),
     text(esc(under), { size: px(1 / 34), x: `w-${px(0.10)}-text_w`, y: px(0.29 + 1 / 5.5 + 0.035), alpha: 0.62 }),
   ];
-  // The strip: posters 2:3, a fifth of the frame tall, gaps of a fifth of
-  // a poster; the first outlined. Under each its short title and time.
+  // The strip: posters 2:3, a fifth of the frame tall, the first outlined,
+  // two lines under each — the short title, then its time.
   const PH = px(0.21); const PW = Math.round(PH * 2 / 3); const GAP = Math.round(PW * 0.3);
   const SY = px(0.67); const SX = px(0.10);
   const strip = lineup.slice(0, 6);
   const posterInputs = [];
   const parts = [];
   let cur = 'g';
-  parts.push(`[0:v]${ground.join(',')}[g]`);
+  parts.push(`[0:v]drawgrid=w=${px(0.06)}:h=${px(0.06)}:color=white@0.035:t=1,vignette=angle=PI/4.5[g]`);
   strip.forEach((it, i) => {
     const x = SX + i * (PW + GAP);
     const out = `s${i}`;
     if (it.path) {
-      const idx = 2 + posterInputs.length;
+      const idx = 1 + posterInputs.length;
       posterInputs.push(it.path);
       parts.push(`[${idx}:v]scale=${PW}:${PH}:force_original_aspect_ratio=increase,crop=${PW}:${PH}[p${i}]`);
       parts.push(`[${cur}][p${i}]overlay=${x}:${SY}[${out}]`);
@@ -7483,8 +7519,6 @@ export function buildCountdownArgs({
     }
     cur = out;
   });
-  // Two lines under each poster — the short title, then its time — each
-  // cut to what a poster's width can hold.
   const labels = strip.flatMap((it, i) => {
     const x = SX + i * (PW + GAP);
     const c = String(it.title ?? '').lastIndexOf(' — ');
@@ -7500,25 +7534,71 @@ export function buildCountdownArgs({
     ...(endsAt != null ? [text(`ends around ${hhmm(endsAt)}`, { size: px(1 / 34), x: `w-${px(0.10)}-text_w`, y: SY + Math.round(PH / 2), alpha: 0.62 })] : []),
     ...words,
   ];
-  const plan = cardVideoPlan(profile, selection);
-  parts.push(`[${cur}]${tail.join(',')}${plan.vfTail}[v]`);
+  const gradient = `gradients=s=${W}x${H}:c0=#1e2d4f:c1=#090c14:x0=${Math.round(W * 0.28)}:y0=${Math.round(H * 0.22)}:x1=${W}:y1=${H}:type=radial:speed=0`;
+  const clock = (R) => text(R >= 3600
+    ? `%{eif\\:trunc((${R}-t)/3600)\\:d\\:1}\\:%{eif\\:mod(trunc((${R}-t)/60),60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`
+    : `%{eif\\:trunc((${R}-t)/60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`,
+  { size: px(1 / 5.5), x: `w-${px(0.10)}-text_w`, y: px(0.29) });
+  return { gradient, posterInputs, groundGraph: `${parts.join(';')};[${cur}]${tail.join(',')}`, clock };
+}
 
+/** One frame of the card's static picture, to a PNG. */
+export function countdownBackgroundArgs(spec, out) {
+  const g = countdownGround(spec);
   return [
-    '-hide_banner', '-loglevel', 'error', '-nostdin',
-    ...plan.deviceArgs,
-    '-re',
-    '-f', 'lavfi', '-t', String(R),
-    '-i', `gradients=s=${W}x${H}:r=${plan.rate}:c0=#1e2d4f:c1=#090c14:x0=${Math.round(W * 0.28)}:y0=${Math.round(H * 0.22)}:x1=${W}:y1=${H}:type=radial`,
-    '-f', 'lavfi', '-t', String(R),
-    '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-    ...posterInputs.flatMap((f) => ['-i', f]),
-    '-filter_complex', parts.join(';'),
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    '-f', 'lavfi', '-i', `${g.gradient}:r=1`,
+    ...g.posterInputs.flatMap((f) => ['-i', f]),
+    '-filter_complex', `${g.groundGraph}[v]`,
+    '-map', '[v]', '-frames:v', '1', '-f', 'image2', out,
+  ];
+}
+
+/**
+ * The live countdown card. With `background` (the PNG above) the process
+ * loops that picture and draws only the clock per frame — the same cost as
+ * the colour-bar card had. Without one it draws the whole picture live,
+ * which is the fallback when the render failed.
+ */
+export function buildCountdownArgs({
+  profile, selection = null, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
+  heading = 'STARTING SOON', when = '', lineup = [], endsAt = null, background = null,
+}) {
+  const R = Math.ceil(seconds);
+  const g = countdownGround({ profile, nextTitle, heading, when, lineup, endsAt });
+  const plan = cardVideoPlan(profile, selection);
+  const common = [
     '-map', '[v]', '-map', '1:a',
     ...plan.encodeArgs,
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-muxdelay', '0', '-muxpreload', '0',
     '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
     ...cardMuxArgs(profile),
+  ];
+  if (background) {
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      ...plan.deviceArgs,
+      '-re',
+      '-loop', '1', '-framerate', String(plan.rate), '-t', String(R), '-i', background,
+      '-f', 'lavfi', '-t', String(R),
+      '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+      '-filter_complex', `[0:v]${g.clock(R)}${plan.vfTail}[v]`,
+      ...common,
+    ];
+  }
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
+    ...plan.deviceArgs,
+    '-re',
+    '-f', 'lavfi', '-t', String(R),
+    '-i', `${g.gradient}:r=${plan.rate}`,
+    '-f', 'lavfi', '-t', String(R),
+    '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+    ...g.posterInputs.flatMap((f) => ['-i', f]),
+    // Poster inputs sit after the silence here, so shift their indices.
+    '-filter_complex', `${g.groundGraph.replace(/\[(\d+):v\]/g, (m, n) => (Number(n) >= 1 ? `[${Number(n) + 1}:v]` : m))},${g.clock(R)}${plan.vfTail}[v]`,
+    ...common,
   ];
 }
 
