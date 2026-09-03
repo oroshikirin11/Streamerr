@@ -18,20 +18,41 @@ test('censorBoxes keeps only enabled censor items, clamped and typed', () => {
   assert.deepEqual(out[1], { x: 1, y: 0, w: 1, h: 0.5, strength: 10 });
 });
 
-test('GPU stage: crop, shrink, blow up, overlay at the same origin', () => {
+/** Every scale pass of a stage: [[w,h],...] per box, in order. */
+const passes = (g) => [...g.matchAll(/crop=[^\[]*?\[/g)].map((m) => [...m[0].matchAll(/scale(?:_vaapi)?=(?:w=)?(\d+):(?:h=)?(\d+)/g)].map((x) => [+x[1], +x[2]]));
+
+test('GPU stage: crop, a ladder of scales down and back, overlay at the same origin', () => {
   const g = censorStage(censorBoxes([box]), { ...F, inLabel: 'b0', outLabel: 'b', gpu: true });
-  assert.equal(g,
-    '[b0]split=2[cz0a][cz0b];'
-    + '[cz0b]crop=480:216:720:432,scale_vaapi=w=12:h=5,scale_vaapi=w=480:h=216[cz0z];'
-    + '[cz0a][cz0z]overlay_vaapi=x=720:y=432[b]');
+  assert.match(g, /^\[b0\]split=2\[cz0a\]\[cz0b\];\[cz0b\]crop=480:216:720:432,scale_vaapi=w=\d+:h=\d+(,scale_vaapi=w=\d+:h=\d+)+\[cz0z\];\[cz0a\]\[cz0z\]overlay_vaapi=x=720:y=432\[b\]$/);
+  const [p] = passes(g);
+  assert.deepEqual(p[p.length - 1], [480, 216], 'ends at the crop size');
+  const min = p.reduce((m, [w, h]) => Math.min(m, w, h), Infinity);
+  assert.equal(min, 16, 'bottom rung is the smallest legal surface');
+  // No pass steeper than 4x either way, every size even, down then up.
+  let prev = [480, 216]; let turned = false;
+  for (const [w, h] of p) {
+    assert.equal(w % 2 + h % 2, 0, `odd size ${w}x${h}`);
+    const r = Math.max(prev[0] / w, w / prev[0], prev[1] / h, h / prev[1]);
+    assert.ok(r <= 4.05, `ratio ${r.toFixed(2)} at ${w}x${h}`);
+    if (w > prev[0] || h > prev[1]) turned = true;
+    if (turned) assert.ok(w >= prev[0] && h >= prev[1], 'goes back down after turning');
+    prev = [w, h];
+  }
 });
 
-test('CPU stage uses the software scaler and overlay', () => {
+test('CPU stage walks the same rungs with the software scaler', () => {
   const g = censorStage(censorBoxes([box]), { ...F, inLabel: 'o0', outLabel: 'o', gpu: false });
-  assert.equal(g,
-    '[o0]split=2[cz0a][cz0b];'
-    + '[cz0b]crop=480:216:720:432,scale=12:5,scale=480:216[cz0z];'
-    + '[cz0a][cz0z]overlay=720:432[o]');
+  const c = censorStage(censorBoxes([box]), { ...F, inLabel: 'o0', outLabel: 'o', gpu: true });
+  assert.deepEqual(passes(g), passes(c));
+  assert.match(g, /^\[o0\]split=2\[cz0a\]\[cz0b\];\[cz0b\]crop=480:216:720:432,scale=\d+:\d+(,scale=\d+:\d+)+\[cz0z\];\[cz0a\]\[cz0z\]overlay=720:432\[o\]$/);
+});
+
+test('a strong blur on a big box is many gentle passes, a weak one is few', () => {
+  const big = censorBoxes([{ ...box, w: 0.5, h: 0.5, strength: 10 }]);
+  const weak = censorBoxes([{ ...box, w: 0.1, h: 0.1, strength: 1 }]);
+  const nBig = passes(censorStage(big, { ...F, inLabel: 'i', outLabel: 'o' }))[0].length;
+  const nWeak = passes(censorStage(weak, { ...F, inLabel: 'i', outLabel: 'o' }))[0].length;
+  assert.ok(nBig > nWeak && nWeak >= 2, `${nBig} vs ${nWeak}`);
 });
 
 test('boxes chain, and every edge stays even', () => {

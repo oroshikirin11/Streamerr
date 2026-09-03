@@ -1653,6 +1653,10 @@ export class PipelinePlayout extends EventEmitter {
     delete this._box.noGpuImages;
     if (this.profile) delete this.profile.noGpuImages;
     if (this._demoted) delete this._demoted.noGpuImages;
+    this._censorDemoted = false;
+    delete this._box.noCensor;
+    if (this.profile) delete this.profile.noCensor;
+    if (this._demoted) delete this._demoted.noCensor;
     if (!this.current || this.status !== 'running') return true;
 
     const item = this.current.item;
@@ -5677,6 +5681,22 @@ export class PipelinePlayout extends EventEmitter {
           return;
         }
 
+        // The censor box is the newest thing asked of the driver's scaler
+        // and the cheapest to give up: dropping it keeps subtitles and
+        // pictures on the GPU, where the subtitle demotion below would
+        // send the whole clip to CPU burn-in over one box. Cleared with
+        // the picture demotion when a new overlay set is applied.
+        if (!this._sawBlock && this.current && !this.profile?.noCensor
+            && !this._censorDemoted && censorBoxes(this.profile?.overlay).length) {
+          this._censorDemoted = true;
+          this._demote({ noCensor: true });
+          this.emit('warn', 'This driver would not blur the censor box on the GPU — '
+            + `dropping the box for this broadcast. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
         // Pictures are demoted BEFORE subtitles, and separately. A picture
         // composite failing says nothing about the subtitle composite, and
         // the subtitle one is the expensive thing to give up — dropping it
@@ -6341,7 +6361,7 @@ export function buildSourceArgs({
   // Censor boxes are drawn things too: they refuse passthrough and the
   // HDR pass exactly as pictures do, and ride on the base picture of
   // whichever graph is built below.
-  const censors = censorBoxes(profile.overlay);
+  const censors = profile.noCensor ? [] : censorBoxes(profile.overlay);
   /**
    * Can the GPU composite these pictures itself?
    *
@@ -7055,8 +7075,9 @@ export function buildSourceArgs({
 
   // Censor boxes on the padded picture, before pictures and the upload —
   // the software form of the stage the GPU graphs carry.
-  const censorGraph = censorBoxes(profile.overlay).length
-    ? censorStage(censorBoxes(profile.overlay), {
+  const cBoxes = profile.noCensor ? [] : censorBoxes(profile.overlay);
+  const censorGraph = cBoxes.length
+    ? censorStage(cBoxes, {
       width: profile.width, height: profile.height, inLabel: 'o0', outLabel: 'o', gpu: false,
     })
     : '';
@@ -7194,8 +7215,9 @@ export function buildChunkArgs({
 
   // Censor boxes on the padded picture, before pictures and the upload —
   // the software form of the stage the GPU graphs carry.
-  const censorGraph = censorBoxes(profile.overlay).length
-    ? censorStage(censorBoxes(profile.overlay), {
+  const cBoxes = profile.noCensor ? [] : censorBoxes(profile.overlay);
+  const censorGraph = cBoxes.length
+    ? censorStage(cBoxes, {
       width: profile.width, height: profile.height, inLabel: 'o0', outLabel: 'o', gpu: false,
     })
     : '';
