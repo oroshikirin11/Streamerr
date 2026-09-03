@@ -2625,7 +2625,23 @@ export class PipelinePlayout extends EventEmitter {
         + 'scan and splicing on the stamp');
       tl = stamp;
     }
-    if (tl != null && tl < this.timeline) this.timeline = tl;
+    /**
+     * BOTH directions. The bytes are the authority, not the progress feed.
+     *
+     * This only ever lowered the frontier, so a cushion holding MORE than
+     * the last progress block reported left the successor at the stale,
+     * lower number — spliced straight into content already banked. It takes
+     * a rapid second skip to see it: the fresh source runs at catch-up rate
+     * while progress arrives every 500ms, so the bank races ahead of the
+     * frontier. Reproduced here as splice=24.021 against frontier=22.021,
+     * with the spawn taking 22.021 — a two-second overlap, which is what
+     * "clicked skip 2x and it looped, then froze" is on the wire.
+     *
+     * Safe to raise now in a way it was not before: `tl` comes from a
+     * detected packet lattice rather than a byte counter, and the stamp
+     * check above catches a scan that reads implausibly low.
+     */
+    if (tl != null) this.timeline = tl;
     const est = Math.max(this.aired ?? 0, (this.position ?? 0) - rewound - gop);
     // A tail from another clip (bank still carrying the previous episode)
     // cannot anchor a position within THIS one — fall back to arithmetic.
@@ -4808,6 +4824,19 @@ export class PipelinePlayout extends EventEmitter {
 
     const parser = new ProgressParser();
     const startOffset = kind === 'clip' ? (this.current?.offset ?? 0) : 0;
+    /**
+     * The generation this parser belongs to.
+     *
+     * A superseded source keeps emitting buffered progress after its
+     * replacement has been decided, and every block moved the SHARED
+     * timeline. Two skips in quick succession is where that shows: the
+     * splice computed 240.261s, then the outgoing source — alive for
+     * 135ms and running at catch-up rate — pushed the timeline on, and the
+     * successor spawned at 243.141s instead. Nearly three seconds of
+     * nothing, on air, from a race rather than any arithmetic. Blocks from
+     * a dead generation are stale news and move nothing.
+     */
+    const myGen = this._srcGen ?? 0;
     let lastOut = 0;
     // Encoding slower than realtime starves the pipe. Owncast ends the
     // broadcast after ten seconds of silence, so this is fatal if sustained —
@@ -4836,6 +4865,7 @@ export class PipelinePlayout extends EventEmitter {
 
     parser.on('block', (b) => {
       if (b.outTimeUs == null) return;
+      if ((this._srcGen ?? 0) !== myGen) return;   // superseded: stale news
       this._lastBlockAt = Date.now();
       this._sawBlock = true;
       if (this.status === 'starting') {
