@@ -142,9 +142,10 @@ export function overlayAss(items, {
     const tags = [`\\pos(${x},${y})`, `\\an5`];
     if (rot) tags.push(`\\frz${(-rot).toFixed(2)}`);
 
-    if (item.type === 'image') {
+    if (item.type === 'image' || item.type === 'censor') {
       // Placeholder: images are composited by their own overlay_vaapi input
-      // rather than drawn by libass, so they are not events here.
+      // and censor boxes are cut on the base picture, neither is drawn by
+      // libass, so they are not events here.
       continue;
     }
 

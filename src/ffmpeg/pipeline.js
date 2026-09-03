@@ -39,6 +39,7 @@ import { ProgressParser } from './progress.js';
 import { probeDuration } from './playout.js';
 import { AAC_FRAME, BACKENDS, audioArgs, onAudioGrid, scaleFilter } from './encoders.js';
 import { buildSubtitleFilter, escapeFilterPath, workKeyOf } from './tracks.js';
+import { censorBoxes, censorStage } from './censor.js';
 import { analyseAssBand, bandScript } from './subband.js';
 import { overlayAss } from './overlay-ass.js';
 import {
@@ -6337,6 +6338,10 @@ export function buildSourceArgs({
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
 
   const imgList = (overlayImages ?? []).filter((i) => i?.path);
+  // Censor boxes are drawn things too: they refuse passthrough and the
+  // HDR pass exactly as pictures do, and ride on the base picture of
+  // whichever graph is built below.
+  const censors = censorBoxes(profile.overlay);
   /**
    * Can the GPU composite these pictures itself?
    *
@@ -6421,7 +6426,7 @@ export function buildSourceArgs({
    */
   if (profile.codec === 'hevc' && selection?.video?.codec === 'hevc'
       && !selection?.subtitle && !sub.filter && !sub.needsComplex
-      && imgList.length === 0 && !overlayAnimated && !pipePlan
+      && imgList.length === 0 && censors.length === 0 && !overlayAnimated && !pipePlan
       // An HDR file may only ship untouched when the operator asked for
       // HDR output — with it off the promise is SDR, so the clip goes to
       // the tone-mapped transcode instead of quietly leaking PQ on air.
@@ -6543,7 +6548,7 @@ export function buildSourceArgs({
    * any drawing keeps the clip on the tone-mapped SDR path it always had.
    */
   const hdrPass = Boolean(profile.hdrOut) && Boolean(selection?.video?.hdr)
-    && imgList.length === 0;
+    && imgList.length === 0 && censors.length === 0;
   if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame
       // Piped clips always carry the overlay input, so the first overlay of
       // a broadcast lands without a restart. That is the feature.
@@ -6569,6 +6574,16 @@ export function buildSourceArgs({
     const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
       width: profile.width, height: profile.height, firstInput: 1, inLabel: 'b', outLabel: 'v',
     });
+    // Boxes go on the base picture before any picture overlay. This chain
+    // has already padded to the frame, so they sit in frame coordinates. A
+    // -vf chain cannot split, so a box forces the filter_complex form even
+    // when nothing else does.
+    const censorGraph = censors.length
+      ? censorStage(censors, {
+        width: profile.width, height: profile.height,
+        inLabel: 'b0', outLabel: gpuImgs.filters.length ? 'b' : 'v', gpu: true,
+      })
+      : '';
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -6580,9 +6595,10 @@ export function buildSourceArgs({
       '-i', srcPath,
       ...gpuImgs.inputs,
       // Software-decoded frames have to be handed to the GPU explicitly.
-      ...(gpuImgs.filters.length
+      ...(gpuImgs.filters.length || censorGraph
         ? ['-filter_complex',
-          [`[0:v]${vaapiChain}[b]`, ...gpuImgs.filters].join(';'), '-map', '[v]']
+          [`[0:v]${vaapiChain}[${censorGraph ? 'b0' : 'b'}]`,
+            ...(censorGraph ? [censorGraph] : []), ...gpuImgs.filters].join(';'), '-map', '[v]']
         : ['-vf', vaapiChain, '-map', '0:v:0']),
       '-map', `0:a:${audioIdx}?`,
       ...(gpuImgs.looping ? ['-shortest'] : []),
@@ -6712,8 +6728,20 @@ export function buildSourceArgs({
        * overlays is baked into this command. Changing them means replacing
        * the renderer; this process never hears about it.
        */
+      // Boxes sit on the base picture, under the canvas. A chain that pads
+      // has already placed the picture in the frame; one that has not is
+      // still the bare content rect, so the boxes shift by its origin and
+      // clip to it.
+      const censorGraph = censors.length
+        ? censorStage(censors, {
+          width: profile.width, height: profile.height,
+          stage: /pad_vaapi/.test(videoChain) ? null : rect,
+          inLabel: 'b0', outLabel: 'b', gpu: true,
+        })
+        : '';
       const graph = '[1:v]format=rgba,hwupload[ov];'
-        + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];`
+        + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[${censorGraph ? 'b0' : 'b'}];`
+        + (censorGraph ? `${censorGraph};` : '')
         + composite;
       return [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -6924,8 +6952,20 @@ export function buildSourceArgs({
         ? `${gpuImgs.filters.join(';')};[vb][ov]overlay_vaapi=x=0:y=${band.y}[v]`
         : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
       : composite;
+    // Boxes sit on the base picture, under the canvas. A chain that pads
+    // has already placed the picture in the frame; one that has not is
+    // still the bare content rect, so the boxes shift by its origin and
+    // clip to it.
+    const censorGraph = censors.length
+      ? censorStage(censors, {
+        width: profile.width, height: profile.height,
+        stage: /pad_vaapi/.test(videoChain) ? null : rect,
+        inLabel: 'b0', outLabel: 'b', gpu: true,
+      })
+      : '';
     const graph = `${canvasChain}`
-      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[b];`
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[${censorGraph ? 'b0' : 'b'}];`
+      + (censorGraph ? `${censorGraph};` : '')
       + `${bandComposite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -7013,9 +7053,17 @@ export function buildSourceArgs({
     phase: offset,
   });
 
+  // Censor boxes on the padded picture, before pictures and the upload —
+  // the software form of the stage the GPU graphs carry.
+  const censorGraph = censorBoxes(profile.overlay).length
+    ? censorStage(censorBoxes(profile.overlay), {
+      width: profile.width, height: profile.height, inLabel: 'o0', outLabel: 'o', gpu: false,
+    })
+    : '';
   let filterArgs;
-  if (sub.needsComplex || imgs.filters.length) {
+  if (sub.needsComplex || imgs.filters.length || censorGraph) {
     const parts = [];
+    const o = censorGraph ? 'o0' : 'o';
     if (sub.needsComplex) {
       // Bitmap subtitles (DVD/PGS subpictures) carry pixel positions in the
       // SOURCE frame's coordinate space. Compositing after scale+pad placed
@@ -7027,10 +7075,11 @@ export function buildSourceArgs({
       // composite, since the subpicture stream has no fields of its own to
       // preserve. The subpicture rides through the tone map with the frame
       // — marginally dimmer text on an HDR title beats PQ leaking out.
-      parts.push(`[s]${cpuDeint}${cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base}${ovPost}[o]`);
+      parts.push(`[s]${cpuDeint}${cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base}${ovPost}[${o}]`);
     } else {
-      parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
+      parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[${o}]`);
     }
+    if (censorGraph) parts.push(censorGraph);
     parts.push(...imgs.filters);
     parts.push(`[${imgs.filters.length ? 'vi' : 'o'}]${up}[v]`);
     filterArgs = ['-filter_complex', parts.join(';'), '-map', '[v]'];
@@ -7143,9 +7192,17 @@ export function buildChunkArgs({
     phase: start,
   });
 
+  // Censor boxes on the padded picture, before pictures and the upload —
+  // the software form of the stage the GPU graphs carry.
+  const censorGraph = censorBoxes(profile.overlay).length
+    ? censorStage(censorBoxes(profile.overlay), {
+      width: profile.width, height: profile.height, inLabel: 'o0', outLabel: 'o', gpu: false,
+    })
+    : '';
   let filterArgs;
-  if (sub.needsComplex || imgs.filters.length) {
+  if (sub.needsComplex || imgs.filters.length || censorGraph) {
     const parts = [];
+    const o = censorGraph ? 'o0' : 'o';
     if (sub.needsComplex) {
       // Bitmap subtitles (DVD/PGS subpictures) carry pixel positions in the
       // SOURCE frame's coordinate space. Compositing after scale+pad placed
@@ -7153,10 +7210,11 @@ export function buildChunkArgs({
       // wrong size. Overlay at native size first; scaling then carries the
       // subtitles along with the picture.
       parts.push(`[0:v:0][${sub.overlayInput}]overlay[s]`);
-      parts.push(`[s]${cpuDeint}${cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base}${ovPost}[o]`);
+      parts.push(`[s]${cpuDeint}${cpuToneFilter ? base.replace(',pad=', `,${cpuToneFilter},pad=`) : base}${ovPost}[${o}]`);
     } else {
-      parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[o]`);
+      parts.push(`[0:v:0]${preUpload.filter(Boolean).join(',')}[${o}]`);
     }
+    if (censorGraph) parts.push(censorGraph);
     parts.push(...imgs.filters);
     parts.push(`[${imgs.filters.length ? 'vi' : 'o'}]${up}[v]`);
     filterArgs = ['-filter_complex', parts.join(';'), '-map', '[v]'];

@@ -13,6 +13,7 @@
 //                 which is the N100 condition; most splice faults only show
 //                 with it OFF)
 //   THINBUF=s     shrink the cushion   SUBS=1 start with subtitles on
+//   CENSOR=1      one censor box on the picture
 //   ALLLOG=1      every engine log line, untruncated
 import { createServer } from 'net';
 import { createWriteStream, mkdirSync } from 'fs';
@@ -64,7 +65,12 @@ const profile = {
   device: '/dev/dri/renderD128',
   width: 1280, height: 720, fps: 30,
   fpsMode: 'auto', videoBitrate: PASS ? '16000k' : '3000k', audioBitrate: '128k',
-  gopSeconds: 2, overlayPipe: false, overlay: [],
+  gopSeconds: 2, overlayPipe: false,
+  // CENSOR=1 puts one censor box mid-frame: a drawn thing with no canvas,
+  // so passthrough must refuse and the transcode graphs must carry it.
+  overlay: process.env.CENSOR
+    ? [{ id: 'c1', type: 'censor', x: 0.5, y: 0.5, w: 0.3, h: 0.25, strength: 5, enabled: true }]
+    : [],
   parallelChunks: 1, chunkSeconds: 20,
 };
 

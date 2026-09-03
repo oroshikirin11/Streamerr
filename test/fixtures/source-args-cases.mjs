@@ -36,6 +36,7 @@ const videoHdr = {
 };
 
 const textSub = { codec: 'ass', typeIndex: 0, external: false };
+const censor = { id: 'c1', type: 'censor', x: 0.5, y: 0.5, w: 0.25, h: 0.2, strength: 5, enabled: true };
 
 const still = {
   path: '/app/overlays/airfryer.png', x: 0.1, y: 0.1, size: 0.2,
@@ -145,5 +146,23 @@ export const cases = {
     selection: { video: video169, audio: { typeIndex: 0 }, subtitle: textSub },
     extractedPath: '/cache/5079e36bbb7fccf0.ass',
     duration: 1440.657,
+  },
+  // Censor boxes: a drawn thing with no canvas. The HDR fast path must
+  // give way to a transcode carrying the stage, and a pillarboxed
+  // composite must place the box in the bare rect's own coordinates.
+  'no subtitles, censor box (no canvas)': {
+    srcPath: '/media/backrooms.mkv',
+    offset: 0,
+    profile: { ...vaapi, overlay: [censor] },
+    selection: { video: videoHdr, audio: { typeIndex: 0 }, subtitle: null },
+    duration: 6628.788,
+  },
+  'subtitled pillarbox, bg-composite + censor box': {
+    srcPath: '/media/berserk-e1.mkv',
+    offset: 187,
+    profile: { ...vaapi, gpuSubs: true, barsGraph: 'bg-composite', overlay: [censor] },
+    selection: { video: video43, audio: { typeIndex: 0 }, subtitle: textSub },
+    extractedPath: '/cache/berserk.ass',
+    duration: 1475,
   },
 };

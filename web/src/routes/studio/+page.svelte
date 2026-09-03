@@ -267,8 +267,13 @@
                    motion: 'none', speed: BOUNCE_SPEED, enabled: true };
     const item = kind === 'image'
       ? { ...base, type: 'image', file, text: '', size: 0.2 }
-      : { ...base, type: 'text', text: 'New text', size: 0.06,
-          colour: '#ffffff', outline: true };
+      // A box has a width AND a height, both fractions of the frame like a
+      // picture's width; it never rotates (it is a crop of the picture,
+      // which has no angle) and never moves.
+      : kind === 'censor'
+        ? { ...base, type: 'censor', text: '', w: 0.24, h: 0.18, strength: 5 }
+        : { ...base, type: 'text', text: 'New text', size: 0.06,
+            colour: '#ffffff', outline: true };
     items = [...items, item];
     selected = item.id;
     dirty = true;
@@ -520,6 +525,22 @@
     selected = item.id;
     const box = stage.getBoundingClientRect();
     const cy = box.top + item.y * box.height;
+    // A box resizes freely: the handle is its bottom-right corner, so its
+    // distance from the centre is half the box, on each axis on its own.
+    if (item.type === 'censor') {
+      const cx = box.left + item.x * box.width;
+      const moveBox = (ev) => patch(item.id, {
+        w: Math.min(1, Math.max(0.02, 2 * Math.abs(ev.clientX - cx) / box.width)),
+        h: Math.min(1, Math.max(0.02, 2 * Math.abs(ev.clientY - cy) / box.height)),
+      });
+      const upBox = () => {
+        window.removeEventListener('pointermove', moveBox);
+        window.removeEventListener('pointerup', upBox);
+      };
+      window.addEventListener('pointermove', moveBox);
+      window.addEventListener('pointerup', upBox);
+      return;
+    }
     const start = Math.abs(e.clientY - cy) || 1;
     const base = item.size;
     // A picture's size is its width across the frame, so it has to be
@@ -691,6 +712,7 @@
       </button>
       <input type="file" bind:this={fileInput} onchange={onPick} multiple
              accept="image/png,image/gif,image/jpeg,image/webp" style="display:none" />
+      <button onclick={() => add('censor')} title="Blur out part of the picture">Add censor</button>
     </div>
 
     <!-- Everything that reaches the broadcast is pushed to the far side, so
@@ -770,16 +792,16 @@
                Left in, the box grew a whole line taller than the image and
                the resize handle sat well below the corner it belongs to. -->
           <div class="item" class:on={selected === item.id} class:off={item.enabled === false}
-               class:isimg={item.type === 'image'} class:burnt={burntIn(item)}
+               class:isimg={item.type === 'image' || item.type === 'censor'} class:burnt={burntIn(item)}
                style={`left:${ghostPos(item, idx).x * 100}%;
                        top:${ghostPos(item, idx).y * 100}%;
                        transform: translate(-50%,-50%);
-                       ${item.type === 'image' ? ''
-                         : `font-size:${item.size * 100}cqh; color:${item.colour};`}
+                       ${item.type === 'text'
+                         ? `font-size:${item.size * 100}cqh; color:${item.colour};` : ''}
                        opacity:${item.enabled === false ? 0.35 : (item.opacity ?? 1)};`}
                onpointerdown={(e) => startDrag(e, item)}
                role="button" tabindex="0"
-               aria-label={`${item.type === 'image' ? item.file : item.text} — drag to move`}>
+               aria-label={`${item.type === 'image' ? item.file : item.type === 'censor' ? 'Censor box' : item.text} — drag to move`}>
             <!--
               The rotation lives HERE, not on .item, and the two must never be
               merged back together.
@@ -809,6 +831,13 @@
                      alt={item.file} draggable="false"
                      onload={(e) => onPicLoad(e, item.file)}
                      style={`width:${item.size * 100}cqw`} />
+              {:else if item.type === 'censor'}
+                <!-- Both axes as fractions of the FRAME, the same numbers the
+                     encoder crops by. The blur here is only a stand-in for
+                     the encoder's mosaic; the live feed shows the real one. -->
+                <span class="cbox"
+                      style={`width:${item.w * 100}cqw; height:${item.h * 100}cqh;
+                              backdrop-filter: blur(${4 + (item.strength ?? 5) * 2}px);`}></span>
               {:else}
                 <!-- No whitespace inside the span: `white-space: pre` renders
                      the template's own newline and indentation as real space,
@@ -817,8 +846,10 @@
                 <span class="txt" class:outline={item.outline !== false}>{item.text}</span>
               {/if}
               {#if selected === item.id}
+                {#if item.type !== 'censor'}
                 <span class="handle rot" onpointerdown={(e) => startRotate(e, item)}
                       role="button" tabindex="-1" aria-label="Rotate"></span>
+                {/if}
                 <span class="handle size" onpointerdown={(e) => startResize(e, item)}
                       role="button" tabindex="-1" aria-label="Resize"></span>
               {/if}
@@ -861,12 +892,30 @@
             {#if sel.file && !pictures.some((p) => p.name === sel.file)}
               <p class="err small">This picture has been deleted, so it will not show.</p>
             {/if}
+          {:else if sel.type === 'censor'}
+            <label>Censor box</label>
+            <p class="muted small">
+              Blurs whatever is under it. Drag to place it, pull the corner to
+              size it.
+            </p>
+            <div class="row2">
+              <div><label>Width</label>
+                <input type="range" min="2" max="100" step="0.5" value={sel.w * 100}
+                       oninput={(e) => patch(sel.id, { w: +e.currentTarget.value / 100 })} /></div>
+              <div><label>Height</label>
+                <input type="range" min="2" max="100" step="0.5" value={sel.h * 100}
+                       oninput={(e) => patch(sel.id, { h: +e.currentTarget.value / 100 })} /></div>
+            </div>
+            <label>Strength <span class="muted small">{sel.strength ?? 5}</span></label>
+            <input type="range" min="1" max="10" step="1" value={sel.strength ?? 5}
+                   oninput={(e) => patch(sel.id, { strength: +e.currentTarget.value })} />
           {:else}
             <label>Text</label>
             <textarea rows="2" value={sel.text}
                       oninput={(e) => patch(sel.id, { text: e.currentTarget.value })}></textarea>
           {/if}
 
+          {#if sel.type !== 'censor'}
           <div class="row2">
             {#if sel.type !== 'image'}
               <div><label>Colour</label>
@@ -936,6 +985,7 @@
               Outline — keeps it readable on any picture
             </label>
           {/if}
+          {/if}
 
           <div class="actions">
             <button onclick={() => patch(sel.id, { enabled: sel.enabled === false })}>
@@ -961,9 +1011,11 @@
             {#each items as i (i.id)}
               <li class:on={selected === i.id} class:off={i.enabled === false}>
                 <button class="pick" onclick={() => (selected = i.id)}>
-                  <span class="dot" style={`background:${i.type === 'image' ? '#7b8794' : i.colour}`}></span>
+                  <span class="dot" style={`background:${i.type === 'text' ? i.colour : '#7b8794'}`}></span>
                   <span class="nm">
-                    {i.type === 'image' ? (i.file || '(no picture)') : (i.text.slice(0, 24) || '(empty)')}
+                    {i.type === 'image' ? (i.file || '(no picture)')
+                      : i.type === 'censor' ? 'Censor box'
+                        : (i.text.slice(0, 24) || '(empty)')}
                   </span>
                 </button>
                 <!-- A switch, not a delete. Turning something off to see the
@@ -1127,7 +1179,7 @@
   /* Already burnt into the picture behind: keep the box and the handles,
      drop the duplicate. visibility, not display, so the outline still
      traces the real extents of the text. */
-  .item.burnt .txt, .item.burnt .pic { visibility: hidden; }
+  .item.burnt .txt, .item.burnt .pic, .item.burnt .cbox { visibility: hidden; }
   .item.burnt > .turn { outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
   .item.burnt:hover > .turn, .item.burnt.on > .turn { outline: 1px dashed var(--accent); }
   /* No line box at all, so the outline hugs the picture and the resize
@@ -1138,6 +1190,14 @@
      picture overlay unclickable — no grab cursor, no drag, while text
      worked fine. */
   .item.isimg { font-size: 0; line-height: 0; padding: 0; }
+  /* The stand-in for the encoder's blur. Sized inline; the faint fill and
+     the dashed edge exist so an empty box is still visible over a picture
+     the blur barely changes (flat colour, the black of the bars). */
+  .cbox {
+    display: block; box-sizing: border-box; pointer-events: none;
+    background: rgba(255,255,255,.08);
+    outline: 1px dashed rgba(255,255,255,.55); outline-offset: -1px;
+  }
   .item:active { cursor: grabbing; }
   .item.off { opacity: .35; }
   /* Selection and burnt-in outlines sit on the ROTATING wrapper, so they
