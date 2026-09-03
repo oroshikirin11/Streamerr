@@ -157,12 +157,41 @@
     return { a, b };
   });
   const pct = (t) => `${((t - win.a) / (win.b - win.a)) * 100}%`;
+  /**
+   * The strip has a scale, in pixels per minute, and scrolls sideways when
+   * the night is longer than the screen — a whole weekend must not be
+   * squeezed into one row of slivers. Zoom is remembered per browser.
+   */
+  let tlEl = $state(null);
+  let tlW = $state(0);
+  let pxPerMin = $state((() => { try { return Number(localStorage.getItem('jsr-strip-zoom')) || 4; } catch { return 4; } })());
+  const laneW = $derived(Math.max(tlW - 28, ((win.b - win.a) / 60) * pxPerMin));
+  function zoom(dir) {
+    const steps = [1, 1.5, 2, 3, 4, 6, 8, 12];
+    const i = steps.findIndex((v) => v >= pxPerMin);
+    const j = Math.min(steps.length - 1, Math.max(0, (i < 0 ? steps.length - 1 : i) + dir));
+    pxPerMin = steps[j];
+    try { localStorage.setItem('jsr-strip-zoom', String(pxPerMin)); } catch { /* private mode */ }
+    scrolledFor = null;
+  }
   const ticks = $derived.by(() => {
-    const span = win.b - win.a;
-    const step = span <= 4 * 3600 ? 1800 : span <= 10 * 3600 ? 3600 : 7200;
+    // Labels need about 70px each; pick the finest step that gives it.
+    const pxPerSec = laneW / (win.b - win.a);
+    const step = [900, 1800, 3600, 7200, 14400, 43200].find((st) => st * pxPerSec >= 70) ?? 86400;
     const out = [];
     for (let t = Math.ceil(win.a / step) * step; t <= win.b; t += step) out.push(t);
     return out;
+  });
+  // Bring the moment that matters into view once per situation: now while
+  // live, the start marker otherwise. Never while the operator is dragging.
+  let scrolledFor = $state(null);
+  $effect(() => {
+    const anchor = live ? now : (startFlag?.at ?? placed[0]?.at ?? null);
+    const key = `${live}:${segments.map((s) => s.key).join(',')}:${laneW}`;
+    if (!tlEl || anchor == null || scrolledFor === key || drag) return;
+    scrolledFor = key;
+    const x = ((anchor - win.a) / (win.b - win.a)) * laneW;
+    tlEl.scrollTo({ left: Math.max(0, x - tlEl.clientWidth * 0.25), behavior: 'smooth' });
   });
   const endsAt = $derived.by(() => {
     const last = placed[placed.length - 1];
@@ -519,11 +548,11 @@
 {#if note}<p class="small note">{note}</p>{/if}
 
 <!-- ── the strip ─────────────────────────────────────────────────────── -->
-<div class="tl" class:dragging={Boolean(drag)}>
-  <div class="scale">
+<div class="tl" class:dragging={Boolean(drag)} bind:this={tlEl} bind:clientWidth={tlW}>
+  <div class="scale" style:width={`${laneW}px`}>
     {#each ticks as t (t)}<span style:left={pct(t)}>{hhmm(t)}</span>{/each}
   </div>
-  <div class="lane" bind:this={stripEl}>
+  <div class="lane" bind:this={stripEl} style:width={`${laneW}px`}>
     {#if live && card && placed.find((p) => p.state === 'upcoming')}
       {@const first = placed.find((p) => p.state === 'upcoming')}
       <div class="cd2" style:left={pct(now)} style:width={`${Math.max(0.5, ((first.at - now) / (win.b - win.a)) * 100)}%`}>{status.status === 'break' ? 'off air' : 'countdown'}</div>
@@ -560,6 +589,7 @@
   </div>
   <div class="legend">
     <span><i class="l-now"></i>on air</span><span><i class="l-past"></i>watched</span><span><i class="l-brk"></i>break</span><span><i class="l-pin"></i>pin / start</span>
+    <span class="zoom"><button class="ic" onclick={() => zoom(-1)} title="Zoom out" aria-label="Zoom out">−</button><button class="ic" onclick={() => zoom(1)} title="Zoom in" aria-label="Zoom in">+</button></span>
     {#if endsAt && placed.some((p) => p.state === 'upcoming')}<span class="sp"></span><span class="num">ends around {clock(endsAt)}</span>{/if}
   </div>
 </div>
@@ -990,7 +1020,7 @@
   .tl.dragging { cursor: grabbing; }
   .scale { position: relative; height: 16px; margin-bottom: 6px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .scale span { position: absolute; top: 0; transform: translateX(-50%); }
-  .lane { position: relative; height: 56px; min-width: 640px; border-radius: 6px; background: repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 1px), var(--border) calc(12.5% - 1px) 12.5%); }
+  .lane { position: relative; height: 56px; border-radius: 6px; background: repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 1px), var(--border) calc(12.5% - 1px) 12.5%); }
   .blk { position: absolute; top: 9px; height: 38px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); display: flex; align-items: center; gap: 6px; padding: 0 7px; font-size: 12px; overflow: hidden; white-space: nowrap; box-sizing: border-box; }
   .blk.grab { cursor: grab; }
   .blk.lift { z-index: 3; box-shadow: 0 6px 18px rgba(0,0,0,.35); border-color: var(--accent); }
@@ -1010,7 +1040,9 @@
   .startflag.grab { cursor: ew-resize; }
   .startflag::before { content: "▶ starts here"; position: absolute; bottom: -15px; left: -3px; font-size: 10px; color: var(--accent); white-space: nowrap; letter-spacing: .04em; }
   .empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--muted); font-size: 13px; }
-  .legend { display: flex; gap: 14px; margin-top: 22px; font-size: 11.5px; color: var(--muted); flex-wrap: wrap; align-items: center; }
+  .legend { display: flex; gap: 14px; margin-top: 22px; font-size: 11.5px; color: var(--muted); flex-wrap: wrap; align-items: center; position: sticky; left: 0; }
+  .legend .zoom { display: inline-flex; gap: 2px; margin-left: 6px; }
+  .legend .zoom .ic { width: 22px; height: 22px; font-size: 14px; border: 1px solid var(--border); }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; border: 1px solid var(--border); }
   .legend .l-now { background: color-mix(in srgb, var(--success) 40%, var(--surface-2)); }
   .legend .l-past { background: var(--surface-2); opacity: .5; }
