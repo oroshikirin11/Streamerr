@@ -329,7 +329,9 @@ const BUFFER_FLOOR_S = 10;
  * starts preparing only once the previous skip lands. Three covers a burst of
  * skips without preparing more of the queue than a clip's runtime can pay for.
  */
-export const PREFETCH_DEPTH = 3;
+export const PREFETCH_DEPTH = Number(process.env.STREAMERR_PREFETCH_DEPTH) > 0
+  ? Math.min(8, Number(process.env.STREAMERR_PREFETCH_DEPTH))
+  : 1;
 
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;

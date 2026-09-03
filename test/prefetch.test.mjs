@@ -14,7 +14,12 @@
  *
  * Run: node test/prefetch.test.mjs
  */
-import { PipelinePlayout, PREFETCH_DEPTH } from '../src/ffmpeg/pipeline.js';
+// Depth defaults to 1 in production (see the constant) because the extra
+// reads cost real bandwidth on a box with no encode headroom. The BEHAVIOUR
+// this file pins is the same at any depth, so ask for 3 and assert against
+// whatever the module resolved.
+process.env.STREAMERR_PREFETCH_DEPTH = '3';
+const { PipelinePlayout, PREFETCH_DEPTH } = await import('../src/ffmpeg/pipeline.js');
 
 let failures = 0;
 const check = (name, actual, expected) => {
