@@ -3468,6 +3468,16 @@ export class PipelinePlayout extends EventEmitter {
       duration: seconds,
     };
     this.position = 0;
+    // What follows the card, with projected air times, for the strip along
+    // its bottom. Posters are local files the server attached to the items.
+    const proj = this._schedule();
+    const lineup = this.queue.slice(0, 6).map((q, i) => ({
+      path: q.posterPath ?? null, title: q.title ?? '', at: proj[i] ?? null,
+    }));
+    let endsAt = null;
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      if (proj[i] != null && this.queue[i].duration) { endsAt = proj[i] + this.queue[i].duration; break; }
+    }
     this._spawnSource(buildCountdownArgs({
       profile: this.profile,
       selection: this.selection,
@@ -3476,6 +3486,9 @@ export class PipelinePlayout extends EventEmitter {
       seconds,
       heading,
       nextTitle: this.queue[0]?.title ?? '',
+      when,
+      lineup,
+      endsAt,
     }), { kind: 'clip' });
   }
 
@@ -7395,43 +7408,112 @@ const HOLD_FONTS = [
  * which the ordinary clip-close path treats as a natural end — _advance()
  * then rolls straight into the show.
  */
+/**
+ * The countdown card: a pre-show or interval, drawn by ffmpeg from nothing.
+ *
+ * A radial gradient ground with a faint grid and a vignette; the heading
+ * and the start time as an eyebrow; the coming title large on the left,
+ * the clock large on the right; and along the bottom what follows, as
+ * posters with their projected air times, the first outlined. Everything
+ * is placed in fractions of the frame so it looks the same at 720p and
+ * 4K. The only per-frame cost is the clock, as before; posters are single
+ * frames the overlay repeats.
+ */
 export function buildCountdownArgs({
   profile, selection = null, tsOffset = 0, statsPeriodMs = 500, seconds, nextTitle = '',
-  heading = 'STARTING SOON',
+  heading = 'STARTING SOON', when = '', lineup = [], endsAt = null,
 }) {
   const W = profile.width;
   const H = profile.height;
   const R = Math.ceil(seconds);
   const font = fontArg();
-  // Remaining time, rendered live by drawtext: R counts down with stream
-  // time. Hours appear only when the wait is that long.
+  const px = (f) => Math.round(H * f);
+  // drawtext text: no quotes, backslashes or percent (expansion), and a
+  // colon must be escaped or it ends the option.
+  const esc = (t) => String(t ?? '').replace(/[\\'%]/g, '').replace(/:/g, '\\:').slice(0, 80);
+  const hhmm = (epoch) => {
+    if (epoch == null) return '';
+    const d = new Date(epoch * 1000);
+    return `${String(d.getHours()).padStart(2, '0')}\\:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
   const clock = R >= 3600
     ? `%{eif\\:trunc((${R}-t)/3600)\\:d\\:1}\\:%{eif\\:mod(trunc((${R}-t)/60),60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`
     : `%{eif\\:trunc((${R}-t)/60)\\:d\\:2}\\:%{eif\\:mod(trunc(${R}-t),60)\\:d\\:2}`;
-  const title = String(nextTitle).replace(/[\\':%]/g, '').slice(0, 70);
-  const vf = [
-    // The dark band the text sits on, so the clock reads over any bar color.
-    `drawbox=x=0:y=ih*0.30:w=iw:h=ih*0.40:color=black@0.72:t=fill`,
-    `drawtext=${font}text='${String(heading).replace(/[\\':%]/g, '')}':fontcolor=white@0.85:`
-      + 'fontsize=h/22:x=(w-text_w)/2:y=h*0.345',
-    `drawtext=${font}text='${clock}':fontcolor=white:`
-      + 'fontsize=h/5:x=(w-text_w)/2:y=h*0.42',
-    ...(title ? [
-      `drawtext=${font}text='${title}':fontcolor=white@0.85:`
-        + 'fontsize=h/26:x=(w-text_w)/2:y=h*0.625',
-    ] : []),
-  ].join(',');
+  // "Series — S1E8" reads as the series over the episode; a film is one line.
+  const cut = String(nextTitle ?? '').indexOf(' — ');
+  const series = (cut > 0 ? nextTitle.slice(0, cut) : String(nextTitle ?? '')).slice(0, 26);
+  const episode = (cut > 0 ? nextTitle.slice(cut + 3) : '').slice(0, 40);
+  const eyebrow = `${heading}${when ? `  ·  ${heading === 'UP NEXT' ? 'AT' : 'LIVE AT'} ${when}` : ''}`;
+  const under = heading === 'UP NEXT' ? 'UNTIL NEXT' : 'UNTIL WE START';
+  const text = (t, { size, x, y, alpha = 1 }) =>
+    `drawtext=${font}text='${t}':fontcolor=white@${alpha}:fontsize=${size}:x=${x}:y=${y}`;
 
+  // Ground: a radial gradient off-centre, a faint grid, darkened edges.
+  const ground = [
+    `drawgrid=w=${px(0.06)}:h=${px(0.06)}:color=white@0.035:t=1`,
+    'vignette=angle=PI/4.5',
+  ];
+  // Words.
+  const words = [
+    text(esc(eyebrow), { size: px(1 / 34), x: px(0.10), y: px(0.09), alpha: 0.62 }),
+    text(esc(series), { size: px(1 / 14), x: px(0.10), y: px(0.34) }),
+    ...(episode ? [text(esc(episode), { size: px(1 / 22), x: px(0.10), y: px(0.34 + 1 / 14 + 0.025), alpha: 0.78 })] : []),
+    text(clock, { size: px(1 / 5.5), x: `w-${px(0.10)}-text_w`, y: px(0.29) }),
+    text(esc(under), { size: px(1 / 34), x: `w-${px(0.10)}-text_w`, y: px(0.29 + 1 / 5.5 + 0.035), alpha: 0.62 }),
+  ];
+  // The strip: posters 2:3, a fifth of the frame tall, gaps of a fifth of
+  // a poster; the first outlined. Under each its short title and time.
+  const PH = px(0.21); const PW = Math.round(PH * 2 / 3); const GAP = Math.round(PW * 0.3);
+  const SY = px(0.67); const SX = px(0.10);
+  const strip = lineup.slice(0, 6);
+  const posterInputs = [];
+  const parts = [];
+  let cur = 'g';
+  parts.push(`[0:v]${ground.join(',')}[g]`);
+  strip.forEach((it, i) => {
+    const x = SX + i * (PW + GAP);
+    const out = `s${i}`;
+    if (it.path) {
+      const idx = 2 + posterInputs.length;
+      posterInputs.push(it.path);
+      parts.push(`[${idx}:v]scale=${PW}:${PH}:force_original_aspect_ratio=increase,crop=${PW}:${PH}[p${i}]`);
+      parts.push(`[${cur}][p${i}]overlay=${x}:${SY}[${out}]`);
+    } else {
+      parts.push(`[${cur}]drawbox=x=${x}:y=${SY}:w=${PW}:h=${PH}:color=white@0.10:t=fill[${out}]`);
+    }
+    cur = out;
+  });
+  // Two lines under each poster — the short title, then its time — each
+  // cut to what a poster's width can hold.
+  const labels = strip.flatMap((it, i) => {
+    const x = SX + i * (PW + GAP);
+    const c = String(it.title ?? '').lastIndexOf(' — ');
+    const short = c > 0 ? it.title.slice(c + 3) : String(it.title ?? '');
+    return [
+      text(esc(short.slice(0, 12)), { size: px(1 / 48), x, y: SY + PH + px(0.012), alpha: 0.85 }),
+      ...(it.at != null ? [text(hhmm(it.at), { size: px(1 / 48), x, y: SY + PH + px(0.012 + 1 / 48 + 0.008), alpha: 0.55 })] : []),
+    ];
+  });
+  const tail = [
+    ...(strip.length ? [`drawbox=x=${SX - 3}:y=${SY - 3}:w=${PW + 6}:h=${PH + 6}:color=white@0.9:t=3`] : []),
+    ...labels,
+    ...(endsAt != null ? [text(`ends around ${hhmm(endsAt)}`, { size: px(1 / 34), x: `w-${px(0.10)}-text_w`, y: SY + Math.round(PH / 2), alpha: 0.62 })] : []),
+    ...words,
+  ];
   const plan = cardVideoPlan(profile, selection);
+  parts.push(`[${cur}]${tail.join(',')}${plan.vfTail}[v]`);
+
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     ...plan.deviceArgs,
     '-re',
     '-f', 'lavfi', '-t', String(R),
-    '-i', `smptehdbars=s=${W}x${H}:r=${plan.rate}`,
+    '-i', `gradients=s=${W}x${H}:r=${plan.rate}:c0=#1e2d4f:c1=#090c14:x0=${Math.round(W * 0.28)}:y0=${Math.round(H * 0.22)}:x1=${W}:y1=${H}:type=radial`,
     '-f', 'lavfi', '-t', String(R),
     '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-    '-vf', vf + plan.vfTail,
+    ...posterInputs.flatMap((f) => ['-i', f]),
+    '-filter_complex', parts.join(';'),
+    '-map', '[v]', '-map', '1:a',
     ...plan.encodeArgs,
     '-output_ts_offset', Number(tsOffset).toFixed(3),
     '-muxdelay', '0', '-muxpreload', '0',

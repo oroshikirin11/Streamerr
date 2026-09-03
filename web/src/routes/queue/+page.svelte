@@ -541,7 +541,7 @@
            style:left={pct(drag?.kind === 'block' && drag.key === p.key ? drag.at : p.at)}
            style:width={`${Math.max(0.6, ((p.dur || 1200) / (win.b - win.a)) * 100)}%`}
            title={`${p.title}${!p.ghost ? ` · ${fmtTime(p.dur)}` : ''} · ${hhmm(p.at)}`}
-           role={dnd && p.state === 'upcoming' ? 'button' : undefined} tabindex={dnd && p.state === 'upcoming' ? 0 : undefined}
+           role="button" tabindex="0"
            onpointerdown={(e) => startBlockDrag(e, p)}>
         {#if p.image}<img class="cv" src={p.image} alt="" onerror={(e) => e.currentTarget.remove()} />{/if}
         <span class="bt">{epName(p.title)}{#if p.onAir} · on air{/if}</span>
@@ -551,7 +551,7 @@
     {#if startFlag}
       <div class="startflag" class:grab={dnd} style:left={pct(drag?.kind === 'flag' ? drag.at : startFlag.at)}
            title={dnd ? 'Drag to change where the schedule starts' : 'Where the schedule starts — move it with the arrows in the lineup'}
-           role={dnd ? 'button' : undefined} tabindex={dnd ? 0 : undefined}
+           role="button" tabindex="0"
            onpointerdown={startFlagDrag}></div>
     {/if}
     {#if !placed.length}
@@ -668,7 +668,7 @@
       <div class="blkw" class:pinned={seg.startAt} class:over={segOver === seg.key} role="group"
            ondragover={(e) => { if (segDrag) { e.preventDefault(); segOver = seg.key; } }}
            ondrop={(e) => segDrop(e, seg)}>
-        <div class="bh" draggable={dnd} role="toolbar" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
+        <div class="bh" draggable={dnd} role="group" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
           {#if dnd}<span class="handle" title="Drag to move this schedule"></span>{/if}
           <span class="bl"><strong>{seg.name}</strong> <span class="muted">· {segRange(seg)}</span></span>
           <span class="bm">{c.up} to play{#if c.watched} · {c.watched} watched{/if}</span>

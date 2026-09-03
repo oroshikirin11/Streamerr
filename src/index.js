@@ -2454,6 +2454,7 @@ const startStream = wrap(async (req, res) => {
     const item = await library.item(id);
     items.push({
       ...queueExtras(entry),
+      posterPath: await posterFile(item.image ?? null),
       ...(Number(entry.startAt) > 0 ? { startAt: Number(entry.startAt), ...(entry.breakOffline ? { breakOffline: true } : {}) } : {}),
       id: item.id,
       title: item.seriesName
@@ -2747,12 +2748,34 @@ function queueExtras(entry) {
   return out;
 }
 
+/**
+ * A small local JPEG of an item's artwork, for the countdown card's strip.
+ * The receiver's poster preparation already makes exactly that in memory;
+ * this writes it once under the cache. Null when there is no artwork, or
+ * it cannot be fetched — the card draws a placeholder then.
+ */
+async function posterFile(image) {
+  if (!image) return null;
+  try {
+    const art = await sgArtPrepare(image);
+    if (!art) return null;
+    const dir = join(config.paths.cache, 'posters');
+    const file = join(dir, `${art.id}.jpg`);
+    if (!existsSync(file)) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(file, Buffer.from(art.data, 'base64'));
+    }
+    return file;
+  } catch { return null; }
+}
+
 /** Library items in the shape schedules and the engine keep. */
 async function resolveItems(ids) {
   const out = [];
   for (const id of ids ?? []) {
     const item = await library.item(String(id));
     out.push({
+      posterPath: await posterFile(item.image ?? null),
       id: item.id,
       title: item.seriesName
         ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
