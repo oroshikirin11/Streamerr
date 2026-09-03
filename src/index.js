@@ -605,6 +605,22 @@ async function sgArtId(it) {
 
 let sgAnnounced = null;
 let sgRestateTimer = null;
+/** Restate schedule, metadata and artwork after a beat, debounced. */
+function sgRestate() {
+  if (sgRestateTimer) return;
+  sgRestateTimer = setTimeout(() => {
+    sgRestateTimer = null;
+    sgArtPushed.clear();
+    sgQueue({ now: true, schedule: true });
+  }, 2000);
+}
+// A low-rate heartbeat. The receiver extrapolates from the last push, so a
+// push lost to a reconnect or a receiver restart otherwise stays lost
+// until the next clip. One now-playing every 30s is nothing on the wire,
+// and it never announces — that flag is only true for a fresh clip.
+setInterval(() => {
+  if (sgActive() && engine?.snapshot?.()?.playing) sgQueue({ now: true });
+}, 30_000).unref?.();
 let sgOnAirKey = null;
 /**
  * The distinct Streamingestarr rooms among the destinations the LIVE
@@ -885,6 +901,11 @@ function wirePreview(e) {
     // reconnect is the moment to restate all three.
     sgArtPushed.clear();
     sgSchedule(); sgNowPlaying();
+    // And once more after a beat: the receiver is still winding down the
+    // OLD session when the new one connects, and a restate that lands
+    // first was wiped by that — the viewer's ring fell back to a stopwatch
+    // until the next clip. Same grace as the recovery path below.
+    sgRestate();
     if (tsBytes === 0) return;
     tsBytes = 0;
     for (const ws of previewSockets) {
@@ -990,13 +1011,7 @@ function buildEngine({ profile, selection }) {
      * artwork. Restate everything, debounced (recoveries can rapid-fire),
      * with a beat of grace for the receiver's HTTP to follow its RTMP up.
      */
-    if (String(m).includes('Recovery successful') && !sgRestateTimer) {
-      sgRestateTimer = setTimeout(() => {
-        sgRestateTimer = null;
-        sgArtPushed.clear();
-        sgQueue({ now: true, schedule: true });
-      }, 2000);
-    }
+    if (String(m).includes('Recovery successful')) sgRestate();
   });
   // Distinct from a generic warning: this one predicts the stream failing.
   e.on('tooslow', (d) => broadcast('error', {
