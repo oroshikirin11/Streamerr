@@ -96,14 +96,22 @@
   onMount(refreshLive);
   const adding = $derived(live || (sched.tonight?.entries?.length ?? 0) > 0);
   const epName = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(i + 3) : t; };
-  /** The episode after the last one that aired from this series, from history. */
-  const continueAt = $derived.by(() => {
-    if (!series || series.type === 'Movie' || !episodes.length) return -1;
-    const la = (sched.history ?? []).find((h) => h.outcome === 'aired' && h.series === series.title);
-    if (!la) return -1;
-    const i = episodes.findIndex((e) => e.id === la.id);
-    return i >= 0 && i + 1 < episodes.length ? i + 1 : -1;
+  /**
+   * Where a SAVED schedule holding this series would pick up: its next
+   * unwatched item, if that is one of these episodes. Only a saved
+   * schedule remembers; an episode merely played once is not a memory.
+   */
+  const continueFrom = $derived.by(() => {
+    if (!series || series.type === 'Movie' || !episodes.length) return null;
+    for (const s of sched.schedules ?? []) {
+      const next = s.items[s.start];
+      if (!next || next.series !== series.title) continue;
+      const i = episodes.findIndex((e) => e.id === next.id);
+      if (i >= 0) return { at: i, schedule: s };
+    }
+    return null;
   });
+  const continueAt = $derived(continueFrom?.at ?? -1);
   async function continueSeries() {
     selectFrom(episodes[continueAt].id);
     await stream();
@@ -661,7 +669,7 @@
     <div class="spacer"></div>
     {#if continueAt >= 0 && !selected.size}
       <button class="primary" disabled={starting} onclick={continueSeries}
-              title="Pick up after the last episode that aired">
+              title={`Where "${continueFrom.schedule.name}" picks up`}>
         Continue · {epName(episodes[continueAt].title)}
       </button>
     {/if}

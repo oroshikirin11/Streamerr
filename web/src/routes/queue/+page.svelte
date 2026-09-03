@@ -528,12 +528,15 @@
     catch (err) { error = err.message; }
     finally { picker.loading = false; }
   }
-  const lastAired = (seriesTitle) => (view.history ?? []).find((h) => h.outcome === 'aired' && (h.series === seriesTitle || seriesName(h.title) === seriesTitle));
+  /** Where a saved schedule holding this series picks up, else the start. */
   function continueIndex() {
-    const la = lastAired(picker.series?.title);
-    if (!la) return 0;
-    const i = picker.episodes.findIndex((e) => e.id === la.id);
-    return i >= 0 ? Math.min(i + 1, picker.episodes.length) : 0;
+    for (const s of view.schedules ?? []) {
+      const next = s.items[s.start];
+      if (!next || next.series !== picker.series?.title) continue;
+      const i = picker.episodes.findIndex((e) => e.id === next.id);
+      if (i >= 0) return i;
+    }
+    return 0;
   }
   function selectFrom(i) { picker.selected = new Set(picker.episodes.slice(i).map((e) => e.id)); }
   function togglePick(id) { const n = new Set(picker.selected); if (n.has(id)) n.delete(id); else n.add(id); picker.selected = n; }
