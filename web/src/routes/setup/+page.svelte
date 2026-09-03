@@ -666,15 +666,18 @@
         Optional. Without it, we use the filenames.
       </p>
 
+      <!-- Best option first: TMDB needs one free key and nothing else
+           running, Jellyfin needs a whole second server, and filenames are
+           the fallback the page already promises above. -->
       <div class="row">
         <label class="pick">
-          <input type="radio" bind:group={metaProvider} value="none" /> Filenames
+          <input type="radio" bind:group={metaProvider} value="tmdb" /> TMDB
         </label>
         <label class="pick">
           <input type="radio" bind:group={metaProvider} value="jellyfin" /> Jellyfin
         </label>
         <label class="pick">
-          <input type="radio" bind:group={metaProvider} value="tmdb" /> TMDB
+          <input type="radio" bind:group={metaProvider} value="none" /> Filenames
         </label>
       </div>
 

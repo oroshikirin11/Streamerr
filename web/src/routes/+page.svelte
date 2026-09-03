@@ -18,6 +18,12 @@
   /** How many of each shelf are rendered. Grown by the scroll sentinel
    *  rather than rendering thousands of posters up front. */
   let shown = $state({});
+  /**
+   * Shelves fold on their name — every library open by default, and a
+   * fold is a viewing preference for THIS visit, so it lives here and not
+   * in any config. Keyed by library id; absent means open.
+   */
+  let folded = $state({});
   const SHELF_STEP = 24;
   /** The items endpoint caps a response at 200, so a shelf holds a window
    *  onto its library rather than the whole thing. Reaching the end of what
@@ -554,9 +560,19 @@
   {#each shelves.filter((sh) => !onlyLibrary || sh.library.id === onlyLibrary) as sh (sh.library.id)}
     <section class="shelf">
       <header class="shead">
-        <h2>{shelfTitle(sh.library)}</h2>
+        <h2>
+          <button class="fold" onclick={() => (folded[sh.library.id] = !folded[sh.library.id])}
+                  aria-expanded={!folded[sh.library.id]}>
+            <svg class="chev" class:closed={folded[sh.library.id]} viewBox="0 0 24 24"
+                 width="15" height="15" fill="currentColor" aria-hidden="true">
+              <path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/>
+            </svg>
+            {shelfTitle(sh.library)}
+          </button>
+        </h2>
         <span class="count">{sh.total || sh.items.length}</span>
       </header>
+      {#if !folded[sh.library.id]}
       <div class="grid">
         {#each sh.items.slice(0, shown[sh.library.id] ?? SHELF_STEP) as item, i (item.id)}
           <button class="poster" disabled={starting || opening}
@@ -593,6 +609,7 @@
           </button>
         {/each}
       </div>
+      {/if}
     </section>
   {/each}
   <!-- Grows every shelf that still has items left, so the page keeps
@@ -876,6 +893,17 @@
     padding: 10px 0 12px;
   }
   .shead h2 { margin: 0; font-size: 17px; font-weight: 500; letter-spacing: .1px; }
+  /* The name IS the fold control. Inherits the heading's look wholesale;
+     opacity pinned because an old .shead button rule fades buttons out. */
+  .shead .fold {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: none; border: none; padding: 0; cursor: pointer;
+    font: inherit; color: inherit; letter-spacing: inherit;
+    opacity: 1 !important;
+  }
+  .shead .fold .chev { transition: transform .14s ease; color: var(--muted); }
+  .shead .fold .chev.closed { transform: rotate(-90deg); }
+  .shead .fold:hover .chev { color: inherit; }
   .shead .count {
     font-size: 12px; color: var(--muted);
     background: var(--surface-2); border-radius: 999px; padding: 2px 9px;
