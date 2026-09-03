@@ -605,6 +605,28 @@ async function sgArtId(it) {
 
 let sgAnnounced = null;
 let sgRestateTimer = null;
+/**
+ * Drift watch. The receiver shows the last push plus the time since it,
+ * and a seek's own push can read a position the wire has not reached yet
+ * — the aired stamp is still draining the old spot when the 'seeked'
+ * event fires — so viewers were re-anchored to the pre-seek position
+ * until the next push. Each progress tick compares what they would be
+ * showing with what is on air and re-pushes when the two part by more
+ * than a beat. Catches seeks, stalls and recoveries alike, and costs
+ * nothing while the clock simply runs.
+ */
+let sgLastPush = null;   // { position, at, paused } of the last now-playing
+let sgDriftAt = 0;
+function sgDriftCheck(s) {
+  if (!sgLastPush || sgLastPush.paused || !(sgLastPush.position >= 0)) return;
+  if (s.status !== 'running' || !(s.position >= 0) || s.playing?.countdown) return;
+  if (!sgActive() || Date.now() - sgDriftAt < 2000) return;
+  const expected = sgLastPush.position + (Date.now() - sgLastPush.at) / 1000;
+  if (Math.abs(s.position - expected) > 1.5) {
+    sgDriftAt = Date.now();
+    sgQueue({ now: true });
+  }
+}
 /** Restate schedule, metadata and artwork after a beat, debounced. */
 function sgRestate() {
   if (sgRestateTimer) return;
@@ -766,6 +788,7 @@ async function sgNowPlaying({ announce = false } = {}) {
   for (const ch of sgChannels) {
     sgPost('/api/integrations/metadata/nowplaying', { ...payload, channel: ch || 'main' });
   }
+  sgLastPush = { position: payload.position, at: Date.now(), paused: payload.paused };
 }
 
 async function sgSchedule() {
@@ -986,6 +1009,7 @@ function buildEngine({ profile, selection }) {
   e.on('selection', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
   e.on('progress', (b) => {
     sgSync();
+    sgDriftCheck(e.snapshot());
     // The cache bands ride the half-second progress tick. They used to
     // travel only on rare status events, so the panel's bar froze at
     // whatever the cache looked like seconds after go-live — an engine
