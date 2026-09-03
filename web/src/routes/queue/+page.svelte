@@ -103,6 +103,23 @@
         else before.push(row);
       }
     }
+    // What the engine plays that tonight does not know — a clip started
+    // before this page existed, or tonight cleared while it played — is
+    // still drawn, from the engine's own status, so the strip never
+    // shows an empty night under a broadcast.
+    if (live && !card && status.playing && !before.some((b) => b.onAir)) {
+      const p = status.playing;
+      before.push({ key: `engine:${p.seg?.item ?? p.id ?? 'onair'}`, title: p.title, image: p.image ?? null,
+        state: 'onair', onAir: true, dur: p.duration ?? 0, segKey: null, engineOnly: true });
+    }
+    if (live) {
+      for (const q of status.queue ?? []) {
+        if (q.seg?.item && segments.some((sg) => sg.items.some((i) => i.key === q.seg.item))) continue;
+        upcoming.push({ key: `engine:${q.seg?.item ?? q.id}:${q.at ?? ''}`, title: q.title, image: q.image ?? null,
+          state: 'upcoming', dur: q.duration ?? 0, at: q.at ?? null, startAt: q.startAt ?? null,
+          breakBefore: q.breakBefore ?? null, segKey: null, engineOnly: true });
+      }
+    }
     // Forward projection for upcoming items.
     let t;
     if (live && status.playing && !card) {
@@ -214,7 +231,7 @@
     return win.a + frac * (win.b - win.a);
   }
   function startBlockDrag(e, p) {
-    if (!dnd || p.state !== 'upcoming' || busy || e.button !== 0) return;
+    if (!dnd || p.state !== 'upcoming' || p.engineOnly || busy || e.button !== 0) return;
     e.preventDefault();
     // Keep the grab point: the block moves with the hand, it does not jump
     // so its edge sits under the cursor.
@@ -640,7 +657,7 @@
            onpointerdown={startFlagDrag}></div>
     {/if}
     {#if !placed.length}
-      <p class="empty">Nothing lined up. Load a saved schedule or add from the library.</p>
+      <p class="empty">{live ? 'Nothing lined up after this.' : 'Nothing lined up. Load a saved schedule or add from the library.'}</p>
     {/if}
   </div>
   <div class="legend">
