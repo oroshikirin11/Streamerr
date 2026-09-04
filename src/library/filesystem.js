@@ -629,6 +629,17 @@ export class FilesystemLibrary {
           this._paths.set(id(still), still);
           return imageUrl(still);
         }
+        // A film in its own folder: the same poster the grid shows for it.
+        // Without this the lineup asked for a frame of the video itself
+        // (an image id equal to the item id), which 404s until the sweeper
+        // has been by — while the grid tile had artwork all along.
+        if (!isEpisode && !looseInLib && !inSeason) {
+          const poster = findPoster(dirname(p));
+          if (poster) {
+            this._paths.set(id(poster), poster);
+            return imageUrl(poster);
+          }
+        }
         return this._stills ? imageUrl(p) : null;
       })(),
     };
@@ -660,6 +671,20 @@ export class FilesystemLibrary {
   async resolveImage(imageId) {
     let p = this._paths.get(imageId);
     if (!p) { await this._indexAll(); p = this._paths.get(imageId); }
-    return p ?? null;
+    if (!p) return null;
+    // A film's own id used to be its image id (a frame of the file, once
+    // the sweeper made one). Lineups saved back then still carry it: hand
+    // back the folder poster the grid shows, when the film has one.
+    if (VIDEO_EXTS.has(extname(p).toLowerCase())) {
+      const dir = dirname(p);
+      const inSeason = SEASON_DIR.test(basename(dir));
+      const looseInLib = this._libDirs?.has(dir) ?? false;
+      const isEpisode = parseEpisode(basename(p), { allowBareNumber: inSeason }).episode != null;
+      if (!isEpisode && !inSeason && !looseInLib) {
+        const poster = findPoster(dir);
+        if (poster) return poster;
+      }
+    }
+    return p;
   }
 }

@@ -37,10 +37,18 @@ const DEFAULT_SETTINGS = {
   watchedAt: 0.6,
 };
 
+const bad = (msg) => Object.assign(new Error(msg), { status: 400 });
+
 /** The fields of a library item a schedule keeps. Paths are resolved at play time. */
 export function pickItem(it) {
+  // An id is the only thing that makes an item playable later; a row
+  // without one used to persist as the literal "undefined" and then fail
+  // at go-live with "Unknown item".
+  if (!it || typeof it !== 'object' || typeof it.id !== 'string' || !it.id.trim()) {
+    throw bad('Every item needs an id');
+  }
   return {
-    id: String(it.id),
+    id: it.id,
     title: String(it.title ?? ''),
     series: it.series ?? it.seriesName ?? null,
     season: it.season ?? null,
@@ -50,22 +58,58 @@ export function pickItem(it) {
   };
 }
 
+/**
+ * Validate an auto-start block. Anything shaped like one but not a real
+ * clock time or weekday is refused with a 400 rather than stored: "99:99"
+ * used to persist and then compute a run at 04:39 a week out.
+ */
 function normalizeAutoStart(a) {
   if (!a || typeof a !== 'object') return null;
-  const time = /^\d{1,2}:\d{2}$/.test(String(a.time ?? '')) ? String(a.time) : null;
-  if (!time) return null;
-  const days = Array.isArray(a.days)
-    ? [...new Set(a.days.map((d) => clampInt(d, 0, 6, -1)).filter((d) => d >= 0))].sort()
-    : [];
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(a.date ?? '')) ? String(a.date) : null;
+  const raw = String(a.time ?? '');
+  if (!raw) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(raw);
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) throw bad(`Invalid auto-start time "${raw}"`);
+  const time = raw;
+  if (a.days != null && !Array.isArray(a.days)) throw bad('Auto-start days must be a list of weekdays (0-6)');
+  const days = [...new Set((a.days ?? []).map((d) => {
+    const n = Number(d);
+    if (!Number.isInteger(n) || n < 0 || n > 6) throw bad(`Invalid auto-start weekday "${d}"`);
+    return n;
+  }))].sort();
+  const dateRaw = String(a.date ?? '');
+  if (dateRaw && !/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) throw bad(`Invalid auto-start date "${dateRaw}"`);
+  const date = dateRaw || null;
   if (!days.length && !date) return null;
   return {
     time, days, date,
     countdownMin: clampInt(a.countdownMin ?? 15, 0, 180, 15),
     enabled: a.enabled !== false,
-    firedKey: a.firedKey ?? null,
+    firedKey: typeof a.firedKey === 'string' ? a.firedKey : null,
   };
 }
+
+/** Grace for a due run: a tick that lands after the exact minute still fires. */
+export const AUTO_START_GRACE_MS = 5 * 60_000;
+
+/**
+ * A pin or a break, checked. `null`/0/'' mean "none"; anything else has to
+ * be a plausible value — a startAt of -1 or a 3-day break used to be
+ * stored as given and then confused every projection.
+ */
+const parseStartAt = (v) => {
+  if (v == null || v === '' || v === 0 || v === false) return null;
+  const n = Number(v);
+  // Epoch seconds between 2001 and 2096: wide enough for any real pin,
+  // narrow enough to catch milliseconds, negatives and typos.
+  if (!Number.isFinite(n) || n < 1e9 || n > 4e9) throw bad('startAt must be a time in epoch seconds, or null');
+  return Math.round(n);
+};
+const parseBreak = (v) => {
+  if (v == null || v === '' || v === false) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 86_400) throw bad('breakBefore must be 0..86400 seconds');
+  return n > 0 ? Math.round(n) : null;
+};
 
 function normalizeBreaks(b) {
   if (b === 'none') return 'none';
@@ -79,21 +123,53 @@ function normalizeBreaks(b) {
  * When a schedule fires next, in epoch seconds, or null. Local time on the
  * box: an operator programs "Friday 20:00" in their own clock.
  */
-export function nextRun(schedule, nowMs = Date.now()) {
+export function nextRun(schedule, nowMs = Date.now(), { graceMs = 0 } = {}) {
   const a = schedule?.autoStart;
   if (!a?.enabled) return null;
   const [hh, mm] = a.time.split(':').map(Number);
+  // With a grace, an occurrence up to that long ago still counts as "next":
+  // the auto-start tick asks with one so a run whose minute has just passed
+  // is not skipped for a week.
+  const counts = (t) => t + graceMs > nowMs;
   if (a.date) {
     const [y, m, d] = a.date.split('-').map(Number);
     const t = new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
-    return t > nowMs ? Math.round(t / 1000) : null;
+    return counts(t) ? Math.round(t / 1000) : null;
   }
   const now = new Date(nowMs);
-  for (let off = 0; off < 8; off++) {
+  for (let off = -1; off < 8; off++) {
     const t = new Date(now.getFullYear(), now.getMonth(), now.getDate() + off, hh, mm, 0, 0);
-    if (a.days.includes(t.getDay()) && t.getTime() > nowMs) return Math.round(t.getTime() / 1000);
+    if (a.days.includes(t.getDay()) && counts(t.getTime())) return Math.round(t.getTime() / 1000);
   }
   return null;
+}
+
+/**
+ * Tonight's upcoming entries turned into engine items. `build(entry)`
+ * returns the item (or throws when the library no longer knows it);
+ * `decorate(entry, item)` adds what the engine needs beyond the pin.
+ * Entries that cannot be built are reported through `onMissing` and left
+ * out: one vanished file must never block the queue — or the request that
+ * changed tonight, which used to answer 400 after the change was saved.
+ */
+export async function buildQueue(entries, { build, decorate = () => ({}), onMissing = () => {} }) {
+  const items = [];
+  for (const entry of entries ?? []) {
+    let base;
+    try {
+      base = await build(entry);
+      if (!base || typeof base !== 'object') throw new Error('Unknown item');
+    } catch (err) {
+      onMissing(entry, err);
+      continue;
+    }
+    delete base.startAt; delete base.breakOffline; delete base.breakBefore; delete base.seg; delete base.at;
+    if (entry.startAt) base.startAt = entry.startAt;
+    if (entry.startAt && entry.breakOffline) base.breakOffline = true;
+    Object.assign(base, decorate(entry, base) ?? {});
+    items.push(base);
+  }
+  return items;
 }
 
 export function createScheduleStore({ path = null, now = () => Date.now() } = {}) {
@@ -183,7 +259,19 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
       s.start = si >= 0 ? si : Math.min(s.start, s.items.length);
     }
     if (patch.start != null) s.start = clampInt(patch.start, 0, s.items.length, s.start);
-    if ('autoStart' in patch) s.autoStart = normalizeAutoStart(patch.autoStart);
+    if ('autoStart' in patch) {
+      const next = normalizeAutoStart(patch.autoStart);
+      // The panel saves the block without firedKey. Same occurrence (time,
+      // days, date unchanged) => same memory of having fired, or an edit
+      // during the countdown made the schedule fire a second time.
+      const prev = s.autoStart;
+      if (next && prev && patch.autoStart.firedKey === undefined
+        && next.time === prev.time && next.date === prev.date
+        && next.days.join(',') === prev.days.join(',')) {
+        next.firedKey = prev.firedKey;
+      }
+      s.autoStart = next;
+    }
     if ('breaks' in patch) s.breaks = normalizeBreaks(patch.breaks);
     if ('atEnd' in patch) s.atEnd = ['restart', 'loop'].includes(patch.atEnd) ? patch.atEnd : 'stop';
     if (Array.isArray(patch.watched)) {
@@ -216,7 +304,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
 
   function duplicate(id) {
     const s = must(id);
-    return create({ name: `${s.name} (copy)`, items: s.items, start: s.start, autoStart: null, breaks: s.breaks, watched: s.watched });
+    return create({ name: `${s.name} (copy)`, items: s.items, start: s.start, autoStart: null, breaks: s.breaks, watched: s.watched, atEnd: s.atEnd });
   }
 
   // ---- tonight -----------------------------------------------------------
@@ -226,7 +314,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
       key: uid(),
       scheduleId: schedule.id,
       name: schedule.name,
-      startAt,
+      startAt: parseStartAt(startAt),
       items: schedule.items.map((it, idx) => ({
         ...it,
         key: uid(),
@@ -246,16 +334,29 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
 
   function load(id, opts = {}) {
     const s = must(id);
-    readyToPlay(s, opts);
-    state.tonight.segments = [segmentFrom(s, opts)];
+    const o = { ...opts, startAt: parseStartAt(opts.startAt) }; // checked before anything moves
+    readyToPlay(s, o);
+    state.tonight.segments = [segmentFrom(s, o)];
     save();
     return state.tonight;
   }
 
   function append(id, opts = {}) {
     const s = must(id);
-    readyToPlay(s, opts);
-    state.tonight.segments.push(segmentFrom(s, opts));
+    const o = { ...opts, startAt: parseStartAt(opts.startAt) };
+    // A PINNED append of a schedule that is already lined up and entirely
+    // ahead (loaded or appended by hand) pins that segment instead of
+    // adding a copy: two whole passes cannot both start at the same time,
+    // and the auto-start tick used to line the night up twice this way.
+    // Unpinned appends (a deliberate second pass, the loop) still add.
+    const lined = o.startAt ? linedUp(id) : null;
+    if (lined) {
+      if (!lined.startAt) lined.startAt = o.startAt;
+      save();
+      return state.tonight;
+    }
+    readyToPlay(s, o);
+    state.tonight.segments.push(segmentFrom(s, o));
     save();
     return state.tonight;
   }
@@ -298,19 +399,34 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
    */
   function reorder(order) {
     // order: [{ seg: key, items: [itemKey, ...] }, ...]
-    const segs = [];
-    for (const o of order ?? []) {
+    // Checked and computed in full before anything is touched: a bad
+    // entry halfway through used to leave the earlier segments reordered
+    // in memory with nothing saved.
+    if (!Array.isArray(order)) throw bad('order must be a list of segments');
+    const plan = [];
+    for (const o of order) {
+      if (!o || typeof o !== 'object') throw bad('order entries must be objects');
       const seg = findSeg(o.seg);
       if (!seg) continue;
+      if (o.items != null && !Array.isArray(o.items)) throw bad('order items must be a list of item keys');
+      const keys = (o.items ?? []).map((k) => {
+        if (typeof k !== 'string') throw bad('order items must be a list of item keys');
+        return k;
+      });
       const slots = seg.items.map((it, i) => (it.state === 'upcoming' ? i : -1)).filter((i) => i >= 0);
-      const wanted = [...new Set(o.items ?? [])]
+      const wanted = [...new Set(keys)]
         .map((k) => seg.items.find((it) => it.key === k && it.state === 'upcoming'))
         .filter(Boolean);
       const rest = seg.items.filter((it) => it.state === 'upcoming' && !wanted.includes(it));
       const ordered = [...wanted, ...rest];
       const next = [...seg.items];
       slots.forEach((slot, j) => { next[slot] = ordered[j]; });
-      seg.items = next;
+      plan.push({ seg, items: next });
+    }
+    const segs = [];
+    for (const { seg, items } of plan) {
+      if (segs.includes(seg)) continue;
+      seg.items = items;
       segs.push(seg);
     }
     for (const seg of state.tonight.segments) if (!segs.includes(seg)) segs.push(seg);
@@ -360,9 +476,13 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   function setItem(key, patch = {}) {
     const f = findItem(key);
     if (!f) return state.tonight;
-    if ('startAt' in patch) f.item.startAt = Number(patch.startAt) || null;
+    // Both checked before either is written: a bad break must not leave a
+    // half-applied pin behind.
+    const startAt = 'startAt' in patch ? parseStartAt(patch.startAt) : undefined;
+    const breakBefore = 'breakBefore' in patch ? parseBreak(patch.breakBefore) : undefined;
+    if (startAt !== undefined) f.item.startAt = startAt;
     if ('breakOffline' in patch) f.item.breakOffline = Boolean(patch.breakOffline);
-    if ('breakBefore' in patch) f.item.breakBefore = Number(patch.breakBefore) > 0 ? Math.round(Number(patch.breakBefore)) : null;
+    if (breakBefore !== undefined) f.item.breakBefore = breakBefore;
     save();
     return state.tonight;
   }
@@ -381,7 +501,15 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     });
     if (seg.scheduleId) {
       const s = get(seg.scheduleId);
-      if (s && seg.items[idx]?.idx != null) { s.start = seg.items[idx].idx; s.updatedAt = now(); }
+      // By ID, not by the idx cached when the segment was built: the
+      // schedule may have been reordered since, and the marker belongs on
+      // the episode the operator pointed at, wherever it now sits.
+      if (s) {
+        const target = seg.items[idx];
+        const si = target ? s.items.findIndex((it) => it.id === target.id) : -1;
+        if (si >= 0) { s.start = si; s.updatedAt = now(); }
+        else if (!target && idx >= seg.items.length) { s.start = s.items.length; s.updatedAt = now(); }
+      }
     }
     save();
     return state.tonight;
@@ -390,7 +518,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   function setSegment(key, patch = {}) {
     const seg = findSeg(key);
     if (!seg) return state.tonight;
-    if ('startAt' in patch) seg.startAt = Number(patch.startAt) || null;
+    if ('startAt' in patch) seg.startAt = parseStartAt(patch.startAt);
     if (patch.name != null) seg.name = String(patch.name).slice(0, 80);
     save();
     return state.tonight;
@@ -405,14 +533,14 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   /** Save tonight (its upcoming and past items, in order) as a schedule. */
   function saveTonightAs(name) {
     const items = [];
-    let start = 0;
-    for (const seg of state.tonight.segments) {
-      for (const it of seg.items) {
-        if (it.state === 'past' || it.state === 'aired' || it.state === 'skipped') start = items.length + 1;
-        items.push(it);
-      }
-    }
-    return create({ name, items, start: Math.min(start, items.length) });
+    for (const seg of state.tonight.segments) items.push(...seg.items);
+    // The marker goes on the first thing still to play, in the saved
+    // order. "After the last aired item" put it past the end whenever an
+    // unplayed segment had been moved above an aired one — a schedule
+    // born finished. What aired is remembered as watched.
+    const first = items.findIndex((it) => it.state === 'upcoming' || it.state === 'onair');
+    const watched = items.map((it, i) => (it.state === 'aired' ? i : -1)).filter((i) => i >= 0);
+    return create({ name, items, start: first >= 0 ? first : items.length, watched });
   }
 
   /**
@@ -531,7 +659,11 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   function dueAutoStarts(nowMs = now()) {
     const due = [];
     for (const s of state.schedules) {
-      const at = nextRun(s, nowMs);
+      // Asked with a grace: the tick runs every 30 s, and with no countdown
+      // the window was 500 ms wide, so the run was missed and the next one
+      // computed a week out. A run fires on the first tick at or after its
+      // time, up to AUTO_START_GRACE_MS late; firedKey keeps it to once.
+      const at = nextRun(s, nowMs, { graceMs: AUTO_START_GRACE_MS });
       if (at == null) continue;
       const lead = (s.autoStart.countdownMin ?? 0) * 60;
       const key = String(at);
@@ -539,11 +671,38 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
         s.autoStart.firedKey = key;
         // Played through and set to stop: this occurrence is skipped, once,
         // and the caller says so. 'restart' schedules start over on load.
-        due.push({ schedule: s, at, skipped: finished(s) && s.atEnd === 'stop' });
+        const skipped = finished(s) && s.atEnd === 'stop';
+        // Already lined up in tonight (loaded or appended by hand, nothing
+        // of it aired yet): pin that segment to the time rather than have
+        // the caller append a second copy.
+        const seg = skipped ? null : linedUp(s.id);
+        if (seg && !seg.startAt) seg.startAt = at;
+        due.push({ schedule: s, at, skipped, linedUp: seg ? seg.key : null });
       }
     }
     if (due.length) save();
     return due;
+  }
+
+  /** The tonight segment of this schedule still entirely ahead, if any. */
+  function linedUp(scheduleId) {
+    return state.tonight.segments.find((seg) => seg.scheduleId === scheduleId
+      && seg.items.some((it) => it.state === 'upcoming')
+      && !seg.items.some((it) => it.state === 'onair' || it.state === 'aired' || it.state === 'skipped')) ?? null;
+  }
+
+  /**
+   * A tonight item the library no longer resolves: taken out of the
+   * running as skipped (the row stays visible, flagged), so the queue and
+   * the request that changed tonight go on without it.
+   */
+  function markMissing(itemKey, reason = 'Unknown item') {
+    const f = findItem(itemKey);
+    if (!f || f.item.state !== 'upcoming') return state.tonight;
+    f.item.state = 'skipped';
+    f.item.missing = String(reason).slice(0, 120);
+    save();
+    return state.tonight;
   }
 
   function setSettings(patch = {}) {
@@ -575,7 +734,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     create, update, remove, resetProgress, duplicate,
     // tonight
     load, append, addItems, reorder, moveItem, moveSegment, removeItem, removeSegment,
-    setItem, setSegment, setSegmentStart, clearTonight, saveTonightAs,
+    setItem, setSegment, setSegmentStart, clearTonight, saveTonightAs, linedUp, markMissing,
     // what happened
     onAir, settle, release, broadcastEnded, clearHistory,
     // automation + settings

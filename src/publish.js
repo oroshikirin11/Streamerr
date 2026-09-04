@@ -352,12 +352,55 @@ export function redactPublish(publish) {
   return {
     protocol: pub.protocol,
     name: destName(pub.name),
+    // The Room override rides along so the settings page can show it.
+    channel: String(pub.channel ?? '').trim().slice(0, 64),
     rtmp: mask('rtmp', pub.rtmp),
     rtmps: mask('rtmps', pub.rtmps),
     srt: mask('srt', pub.srt),
     tcp: mask('tcp', pub.tcp),
     extras: (pub.extras ?? []).map((e) => ({ ...mask(e.protocol, e), protocol: e.protocol })),
   };
+}
+
+/**
+ * Every secret a publish block holds, as plain strings: each protocol's
+ * slot (not just the chosen one) and every extra. Values shorter than four
+ * characters are not worth masking — and masking "a" would shred any text.
+ */
+export function publishSecrets(publish) {
+  const pub = { ...publishDefaults(), ...(publish ?? {}) };
+  const out = new Set();
+  const take = (proto, creds) => {
+    for (const f of PUBLISH_SECRETS[proto] ?? []) {
+      const v = String(creds?.[f] ?? '').trim();
+      if (v.length >= 4 && v !== '__SET__') out.add(v);
+    }
+  };
+  for (const proto of Object.keys(PUBLISH_SECRETS)) take(proto, pub[proto]);
+  for (const e of pub.extras ?? []) if (e) take(e.protocol, e);
+  return [...out];
+}
+
+/**
+ * Mask every known secret in arbitrary text — ffmpeg quotes the full
+ * output URL in its diagnostics, so any error that repeats it would hand
+ * the stream key to logs, the panel and pasted bug reports. Longest first,
+ * so a secret that contains another is masked whole.
+ */
+export function redactSecrets(text, publish, extra = []) {
+  if (!text) return text;
+  let out = String(text);
+  const secrets = [...new Set([...publishSecrets(publish), ...extra.map((s) => String(s ?? '').trim())])]
+    .filter((s) => s.length >= 4 && s !== '__SET__')
+    .sort((a, b) => b.length - a.length);
+  for (const s of secrets) {
+    out = out.split(s).join('*'.repeat(8));
+    // The same value URL-encoded (ffmpeg prints SRT/RTMP queries as given,
+    // but a caller may have encoded them).
+    const enc = encodeURIComponent(s);
+    if (enc !== s) out = out.split(enc).join('*'.repeat(8));
+  }
+  return out;
 }
 
 /**

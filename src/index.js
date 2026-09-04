@@ -22,9 +22,11 @@ import {
   publishDestinations, publishTargetsRedacted, publishConfig,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT, CONFIG_DIR,
 } from './config.js';
-import { createScheduleStore } from './schedules.js';
+import { createScheduleStore, buildQueue } from './schedules.js';
 import { inspectVerdict } from './inspect.js';
-import { redactPublish, restorePublishSecrets, targetUrl } from './publish.js';
+import {
+  redactPublish, restorePublishSecrets, targetUrl, destinations, publishDefaults, redactSecrets,
+} from './publish.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
@@ -1853,20 +1855,46 @@ app.delete('/api/overlay/images/:name', (req, res) => {
 
 // ── setup checks ───────────────────────────────────────────────────────
 
+/**
+ * "Test connection" / "Send 30s to watch". Tests the PRIMARY publish
+ * destination: an optional `publish` block in the body (the settings form,
+ * secrets may be "__SET__" for "use the stored one"), else what is
+ * configured. The legacy owncast.rtmpUrl/streamKey pair still works when
+ * given explicitly — setup no longer writes it, so reading only that
+ * answered 400 on every current install.
+ */
 app.post('/api/check/owncast', async (req, res) => {
-  const url = req.body?.rtmpUrl ?? config.owncast.rtmpUrl;
-  const key = req.body?.streamKey === '__SET__' || !req.body?.streamKey
-    ? config.owncast.streamKey
-    : req.body.streamKey;
-
-  if (!url || !key) return res.status(400).json({ error: 'Address and stream key are required' });
+  const b = req.body ?? {};
   if (engine) return res.status(409).json({ error: 'Stop the current broadcast first' });
 
   let target;
-  try {
-    target = `${assertRtmpUrl(url)}/${key}`;
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
+  let tested = null; // the block whose secrets the error text must never show
+  if (b.rtmpUrl) {
+    const key = b.streamKey === '__SET__' || !b.streamKey ? config.owncast.streamKey : b.streamKey;
+    if (!key) return res.status(400).json({ error: 'Address and stream key are required' });
+    try {
+      target = `${assertRtmpUrl(b.rtmpUrl)}/${key}`;
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    tested = { ...publishDefaults(), rtmp: { url: b.rtmpUrl, key } };
+  } else {
+    const pub = b.publish && typeof b.publish === 'object'
+      ? restorePublishSecrets({ ...publishDefaults(), ...b.publish }, publishConfig())
+      : publishConfig();
+    tested = pub;
+    let primary;
+    try {
+      // The protocol as chosen, not codec-shifted: the operator is testing
+      // the target they picked.
+      [primary] = destinations(pub, 'h264');
+      target = targetUrl(primary.protocol, primary.creds);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (primary.protocol !== 'rtmp' && primary.protocol !== 'rtmps') {
+      return res.status(400).json({ error: 'Test is available for RTMP targets' });
+    }
   }
   // Two different questions. "Does it accept us" only needs a few seconds and
   // no pacing. "Can I watch it appear" needs realtime pacing AND enough
@@ -1882,7 +1910,7 @@ app.post('/api/check/owncast', async (req, res) => {
   });
   res.json(result.ok
     ? { ok: true, ms: Date.now() - t0, seconds }
-    : { ok: false, error: redact(result.error) });
+    : { ok: false, error: redactSecrets(redact(result.error), tested) });
 });
 
 // Proves the title sync end to end: same endpoint, same auth the live sync
@@ -2305,7 +2333,12 @@ app.get('/api/library/episodes', wrap(async (req, res) =>
 /** Local artwork for the filesystem provider; Jellyfin serves its own. */
 app.get('/api/library/image/:id', async (req, res) => {
   let p = library.imagePath?.(req.params.id);
-  if (!p && library.resolveImage) p = await library.resolveImage(req.params.id).catch(() => null);
+  // The fast path answers from what it has indexed; the resolver also
+  // knows to hand back a film's poster where a lineup still asks for a
+  // frame of the film itself, so a video answer goes through it too.
+  if ((!p || isVideoFile(p)) && library.resolveImage) {
+    p = (await library.resolveImage(req.params.id).catch(() => null)) ?? p;
+  }
   // A provider may hand back a remote url (Jellyfin serves its own artwork);
   // only a local path can be checked for existence here.
   if (!p || (!isRemote(p) && !existsSync(p))) return res.status(404).end();
@@ -2607,7 +2640,8 @@ const startStream = wrap(async (req, res) => {
     if (!conn.ok) {
       return res.status(502).json({
         error: 'The server would not accept the stream',
-        detail: redact(conn.error),
+        // ffmpeg quotes the full target URL; every configured secret goes.
+        detail: redactSecrets(redact(conn.error), publishConfig()),
       });
     }
   }
@@ -2913,24 +2947,38 @@ function scheduleView() {
 sched.onChange(() => broadcast('schedule', scheduleView()));
 
 /** While live, the engine plays what tonight says comes next. */
+/**
+ * Returns the warnings it raised (one per item the library no longer
+ * resolves). Such an item is marked in tonight and left out of the queue;
+ * it must never fail the request that changed tonight — the store had
+ * already saved the change, and every later mutation answered the same
+ * 400 "Unknown item" until someone found the row.
+ */
 async function syncTonight() {
   const e = engine;
-  if (!e) return;
+  const warnings = [];
+  if (!e) return warnings;
   const entries = sched.upcomingEntries();
-  const items = [];
-  for (const entry of entries) {
-    const known = e.queue.find((q) => q.id === entry.id) ?? (e.current?.item?.id === entry.id ? e.current.item : null);
-    const base = known ? { ...known } : (await resolveItems([entry.id]))[0];
-    if (!known) base.srcPath = library.resolvePath(await library.item(entry.id));
-    delete base.startAt; delete base.breakOffline; delete base.breakBefore; delete base.seg; delete base.at;
-    if (entry.startAt) base.startAt = entry.startAt;
-    if (entry.startAt && entry.breakOffline) base.breakOffline = true;
-    Object.assign(base, queueExtras(entry));
-    items.push(base);
-  }
-  if (engine !== e) return;
+  const items = await buildQueue(entries, {
+    build: async (entry) => {
+      const known = e.queue.find((q) => q.id === entry.id) ?? (e.current?.item?.id === entry.id ? e.current.item : null);
+      if (known) return { ...known };
+      const base = (await resolveItems([entry.id]))[0];
+      base.srcPath = library.resolvePath(await library.item(entry.id));
+      return base;
+    },
+    decorate: queueExtras,
+    onMissing: (entry, err) => {
+      const msg = `tonight: "${entry.id}" cannot be played (${redact(err?.message ?? err)}) — skipped`;
+      dpush('warn', msg);
+      warnings.push(msg);
+      sched.markMissing(entry.seg?.item, err?.message ?? 'Unknown item');
+    },
+  });
+  if (engine !== e) return warnings;
   e.setQueue(items);
   broadcast('stream', streamStatus());
+  return warnings;
 }
 
 /** Express' res, for calling a route handler from inside the process. */
@@ -2953,15 +3001,25 @@ async function goLive({ startAt = null, trackOverride = null } = {}) {
 }
 
 const sroute = (fn) => wrap(async (req, res) => {
+  let out;
   try {
-    const out = await fn(req);
-    if (out && typeof out.code === 'number' && 'body' in out) return res.status(out.code).json(out.body);
-    await syncTonight();
-    res.json(scheduleView());
+    out = await fn(req);
   } catch (err) {
     if (err?.status) return res.status(err.status).json({ error: err.message });
     throw err;
   }
+  if (out && typeof out.code === 'number' && 'body' in out) return res.status(out.code).json(out.body);
+  // The store has saved by now. Whatever the engine makes of the new
+  // lineup is reported, never turned into a failure of this request.
+  let warnings = [];
+  try {
+    warnings = await syncTonight();
+  } catch (err) {
+    const msg = `tonight could not be handed to the engine: ${redact(err?.message ?? err)}`;
+    dpush('warn', msg);
+    warnings = [msg];
+  }
+  res.json(warnings.length ? { ...scheduleView(), warnings } : scheduleView());
 });
 
 app.get('/api/schedule', (req, res) => res.json(scheduleView()));
@@ -3006,19 +3064,24 @@ app.post('/api/schedule/tonight/live', wrap(async (req, res) => {
  * running they are appended instead, pinned to that time.
  */
 setInterval(() => {
-  for (const { schedule, at, skipped } of sched.dueAutoStarts(Date.now())) {
+  for (const { schedule, at, skipped, linedUp } of sched.dueAutoStarts(Date.now())) {
     if (skipped) {
       dpush('warn', `auto-start skipped: "${schedule.name}" has played through — set it to start over when finished, or reset it`);
       continue;
     }
     (async () => {
+      const when = new Date(at * 1000).toLocaleTimeString();
       if (engine) {
-        sched.append(schedule.id, { startAt: at });
+        // Already lined up (loaded or appended by hand): the store pinned
+        // that segment; appending would play the whole thing twice.
+        if (!linedUp) sched.append(schedule.id, { startAt: at });
         await syncTonight();
-        dpush('info', `auto-start: "${schedule.name}" appended for ${new Date(at * 1000).toLocaleTimeString()}`);
+        dpush('info', `auto-start: "${schedule.name}" ${linedUp ? 'already lined up, pinned' : 'appended'} for ${when}`);
         return;
       }
-      sched.load(schedule.id);
+      // Lined up offline: tonight is what the operator prepared — go live
+      // with it rather than replace it with a fresh load.
+      if (!linedUp) sched.load(schedule.id);
       const r = await goLive({ startAt: at });
       if (r.code >= 300) dpush('warn', `auto-start of "${schedule.name}" failed: ${r.body?.error ?? r.code}`);
       else dpush('info', `auto-start: "${schedule.name}" goes live at ${new Date(at * 1000).toLocaleTimeString()}`);

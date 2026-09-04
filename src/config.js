@@ -6,7 +6,7 @@
  * so nothing here carries a real default.
  */
 
-import { publishDefaults, targetUrl, redactUrl, destinations } from './publish.js';
+import { publishDefaults, targetUrl, redactUrl, destinations, redactSecrets } from './publish.js';
 
 // Re-exported so callers have one place to ask about configuration.
 export { publishDefaults, PROTOCOLS } from './publish.js';
@@ -502,9 +502,10 @@ export function redact(text, cfg = config) {
   // spawn logs its full argv — which lands in the debug ring the panel serves
   // and in `docker logs`. Mask it wherever it appears.
   out = out.replace(/([?&]t=)[0-9a-f]{32,}/gi, `$1${'*'.repeat(8)}`);
-  const key = cfg.owncast?.streamKey;
-  if (!key || key.length < 4) return out;
-  return out.split(key).join('*'.repeat(8));
+  // Every publish secret — each protocol's key/passphrase/stream id and
+  // every extra's — plus the legacy owncast key. Masking only the legacy
+  // key left an install set up through the publish block wide open.
+  return redactSecrets(out, publishConfig(cfg), [cfg.owncast?.streamKey]);
 }
 
 export { CONFIG_PATH, ROOT };
