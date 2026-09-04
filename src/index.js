@@ -660,6 +660,10 @@ function sgDestKey(d) {
  *                   pre-rooms behavior, never to silence.
  * An empty final set falls back to [''] for the same reason.
  */
+// Which room a stream key feeds changes about never, and asking costs a
+// round trip (three seconds when the receiver is slow) on every go-live.
+const ROOM_CACHE_MS = 10 * 60_000;
+const roomCache = new Map();
 async function sgResolveChannels(dests) {
   const receivers = sgReceivers();
   const resolved = await Promise.all((dests ?? []).map(async (d) => {
@@ -667,6 +671,8 @@ async function sgResolveChannels(dests) {
     if (manual) return manual;
     const key = sgDestKey(d);
     if (!key || !receivers.length) return '';
+    const cached = roomCache.get(key);
+    if (cached && Date.now() - cached.t < ROOM_CACHE_MS) return cached.room;
     let trouble = false;
     for (const rc of receivers) {
       try {
@@ -684,6 +690,7 @@ async function sgResolveChannels(dests) {
         );
         const data = await r.json().catch(() => null);
         if (data && data.success !== false && typeof data.channel === 'string') {
+          roomCache.set(key, { t: Date.now(), room: data.channel.trim() });
           return data.channel.trim();
         }
         // A definite "not mine" moves on to the next receiver; anything
@@ -2384,6 +2391,8 @@ app.post('/api/stream/start', (req, res) => startStream(req, res));
 // probes before it builds the engine, and two clicks in that window used
 // to build two — one of them an orphan that kept publishing after Stop.
 let startPending = false;
+const PROBE_CACHE_MS = 10 * 60_000;
+const encoderProbeCache = new Map();
 const startStream = wrap(async (req, res) => {
   if (engine || startPending) return res.status(409).json({ error: 'Already streaming' });
   startPending = true;
@@ -2451,7 +2460,15 @@ const startStreamInner = async (req, res) => {
   // The engine switches transports on profile.codec; no refusal needed.
   let lowPower = false;
   let softwareCodec = false;
-  if (codec !== 'h264') {
+  // The one-frame encoder probes take a few hundred milliseconds each and
+  // answer the same for the same box, codec and device; remembered for a
+  // while so a go-live does not pay for them every time. A failed probe is
+  // not remembered — the next start asks again.
+  const probeKey = `${codec}|${config.encoder.device ?? ''}|${config.encoder.backend ?? ''}`;
+  const probed = encoderProbeCache.get(probeKey);
+  if (codec !== 'h264' && probed && Date.now() - probed.t < PROBE_CACHE_MS) {
+    ({ lowPower, softwareCodec } = probed);
+  } else if (codec !== 'h264') {
     const enc = { hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[codec];
     const dev = config.encoder.device ?? '/dev/dri/renderD128';
     // -xerror matters: without it ffmpeg exits 0 even when the encoder
@@ -2490,6 +2507,7 @@ const startStreamInner = async (req, res) => {
       dpush('warn', `no hardware ${codec.toUpperCase()} encoder — encoding in software (${sw}). CPU-heavy: watch the speed readout; if it sinks below 1.0x, H.264 is the way back`);
     }
     if (lowPower) dpush('info', 'HEVC encode: VDENC (low_power) available — using the fixed-function encoder');
+    encoderProbeCache.set(probeKey, { t: Date.now(), lowPower, softwareCodec });
   }
   ensureDirs();
   const sel = await selectBackend({
@@ -2840,12 +2858,42 @@ async function posterFile(image) {
   } catch { return null; }
 }
 
+/**
+ * library.item() for the next minute, shared by adding to tonight and
+ * going live. Lining up a whole series used to ask the library for every
+ * episode once on add and twice more on go-live, one request at a time;
+ * against a Jellyfin server that was the bulk of the wait.
+ */
+const ITEM_CACHE_MS = 60_000;
+const itemCache = new Map();
+function cachedItem(id) {
+  const key = String(id);
+  const hit = itemCache.get(key);
+  if (hit && Date.now() - hit.t < ITEM_CACHE_MS) return hit.p;
+  const p = library.item(key);
+  itemCache.set(key, { t: Date.now(), p });
+  p.catch(() => itemCache.delete(key));
+  return p;
+}
+
+/** Run `fn` over `list` with at most `limit` in flight, keeping order. */
+async function mapLimit(list, limit, fn) {
+  const out = new Array(list.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.min(limit, list.length) }, async () => {
+    while (next < list.length) { const i = next++; out[i] = await fn(list[i], i); }
+  });
+  await Promise.all(lanes);
+  return out;
+}
+
 /** Library items in the shape schedules and the engine keep. */
 async function resolveItems(ids) {
-  const out = [];
-  for (const id of ids ?? []) {
-    const item = await library.item(String(id));
-    out.push({
+  // A few at a time: enough to overlap the library's round trips and the
+  // poster renders, not enough to flood a small server.
+  return mapLimit([...(ids ?? [])], 4, async (id) => {
+    const item = await cachedItem(id);
+    return {
       posterPath: await posterFile(item.image ?? null),
       id: item.id,
       title: item.seriesName
@@ -2860,9 +2908,8 @@ async function resolveItems(ids) {
       episode: item.episode ?? null,
       duration: item.duration ?? null,
       image: item.image ?? null,
-    });
-  }
-  return out;
+    };
+  });
 }
 
 /**
@@ -2930,7 +2977,7 @@ async function syncTonight() {
       const known = e.queue.find((q) => q.id === entry.id) ?? (e.current?.item?.id === entry.id ? e.current.item : null);
       if (known) return { ...known };
       const base = (await resolveItems([entry.id]))[0];
-      base.srcPath = library.resolvePath(await library.item(entry.id));
+      base.srcPath = library.resolvePath(await cachedItem(entry.id));
       return base;
     },
     decorate: queueExtras,
