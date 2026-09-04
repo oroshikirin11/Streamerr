@@ -512,6 +512,11 @@
       // history remembers it; with nothing lined up, tonight goes live at
       // once. Adding behind a broadcast never interrupts it — the server
       // hands the engine the new lineup and the selection plays its turn.
+      // Lining up and going live are two calls, and the tray answers the
+      // first one before the second has started the broadcast: for that
+      // moment it offered "Go live" for a stream already on its way. Tell
+      // it the start is under way for the whole sequence.
+      if (!addOnly) window.dispatchEvent(new CustomEvent('jsr-going-live', { detail: { on: true } }));
       await api.tonightAdd(ordered);
       if (!addOnly) {
         await api.goLive(startAtEpoch(), trackOverride);
@@ -536,6 +541,7 @@
       error = err.detail ? `${err.message}: ${err.detail}` : err.message;
     } finally {
       starting = false;
+      window.dispatchEvent(new CustomEvent('jsr-going-live', { detail: { on: false } }));
     }
   }
 </script>

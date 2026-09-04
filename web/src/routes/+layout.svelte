@@ -385,7 +385,11 @@
       setTimeout(() => { if (toastSeq === seq) toast = null; }, e.detail?.ms ?? 7000);
     };
     window.addEventListener('jsr-toast', h);
-    return () => window.removeEventListener('jsr-toast', h);
+    // A page that lines something up and starts it in one go keeps the
+    // tray from offering "Go live" for a broadcast already on its way.
+    const g = (e) => { goingLive = Boolean(e.detail?.on); };
+    window.addEventListener('jsr-going-live', g);
+    return () => { window.removeEventListener('jsr-toast', h); window.removeEventListener('jsr-going-live', g); };
   });
 
   const nav = $derived([
