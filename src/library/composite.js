@@ -167,6 +167,13 @@ export class CompositeLibrary {
     return r ? (r.src.lib.imagePath?.(r.id) ?? null) : null;
   }
 
+  async resolveImage(imageId) {
+    const r = this._route(imageId);
+    if (!r) return null;
+    if (r.src.lib.resolveImage) return (await r.src.lib.resolveImage(r.id)) ?? null;
+    return r.src.lib.imagePath?.(r.id) ?? null;
+  }
+
   // ── the SMB bridge ───────────────────────────────────────────────────
   // Its urls are minted by whichever SMB source produced them, and carry
   // that source's own token, so the bridge asks the composite to find the

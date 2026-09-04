@@ -634,4 +634,15 @@ export class FilesystemLibrary {
   imagePath(imageId) {
     return this._paths.get(imageId) ?? null;
   }
+
+  /**
+   * imagePath, but willing to index first. Image ids are minted while
+   * browsing like item ids, so after a settings save rebuilt the library
+   * every poster 404'd until someone browsed again.
+   */
+  async resolveImage(imageId) {
+    let p = this._paths.get(imageId);
+    if (!p) { await this._indexAll(); p = this._paths.get(imageId); }
+    return p ?? null;
+  }
 }

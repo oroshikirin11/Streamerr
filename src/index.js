@@ -540,7 +540,7 @@ function sgArtPrepare(imageSrc) {
       let src = imageSrc;
       if (src.startsWith('/api/library/image/')) {
         const id = decodeURIComponent(src.split('/').pop().split('?')[0]);
-        src = library.imagePath?.(id) ?? null;
+        src = library.imagePath?.(id) ?? (library.resolveImage ? await library.resolveImage(id).catch(() => null) : null);
         if (!src) {
           dpush('warn', `artwork: image id ${id} no longer resolves — poster skipped`);
           return null;
@@ -2294,7 +2294,8 @@ app.get('/api/library/episodes', wrap(async (req, res) =>
 
 /** Local artwork for the filesystem provider; Jellyfin serves its own. */
 app.get('/api/library/image/:id', async (req, res) => {
-  const p = library.imagePath?.(req.params.id);
+  let p = library.imagePath?.(req.params.id);
+  if (!p && library.resolveImage) p = await library.resolveImage(req.params.id).catch(() => null);
   // A provider may hand back a remote url (Jellyfin serves its own artwork);
   // only a local path can be checked for existence here.
   if (!p || (!isRemote(p) && !existsSync(p))) return res.status(404).end();

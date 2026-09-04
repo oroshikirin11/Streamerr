@@ -168,6 +168,12 @@ export class PairedLibrary {
     return this.catalogue.imagePath(...a) ?? this.media.imagePath?.(...a) ?? null;
   }
 
+  async resolveImage(...a) {
+    const cat = this.catalogue.resolveImage ? await this.catalogue.resolveImage(...a) : this.catalogue.imagePath(...a);
+    if (cat) return cat;
+    return this.media.resolveImage ? ((await this.media.resolveImage(...a)) ?? null) : (this.media.imagePath?.(...a) ?? null);
+  }
+
   shows(...a) { return this.catalogue.shows?.(...a); }
   search(...a) { return this.catalogue.search?.(...a); }
   allPaths(...a) { return this.catalogue.allPaths?.(...a); }

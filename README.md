@@ -57,7 +57,7 @@ Two good options, one fallback:
 | Schedule | Settings | Studio |
 | --- | --- | --- |
 | ![Schedule](docs/screenshots/schedule.png) | ![Settings](docs/screenshots/settings.png) | ![Studio](docs/screenshots/studio.png) |
-| What's on air and up next, with projected times | Simple mode: two levers, plus your own saved preset | Overlays positioned on the live frame |
+| Tonight on a timeline: what's on air, what follows and when, saved schedules that remember where you left off, breaks, history | Simple mode: two levers, plus your own saved preset | Overlays positioned on the live frame |
 
 ## The receiving end
 
