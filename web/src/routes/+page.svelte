@@ -923,7 +923,7 @@
   .search input:focus { width: 280px; }
 
   .grid {
-    display: grid; gap: 18px 14px;
+    display: grid; gap: 18px 14px; align-items: start;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
 
@@ -980,7 +980,10 @@
   .shelf:hover .shead button,
   .shead button:focus-visible { opacity: 1; }
   .sentinel { height: 1px; }
-  .poster { background: none; border: none; padding: 0; text-align: left; }
+  /* A tile is its grid track, never its caption: a long dotted release
+     name used to widen the button (and with it the poster) and run its
+     text across the neighbours. */
+  .poster { background: none; border: none; padding: 0; text-align: left; display: block; width: 100%; min-width: 0; }
   .art {
     aspect-ratio: 2/3; border-radius: 8px; overflow: hidden;
     background: var(--surface-2); border: 1px solid var(--border);
@@ -1035,7 +1038,10 @@
   .fixname { display: block; font-size: 11.5px; margin-top: 4px; line-height: 1.25; }
   .fixfoot { display: flex; gap: 8px; align-items: center; }
   .poster:hover .playbadge svg { transform: scale(1); }
-  .name { margin: 7px 0 0; font-size: 13px; line-height: 1.35; }
+  .name {
+    margin: 7px 0 0; font-size: 13px; line-height: 1.35;
+    overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
   .poster:hover .name { color: var(--accent); }
   .poster p { margin: 1px 0 0; }
 

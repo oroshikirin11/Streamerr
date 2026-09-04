@@ -101,6 +101,23 @@ export function movieTitle(stem) {
   return cut.length >= 2 ? cut : stem;
 }
 
+/**
+ * A show's display name from its folder. A folder named the way release
+ * groups name things — "Life.in.Colour.S01.1080p.WEBRip.x265-GRP[TGx]" —
+ * reads as the title people know; a folder already named like a title is
+ * left exactly as it is, dots and all ("Mr. Robot").
+ */
+const RELEASE_TAG = /(\b\d{3,4}[pP]\b|\bx26[45]\b|\bh\.?26[45]\b|\bhevc\b|\bweb-?dl\b|\bwebrip\b|\bbluray\b|\bbdrip\b|\bhdtv\b|\bremux\b|\[[^\]]*\]\s*$)/i;
+export function showTitle(name) {
+  if (!RELEASE_TAG.test(name)) return name;
+  const t = movieTitle(name)
+    .replace(/\s*\[[^\]]*\]\s*/g, ' ')
+    .replace(/\s+S\d{1,2}(?:E\d{1,2})?\s*$/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return t.length >= 2 ? t : name;
+}
+
 /** Movies or shows, guessed from the folder name and what is inside. */
 function guessCollectionType(dir) {
   const n = basename(dir).toLowerCase();
@@ -413,7 +430,7 @@ export class FilesystemLibrary {
       if (isMovie) this._paths.set(id(videos[0].full), videos[0].full);
       return {
         id: isMovie ? id(videos[0].full) : id(dir),
-        title: name,
+        title: isMovie ? movieTitle(name) : showTitle(name),
         year: /\((\d{4})\)/.exec(name)?.[1] ?? null,
         type: isMovie ? 'Movie' : 'Series',
         childCount: isMovie ? null : videos.length || null,
@@ -482,7 +499,7 @@ export class FilesystemLibrary {
         type: isEpisode ? 'Episode' : 'Movie',
         title,
         seriesId,
-        seriesName: basename(seriesDir),
+        seriesName: showTitle(basename(seriesDir)),
         season: parsed.season,
         episode: parsed.episode,
         duration: null, // ffprobe on every file would make browsing slow
@@ -576,7 +593,7 @@ export class FilesystemLibrary {
     if (!p) throw new Error('Unknown item');
     const st = statSync(p);
     if (st.isDirectory()) {
-      return { id: itemId, title: basename(p), type: 'Series', path: p };
+      return { id: itemId, title: showTitle(basename(p)), type: 'Series', path: p };
     }
     // Same naming rules as the listing, or a film queued straight from the
     // grid would go on air titled after its release string.
