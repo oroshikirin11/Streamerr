@@ -2380,27 +2380,32 @@ app.get('/api/library/inspect', wrap(async (req, res) => {
         : (bytes && duration ? Math.round((bytes * 8) / duration / 1000) : null);
       const video = tracks.video?.[0] ?? null;
       const subs = subtitles.map((s) => ({ ...s, path: undefined, key: s.external ? s.path : s.typeIndex }));
-      // What the engine would draw: enabled items, and only while the
-      // overlay is not hidden from the broadcast — exactly what a spawn
-      // gets as profile.overlay. Configured-but-hidden costs nothing.
-      const verdict = inspectVerdict({ video, audio: tracks.audio, chosen, kbps, encoder: config.encoder, overlaysOn: visibleOverlay().length > 0 });
+      // The facts are cached; the verdict is not — it depends on the
+      // encoder settings and on what the Studio would draw, and both
+      // change without the file changing.
       return {
-        kind: 'file', id: item.id, title: item.title,
-        container: String(fmt.format_name ?? '').split(',')[0] || null,
-        duration, size: bytes, kbps,
-        video: video ? { ...video, colorTransfer: video.colorTransfer ?? null } : null,
-        audio: tracks.audio, subtitles: subs,
-        chosen: {
-          audioIndex: chosen.audio?.typeIndex ?? null,
-          subtitleKey: chosen.subtitle ? (chosen.subtitle.external ? chosen.subtitle.path : chosen.subtitle.typeIndex) : null,
-          reason: chosen.reason,
+        sheet: {
+          kind: 'file', id: item.id, title: item.title,
+          container: String(fmt.format_name ?? '').split(',')[0] || null,
+          duration, size: bytes, kbps,
+          video: video ? { ...video, colorTransfer: video.colorTransfer ?? null } : null,
+          audio: tracks.audio, subtitles: subs,
+          chosen: {
+            audioIndex: chosen.audio?.typeIndex ?? null,
+            subtitleKey: chosen.subtitle ? (chosen.subtitle.external ? chosen.subtitle.path : chosen.subtitle.typeIndex) : null,
+            reason: chosen.reason,
+          },
         },
-        verdict,
+        chosen, video, audio: tracks.audio, kbps,
       };
     })().catch((err) => { inspectCache.delete(key); throw err; }));
     if (inspectCache.size > 500) inspectCache.delete(inspectCache.keys().next().value);
   }
-  res.json(await inspectCache.get(key));
+  const c = await inspectCache.get(key);
+  // What the engine would draw: enabled items, and only while the overlay
+  // is not hidden from the broadcast — exactly what a spawn gets.
+  const verdict = inspectVerdict({ video: c.video, audio: c.audio, chosen: c.chosen, kbps: c.kbps, encoder: config.encoder, overlaysOn: visibleOverlay().length > 0 });
+  res.json({ ...c.sheet, verdict });
 }));
 
 // ── playout ────────────────────────────────────────────────────────────
