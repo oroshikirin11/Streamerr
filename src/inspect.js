@@ -49,7 +49,7 @@ export function inspectVerdict({ video, audio = [], chosen = {}, kbps = null, en
     const s = chosen.subtitle;
     reasons.push(`subtitles would be burned in (${langLabel(s)} ${up(s.codec)}${s.external ? ' sidecar' : ''}, chosen by default)`);
   }
-  if (overlaysOn) reasons.push('overlays are switched on in the Studio');
+  if (overlaysOn) reasons.push('overlays are on air — hide them from the broadcast in the Studio to pass through');
   if (video.hdr && !encoder.hdrOutput) reasons.push('the source is HDR and HDR output is off, so it is tone-mapped to SDR');
   const limit = Number(encoder.copyLimitKbps) > 0 ? Number(encoder.copyLimitKbps) : 30000;
   if (kbps != null && kbps > limit) reasons.push(`${kbps} kbps is above the ${limit} kbps copy limit`);

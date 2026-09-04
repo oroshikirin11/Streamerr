@@ -2380,7 +2380,10 @@ app.get('/api/library/inspect', wrap(async (req, res) => {
         : (bytes && duration ? Math.round((bytes * 8) / duration / 1000) : null);
       const video = tracks.video?.[0] ?? null;
       const subs = subtitles.map((s) => ({ ...s, path: undefined, key: s.external ? s.path : s.typeIndex }));
-      const verdict = inspectVerdict({ video, audio: tracks.audio, chosen, kbps, encoder: config.encoder, overlaysOn: overlayConfigured() });
+      // What the engine would draw: enabled items, and only while the
+      // overlay is not hidden from the broadcast — exactly what a spawn
+      // gets as profile.overlay. Configured-but-hidden costs nothing.
+      const verdict = inspectVerdict({ video, audio: tracks.audio, chosen, kbps, encoder: config.encoder, overlaysOn: visibleOverlay().length > 0 });
       return {
         kind: 'file', id: item.id, title: item.title,
         container: String(fmt.format_name ?? '').split(',')[0] || null,

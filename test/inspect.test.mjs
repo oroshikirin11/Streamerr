@@ -29,7 +29,7 @@ test('each gate names itself', () => {
   assert.match(v.will, /^Transcode → HEVC 1920×1080/);
   assert.equal(v.reasons.length, 4, v.reasons.join(' | '));
   assert.match(v.reasons[0], /burned in \(ENG ASS, chosen by default\)/);
-  assert.match(v.reasons[1], /overlays/);
+  assert.match(v.reasons[1], /overlays are on air/);
   assert.match(v.reasons[2], /tone-mapped/);
   assert.match(v.reasons[3], /42000 kbps is above the 30000/);
   assert.ok(v.notes.some((n) => /10-bit decode/.test(n)));
