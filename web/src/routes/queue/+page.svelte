@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { api, connectStatus, fmtTime, clockTime, clockDay, maskClock, parseClock, audioLabel, subtitleLabel, subtitleChoice } from '$lib/api.js';
+  import Inspector from '$lib/Inspector.svelte';
 
   /**
    * The Schedule page, timeline first.
@@ -580,6 +581,8 @@
     catch (err) { error = err.message; }
     finally { skipping = false; }
   }
+  /** The media inspector: { id, title } while open. */
+  let inspect = $state(null);
   let goTime = $state('');
   let goAt = $state(false);
   async function goLive() {
@@ -710,6 +713,12 @@
             <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
             {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
           </button>
+          {#if !card && status.playing?.id}
+            <button onclick={() => (inspect = { id: status.playing.id, title: status.playing.title })} title="What this file is, and what the encoder is doing with it">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+              Details
+            </button>
+          {/if}
           {#if !card}
             <button onclick={loadTracks} disabled={switching} class:on={Boolean(tracks)}>
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h18v14H3zM7 15h4M14 15h3"/></svg>
@@ -908,6 +917,7 @@
                   {#if !breakOf(it) && seg.items.find((x) => x.state === 'upcoming') !== it}
                     <button class="ic" disabled={busy} onclick={() => act(() => api.tonightSetItem(it.key, { breakBefore: (view.settings.breakMinutes || 5) * 60 }))} title={`Add a ${view.settings.breakMinutes || 5} minute break before this one`}>⏸</button>
                   {/if}
+                  <button class="ic" onclick={() => (inspect = { id: it.id, title: it.title })} title="What this file is, and what the encoder will do with it">i</button>
                   <span class="mv">
                     <button class="ic" disabled={busy} onclick={() => act(() => api.tonightMove(it.key, -1))} title="Move up">↑</button>
                     <button class="ic" disabled={busy} onclick={() => act(() => api.tonightMove(it.key, 1))} title="Move down">↓</button>
@@ -1042,6 +1052,10 @@
     </div>
   </div>
 </div>
+
+{#if inspect}
+  <Inspector id={inspect.id} title={inspect.title} onclose={() => (inspect = null)} />
+{/if}
 
 <!-- ── picker ─────────────────────────────────────────────────────────── -->
 {#if picker}

@@ -93,6 +93,7 @@ export const api = {
     return request('GET', `/api/library/episodes?${q}`);
   },
   tracks: (id) => request('GET', `/api/library/tracks?id=${id}`),
+  inspect: (id) => request('GET', `/api/library/inspect?id=${encodeURIComponent(id)}`),
 
   streamStatus: () => request('GET', '/api/stream/status'),
   start: (itemIds, trackOverride, startAt = null) =>

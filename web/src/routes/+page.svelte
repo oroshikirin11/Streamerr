@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { api, fmtTime , maskClock, parseClock } from '$lib/api.js';
+  import Inspector from '$lib/Inspector.svelte';
 
   let libraries = $state([]);
   // Null = showing the folder cards. The grid only exists inside a library.
@@ -158,7 +159,16 @@
   // longest series in that library still popping in.
   const EAGER_STILLS = 120;
   let starting = $state(false);
-  let tracksFor = $state(null);
+  /** The media inspector: { id, title, pick } while open. */
+  let inspect = $state(null);
+  function openInspect(item, e = null) {
+    e?.stopPropagation?.(); e?.preventDefault?.();
+    inspect = { id: item.id, title: item.title, pick: null };
+  }
+  /** From the season list: the same sheet, with the tracks pickable for the next broadcast. */
+  function openInspectPick(ep) {
+    inspect = { id: ep.id, title: ep.title, pick: true };
+  }
   // Per-broadcast track choice, picked before starting.
   let trackOverride = $state(null);
 
@@ -452,21 +462,6 @@
     selected = new Set(episodes.slice(i).map((e) => e.id));
   }
 
-  async function showTracks(ep) {
-    tracksFor = { episode: ep, data: null, error: null };
-    try {
-      tracksFor = { episode: ep, data: await api.tracks(ep.id), error: null };
-    } catch (err) {
-      tracksFor = { episode: ep, data: null, error: err.message };
-    }
-  }
-
-  const chosenAudio = (t) =>
-    trackOverride?.audioIndex ?? t.data.chosen.audioIndex;
-  const chosenSub = (t) =>
-    trackOverride && 'subtitleId' in trackOverride
-      ? trackOverride.subtitleId
-      : t.data.chosen.subtitleKey;
 
   function pickAudio(i) {
     trackOverride = { ...(trackOverride ?? {}), audioIndex: i };
@@ -638,16 +633,26 @@
               <span class="playbadge" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               </span>
-              {#if item.metaKey}
-                <!-- Not a <button>: it lives inside one. Stops the click so
-                     fixing artwork never queues the title it is fixing. -->
-                <span class="fixart" role="button" tabindex="0"
-                      title="Wrong picture or title? Pick the right one from TMDB"
-                      onclick={(e) => openFix(item, e)}
-                      onkeydown={(e) => { if (e.key === 'Enter') openFix(item, e); }}>
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+              <!-- The corner cluster. Not <button>s: they live inside one.
+                   Each stops the click so inspecting or fixing never queues
+                   the title it belongs to. Info is on every tile — a film
+                   has no page of its own, so this is its detail view. -->
+              <span class="tileacts">
+                <span class="tileact" role="button" tabindex="0"
+                      title="What this file is, and what the encoder will do with it"
+                      onclick={(e) => openInspect(item, e)}
+                      onkeydown={(e) => { if (e.key === 'Enter') openInspect(item, e); }}>
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
                 </span>
-              {/if}
+                {#if item.metaKey}
+                  <span class="tileact" role="button" tabindex="0"
+                        title="Wrong picture or title? Pick the right one from TMDB"
+                        onclick={(e) => openFix(item, e)}
+                        onkeydown={(e) => { if (e.key === 'Enter') openFix(item, e); }}>
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                  </span>
+                {/if}
+              </span>
             </div>
             <p class="name">{item.title}</p>
             {#if item.childCount}<p class="muted small">{item.childCount} episodes</p>{/if}
@@ -783,56 +788,20 @@
             </span>
           </span>
         </label>
-        <button class="ghost small" onclick={() => showTracks(ep)}>Tracks</button>
+        <button class="ghost small" onclick={() => openInspectPick(ep)} title="What this file is, and which tracks to use">Info</button>
         <button class="ghost small" onclick={() => selectFrom(ep.id)}>From here</button>
       </li>
     {/each}
   </ul>
 {/if}
 
-{#if tracksFor}
-  <div class="overlay" onclick={() => (tracksFor = null)} role="presentation">
-    <div class="card modal" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>{tracksFor.episode.title}</h3>
-      {#if tracksFor.error}
-        <p class="err">{tracksFor.error}</p>
-      {:else if !tracksFor.data}
-        <p class="muted">Reading tracks…</p>
-      {:else}
-        <p class="muted small">Audio</p>
-        <ul class="tracks">
-          {#each tracksFor.data.audio as a}
-            <li>
-              <button class="tr" class:pick={a.typeIndex === chosenAudio(tracksFor)}
-                      onclick={() => pickAudio(a.typeIndex)}>
-                {a.language ?? '?'} · {a.codec} · {a.channels ?? '?'}ch{a.title ? ` — ${a.title}` : ''}
-              </button>
-            </li>
-          {/each}
-        </ul>
-        <p class="muted small">Subtitles</p>
-        <ul class="tracks">
-          <li>
-            <button class="tr" class:pick={chosenSub(tracksFor) === null}
-                    onclick={() => pickSub(null)}>None</button>
-          </li>
-          {#each tracksFor.data.subtitles as s}
-            <li>
-              <button class="tr" class:pick={String(s.key) === String(chosenSub(tracksFor))}
-                      onclick={() => pickSub(s.key)}>
-                {s.language ?? '?'} · {s.codec}{s.forced ? ' · forced' : ''}{s.external ? ' · sidecar' : ''}
-              </button>
-            </li>
-          {/each}
-        </ul>
-        <p class="small">→ {tracksFor.data.chosen.reason}</p>
-        <p class="muted small">
-          Click a track to use it for this broadcast instead.
-        </p>
-      {/if}
-      <button onclick={() => (tracksFor = null)}>Close</button>
-    </div>
-  </div>
+{#if inspect}
+  <Inspector id={inspect.id} title={inspect.title} onclose={() => (inspect = null)}
+             pick={inspect.pick ? {
+               audioIndex: trackOverride?.audioIndex ?? null,
+               subtitleKey: trackOverride && 'subtitleId' in trackOverride ? trackOverride.subtitleId : undefined,
+               onAudio: pickAudio, onSub: pickSub,
+             } : null} />
 {/if}
 
 {#if fixItem}
@@ -1010,6 +979,13 @@
   .poster:hover .playbadge, .poster:focus-visible .playbadge { opacity: 1; }
   /* Fix-artwork: a corner affordance that exists only under the cursor,
      so the grid stays a grid until someone needs it. */
+  .tileacts { position: absolute; top: 6px; right: 6px; z-index: 2; display: flex; gap: 4px; }
+  .tileact {
+    display: grid; place-items: center; width: 26px; height: 26px; border-radius: 999px;
+    background: rgba(0, 0, 0, 0.65); color: #fff; opacity: 0; transition: opacity .14s ease, background .14s ease;
+  }
+  .poster:hover .tileact, .tileact:focus-visible { opacity: 1; }
+  .tileact:hover { background: rgba(0, 0, 0, 0.85); }
   .fixart {
     position: absolute; top: 6px; right: 6px; z-index: 2;
     display: grid; place-items: center; width: 26px; height: 26px;

@@ -144,6 +144,7 @@ function groupStreams(streams) {
       // source without drift; hdr flags whether tone mapping is required.
       entry.frameRate = s.r_frame_rate ?? null;
       entry.hdr = ['smpte2084', 'arib-std-b67'].includes(s.color_transfer);
+      entry.colorTransfer = s.color_transfer ?? null;
       // Needed to know whether the GPU can decode this at all — see
       // gpuDecodable(). 10-bit H.264 is the common case that cannot.
       entry.pixFmt = s.pix_fmt ?? null;

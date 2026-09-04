@@ -23,6 +23,7 @@ import {
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT, CONFIG_DIR,
 } from './config.js';
 import { createScheduleStore } from './schedules.js';
+import { inspectVerdict } from './inspect.js';
 import { redactPublish, restorePublishSecrets, targetUrl } from './publish.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
@@ -2340,6 +2341,63 @@ app.get('/api/library/tracks', wrap(async (req, res) => {
       reason: chosen.reason,
     },
   });
+}));
+
+/**
+ * Media inspection. A file answers with its sheet — container, length,
+ * size and bitrate, the video stream, every audio and subtitle track, the
+ * default choice, and what the encoder will do with it. A series answers
+ * with its episodes; the panel asks for each sheet as it needs it.
+ * Sheets are cached by path and modification time.
+ */
+const inspectCache = new Map();
+app.get('/api/library/inspect', wrap(async (req, res) => {
+  const item = await library.item(String(req.query.id ?? ''));
+  if (item.type === 'Series') {
+    const eps = await library.episodes(item.id);
+    return res.json({
+      kind: 'series', id: item.id, title: item.title,
+      episodes: eps.map((e) => ({ id: e.id, title: e.title, season: e.season ?? null, episode: e.episode ?? null })),
+    });
+  }
+  const path = library.resolvePath(item);
+  let mtime = 0; let size = null;
+  try { const st = statSync(path); mtime = st.mtimeMs; size = st.size; } catch { /* remote */ }
+  const key = `${path}:${mtime}`;
+  if (!inspectCache.has(key)) {
+    inspectCache.set(key, (async () => {
+      const tracks = await probeTracks(path);
+      const subtitles = await listSubtitles(path, tracks);
+      const chosen = selectTracks(tracks, subtitles, config.tracks ?? {});
+      const fmt = await new Promise((resolve) => {
+        const c = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=format_name,duration,size,bit_rate', '-of', 'json', path]);
+        let out = ''; c.stdout.on('data', (d) => { out += d; });
+        c.on('error', () => resolve({})); c.on('close', () => { try { resolve(JSON.parse(out).format ?? {}); } catch { resolve({}); } });
+      });
+      const duration = Number(fmt.duration) || item.duration || null;
+      const bytes = size ?? (Number(fmt.size) || null);
+      const kbps = Number(fmt.bit_rate) ? Math.round(Number(fmt.bit_rate) / 1000)
+        : (bytes && duration ? Math.round((bytes * 8) / duration / 1000) : null);
+      const video = tracks.video?.[0] ?? null;
+      const subs = subtitles.map((s) => ({ ...s, path: undefined, key: s.external ? s.path : s.typeIndex }));
+      const verdict = inspectVerdict({ video, audio: tracks.audio, chosen, kbps, encoder: config.encoder, overlaysOn: overlayConfigured() });
+      return {
+        kind: 'file', id: item.id, title: item.title,
+        container: String(fmt.format_name ?? '').split(',')[0] || null,
+        duration, size: bytes, kbps,
+        video: video ? { ...video, colorTransfer: video.colorTransfer ?? null } : null,
+        audio: tracks.audio, subtitles: subs,
+        chosen: {
+          audioIndex: chosen.audio?.typeIndex ?? null,
+          subtitleKey: chosen.subtitle ? (chosen.subtitle.external ? chosen.subtitle.path : chosen.subtitle.typeIndex) : null,
+          reason: chosen.reason,
+        },
+        verdict,
+      };
+    })().catch((err) => { inspectCache.delete(key); throw err; }));
+    if (inspectCache.size > 500) inspectCache.delete(inspectCache.keys().next().value);
+  }
+  res.json(await inspectCache.get(key));
 }));
 
 // ── playout ────────────────────────────────────────────────────────────
