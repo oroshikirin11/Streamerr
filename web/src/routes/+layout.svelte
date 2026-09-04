@@ -156,7 +156,6 @@
 
   onMount(() => {
     const tick = setInterval(() => {
-      nowSec = Date.now() / 1000;
       if (stream.status === 'running' && stream.playing && !paused) {
         position += 1;
       }
@@ -319,15 +318,12 @@
   // that has not reached the picture yet. Painted from the same field on
   // every page; a second press while it is pending only flashes it.
   const pending = $derived(stream.pending ?? null);
-  let nowSec = $state(Date.now() / 1000);
   let pendFlash = $state(false);
-  const pendLeft = $derived(pending ? Math.max(0, Math.ceil(pending.expectedAt - nowSec)) : 0);
   const pendText = $derived.by(() => {
     if (!pending) return '';
-    const eta = pendLeft > 0 ? ` · on air in ~${pendLeft} s` : ' · any moment';
-    if (pending.kind === 'seek') return `Seeking to ${fmtTime(pending.to ?? 0)}${eta}`;
+    if (pending.kind === 'seek') return `Seeking to ${fmtTime(pending.to ?? 0)}…`;
     const to = pending.toTitle ? epShort(pending.toTitle) : 'the next clip';
-    return `Skipping to ${to}${eta}`;
+    return `Skipping to ${to}…`;
   });
   const epShort = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(i + 3) : t; };
   const flashPending = () => { pendFlash = true; setTimeout(() => { pendFlash = false; }, 700); };

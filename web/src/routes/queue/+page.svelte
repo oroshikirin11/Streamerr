@@ -653,8 +653,7 @@
   let skipping = $state(false);
   // The engine's announced skip or seek, until it reaches the picture.
   const pending = $derived(status.pending ?? null);
-  const pendLeft = $derived(pending ? Math.max(0, Math.ceil(pending.expectedAt - now)) : 0);
-  const pendChip = $derived(pending?.kind === 'skip' ? (pendLeft > 0 ? `skipping to · ~${pendLeft} s` : 'skipping to · any moment') : '');
+  const pendChip = $derived(pending?.kind === 'skip' ? 'skipping to…' : '');
   async function loadTracks() {
     if (tracks) { tracks = null; return; }
     try { tracks = await api.liveTracks(); } catch (err) { error = err.message; }
