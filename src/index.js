@@ -2455,8 +2455,20 @@ app.get('/api/library/inspect', wrap(async (req, res) => {
 app.get('/api/stream/status', (req, res) => res.json(streamStatus()));
 
 app.post('/api/stream/start', (req, res) => startStream(req, res));
+// Claimed the moment a start is accepted: the handler awaits network
+// probes before it builds the engine, and two clicks in that window used
+// to build two — one of them an orphan that kept publishing after Stop.
+let startPending = false;
 const startStream = wrap(async (req, res) => {
-  if (engine) return res.status(409).json({ error: 'Already streaming' });
+  if (engine || startPending) return res.status(409).json({ error: 'Already streaming' });
+  startPending = true;
+  try {
+    return await startStreamInner(req, res);
+  } finally {
+    startPending = false;
+  }
+});
+const startStreamInner = async (req, res) => {
   // Make sure the previous broadcast has really let go of the connection.
   if (lastEngine) {
     try { lastEngine.hardStop(); } catch { /* already down */ }
@@ -2673,7 +2685,7 @@ const startStream = wrap(async (req, res) => {
     if (engine === e) engine = null;
   });
   res.json({ ok: true, tracks: selection.reason, ...streamStatus() });
-});
+};
 
 
 app.post('/api/stream/pause', wrap(async (req, res) => {
@@ -2794,7 +2806,12 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
 }));
 
 app.post('/api/stream/stop', (req, res) => {
-  if (!engine) return res.status(409).json({ error: 'Not streaming' });
+  if (!engine) {
+    // Nothing current, but a previous engine may still hold the
+    // connection (its close is asynchronous): a Stop takes it down too.
+    if (lastEngine) { try { lastEngine.hardStop(); } catch { /* down */ } lastEngine = null; }
+    return res.status(409).json({ error: 'Not streaming' });
+  }
   engine.stop();
   res.json({ ok: true });
 });

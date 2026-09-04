@@ -858,6 +858,12 @@ export class PipelinePlayout extends EventEmitter {
 
     this.queue = [...items];
     this._stopping = false;
+    this._startAborted = false;
+    // Preparing from the first wait, not just when subtitles must be
+    // extracted: a Stop that lands during the warm-up needs a status that
+    // says something is under way, or it has nothing to end.
+    this.status = 'preparing';
+    this.emit('status', this.status);
     this._clipNos = new WeakMap();
     this._clipCount = 0;
     clearTimeout(this._audioClose?.timer);
@@ -940,6 +946,8 @@ export class PipelinePlayout extends EventEmitter {
    * here, the way stop() does for an off-air break.
    */
   _abortStart() {
+    if (this._startAborted) return;   // stop() already finished it
+    this._startAborted = true;
     if (this._watch) { clearInterval(this._watch); this._watch = null; }
     this._killSource();
     this.current = null;
@@ -1144,6 +1152,15 @@ export class PipelinePlayout extends EventEmitter {
       this.current = null;
       this.emit('status', this.status);
       this.emit('ended', { code: 0 });
+      return;
+    }
+    // Nothing on air yet and no publisher to close: a Stop while the
+    // first clip is still being prepared or warmed. start() checks the
+    // flag between its waits, but a wait that never returns would leave
+    // the panel on "preparing" with a Stop that does nothing — so the
+    // broadcast ends here, now, and start() finds it already over.
+    if (!this.publisher && (this.status === 'preparing' || this.status === 'starting')) {
+      this._abortStart();
       return;
     }
     this._killSource();

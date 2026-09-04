@@ -87,12 +87,33 @@ test('stop() while start() is warming ends the broadcast cleanly', async () => {
   e.stop();   // while start() awaits _warm()
   await p;
   assert.equal(e.status, 'stopped');
-  assert.deepEqual(statuses, ['stopped']);
+  assert.deepEqual(statuses, ['preparing', 'stopped']);
   assert.equal(ended, true);
   assert.equal(sources, 0, 'no source is spawned into a stopped engine');
   assert.equal(publishers, 0);
   assert.equal(e._watch, null, 'no watchdog left ticking');
   assert.equal(e.current, null);
+});
+
+test('stop() while start() is stuck preparing ends the broadcast at once', async () => {
+  const e = new PipelinePlayout({ target: 'rtmp://x/y/key123456', profile: cpuProfile, selection: { video: null, audio: { typeIndex: 0 }, subtitle: null } });
+  let sources = 0; let endedAt = 0;
+  e._spawnSource = () => { sources++; };
+  e._spawnPublisher = () => { e.publisher = {}; };
+  e._measureGop = async () => null;
+  e._prepareTcpBridges = async () => {};
+  e._prefetchUpcoming = () => {};
+  e._warm = () => new Promise(() => {});   // never returns
+  e.on('ended', () => { endedAt++; });
+  e.start([{ id: 'a', title: 'A', srcPath: '/nonexistent.mkv', duration: 100 }]);
+  await new Promise((r) => setTimeout(r, 20));
+  e.stop();
+  assert.equal(e.status, 'stopped', 'stop() does not wait for start() to notice');
+  assert.equal(endedAt, 1);
+  assert.equal(sources, 0);
+  assert.equal(e.current, null);
+  e._abortStart();
+  assert.equal(endedAt, 1, 'a late start() checkpoint does not end it twice');
 });
 
 test('resuming from an offline break re-arms the watchdog', async () => {
