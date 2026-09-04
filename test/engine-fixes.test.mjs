@@ -416,3 +416,36 @@ test('a seek announces its target position and clears when the aired position re
   e.aired = 300.4; e._checkPending();
   assert.equal(e.pending, null);
 });
+
+test('a reconnect that keeps the cushion keeps the timeline; a fresh session starts it over', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  e._spawnPublisher = () => { e.publisher = {}; };
+  e._play = () => {};
+  e._armWatch = () => {};
+  const item = { id: 'e2', title: 'S1E2', srcPath: '/e2.mkv', duration: 1400 };
+  // Retained bytes, stamped on the wire clock.
+  e._bank = [{ data: Buffer.alloc(188), tl: 1619.4, pos: 50 }, { data: Buffer.alloc(188), tl: 1622.1, pos: 53 }];
+  e._bankBytes = 376; e.timeline = 1650; e._clipBase = 1570;
+  e._reshaping = { item, offset: 54.4, duration: 1400 };
+  e._finishReshape();
+  assert.equal(e.timeline, 1650, 'the timeline continues with the retained cushion');
+  assert.equal(e._clipBase, 1570);
+  // Nothing retained: the new session starts from zero.
+  e._bank = []; e._bankBytes = 0;
+  e._reshaping = { item, offset: 0, duration: 1400 };
+  e._finishReshape();
+  assert.equal(e.timeline, 0);
+  assert.equal(e._clipBase, 0);
+});
+
+test('the bank readout refuses stamps from two clocks', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  e.bufferSeconds = 15;
+  e._bank = [{ data: Buffer.alloc(188), tl: 1620 }, { data: Buffer.alloc(188), tl: 1628.5 }];
+  e.airedTimeline = 1620;
+  assert.equal(e._bankSeconds(), 8.5);
+  e.airedTimeline = 19.9;               // a reset timeline stamp at the head
+  assert.equal(e._bankSeconds(), null, 'minutes of "reserve" are not a reading');
+  e.airedTimeline = 1640;               // head past the tail
+  assert.equal(e._bankSeconds(), null);
+});

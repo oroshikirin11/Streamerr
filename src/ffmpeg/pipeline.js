@@ -2622,7 +2622,12 @@ export class PipelinePlayout extends EventEmitter {
     const head = this._bankHeadTl();
     const last = this._bank?.[this._bank.length - 1];
     if (head == null || !last || last.tl == null) return null;
-    return Math.max(0, last.tl - head);
+    const secs = last.tl - head;
+    // Two stamps that cannot both belong to this bank — one from a wire
+    // clock, one from a reset timeline — answer nothing rather than
+    // minutes; the caller falls back to the byte estimate.
+    if (secs < 0 || secs > Math.max(60, (this.bufferSeconds ?? 15) * 20)) return null;
+    return secs;
   }
 
   /**
@@ -4173,10 +4178,18 @@ export class PipelinePlayout extends EventEmitter {
     // the retry timer ran (measured: the drift caused a second, useless
     // reconnect cycle).
     this._lastReshape = { ...next, at: Date.now() };
-    // A fresh RTMP session restarts the viewer's clock, so the published
-    // timeline starts over with it rather than resuming mid-episode.
-    this.timeline = 0;
-    this._clipBase = 0;
+    // A fresh session that starts from nothing restarts the viewer's
+    // clock, so the published timeline starts over with it. A reconnect
+    // that RETAINED the cushion is a different thing: those bytes go to
+    // the new publisher with their old stamps, and the successor source
+    // continues on the same wire clock — zeroing the timeline here put
+    // two clocks on the bank at once (wire stamps near 27 minutes, the
+    // timeline near 20 seconds) and the buffer readout swung between
+    // "0 s" and "27 m" for the rest of the night.
+    if (!this._bank?.length) {
+      this.timeline = 0;
+      this._clipBase = 0;
+    }
     // The sent frontier belongs to the OLD session's timeline — carrying
     // it across would drag every later flush back onto dead numbers.
     this._sentAudio = null;
