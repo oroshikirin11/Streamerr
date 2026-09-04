@@ -289,25 +289,44 @@
   // appended; dropped on a segment it goes in before that one.
   let cardDrag = $state(null);
   let zoneOver = $state(false);
+  /**
+   * Where a dragged schedule would land: over the upper half of a segment
+   * it goes before it, over the lower half after it, past the last one at
+   * the end. `ins` is drawn as a line while dragging.
+   */
+  let ins = $state(null);   // { seg: key, where: 'before'|'after' } | { end: true }
+  function insAt(e, seg) {
+    const r = e.currentTarget.getBoundingClientRect();
+    return { seg: seg.key, where: e.clientY < r.top + r.height / 2 ? 'before' : 'after' };
+  }
+  function insIndex(keys) {
+    if (!ins || ins.end) return keys.length;
+    const i = keys.indexOf(ins.seg);
+    if (i < 0) return keys.length;
+    return ins.where === 'after' ? i + 1 : i;
+  }
   function cardDragStart(e, sid) {
     if (!dnd) { e.preventDefault(); return; }
     cardDrag = sid; e.dataTransfer.effectAllowed = 'copy';
     try { e.dataTransfer.setData('text/plain', `schedule:${sid}`); } catch { /* firefox */ }
   }
-  async function cardDrop(e, beforeSeg = null) {
+  async function cardDrop(e) {
     e.preventDefault(); e.stopPropagation();
-    const sid = cardDrag; cardDrag = null; zoneOver = false; segOver = null;
+    const sid = cardDrag; const at = ins;
+    cardDrag = null; zoneOver = false; segOver = null; ins = null;
     if (!sid) return;
     const sch = view.schedules.find((x) => x.id === sid);
     const restart = Boolean(sch?.finished && atEndOf(sch) === 'stop');
     await act(async () => {
       const v = await api.appendSchedule(sid, null, restart);
-      if (!beforeSeg) return v;
       const segs = v.tonight.segments;
       const added = segs[segs.length - 1];
       const keys = segs.map((g) => g.key).filter((k) => k !== added.key);
-      const at = keys.indexOf(beforeSeg);
-      keys.splice(at < 0 ? keys.length : at, 0, added.key);
+      ins = at;
+      const idx = insIndex(keys);
+      ins = null;
+      if (idx >= keys.length) return v;
+      keys.splice(idx, 0, added.key);
       return api.tonightOrder(keys.map((k) => ({ seg: k, items: segs.find((g) => g.key === k).items.map((i) => i.key) })));
     }, `${restart ? 'Started over' : 'Appended'} "${sch?.name ?? 'schedule'}".`);
   }
@@ -339,13 +358,17 @@
     segDrag = seg.key; e.dataTransfer.effectAllowed = 'move';
     try { e.dataTransfer.setData('text/plain', seg.key); } catch { /* firefox */ }
   }
-  async function segDrop(e, seg) {
-    e.preventDefault();
-    if (!segDrag || segDrag === seg.key) { segDrag = null; segOver = null; return; }
-    const keys = segments.map((s) => s.key);
-    const from = keys.indexOf(segDrag); const to = keys.indexOf(seg.key);
-    segDrag = null; segOver = null;
-    keys.splice(to, 0, keys.splice(from, 1)[0]);
+  async function segDrop(e) {
+    e.preventDefault(); e.stopPropagation();
+    const moving = segDrag; const at = ins;
+    segDrag = null; segOver = null; ins = null;
+    if (!moving) return;
+    const keys = segments.map((s) => s.key).filter((k) => k !== moving);
+    ins = at;
+    const idx = insIndex(keys);
+    ins = null;
+    keys.splice(idx, 0, moving);
+    if (keys.join() === segments.map((s) => s.key).join()) return;
     await act(() => api.tonightOrder(keys.map((k) => ({ seg: k, items: segments.find((s) => s.key === k).items.map((i) => i.key) }))));
   }
 
@@ -821,24 +844,25 @@
       {/if}
     </div>
 
-    <div class="zone" class:drop={zoneOver && Boolean(cardDrag)} class:armed={Boolean(cardDrag)} role="region" aria-label="Lineup"
-         ondragover={(e) => { if (cardDrag) { e.preventDefault(); zoneOver = true; } }}
-         ondragleave={(e) => { if (e.target === e.currentTarget) zoneOver = false; }}
-         ondrop={(e) => { if (cardDrag) cardDrop(e, null); }}>
+    <div class="zone" class:drop={zoneOver && Boolean(cardDrag || segDrag)} class:armed={Boolean(cardDrag)} role="region" aria-label="Lineup"
+         ondragover={(e) => { if (cardDrag || segDrag) { e.preventDefault(); zoneOver = true; ins = { end: true }; } }}
+         ondragleave={(e) => { if (e.target === e.currentTarget) { zoneOver = false; if (ins?.end) ins = null; } }}
+         ondrop={(e) => { if (cardDrag) cardDrop(e); else if (segDrag) segDrop(e); }}>
     {#if !segments.length}
       <p class="muted zone-empty">{cardDrag ? 'Drop it here' : 'Nothing lined up. Load a saved schedule from the right, or add from the library.'}</p>
     {/if}
 
-    {#each segments as seg (seg.key)}
+    {#each segments as seg, si (seg.key)}
       {@const c = segCounts(seg)}
       {@const past = pastOf(seg)}
+      {#if ins && !ins.end && ins.seg === seg.key && ins.where === 'before'}<div class="insline" aria-hidden="true"></div>{/if}
       <div class="blkw" class:pinned={seg.startAt} class:over={segOver === seg.key} class:rowend={rowDrag?.seg === seg.key && rowOver === `end:${seg.key}`} role="group"
            ondragover={(e) => {
-             if (segDrag || cardDrag) { e.preventDefault(); segOver = seg.key; }
+             if (segDrag || cardDrag) { e.preventDefault(); e.stopPropagation(); segOver = seg.key; ins = insAt(e, seg); }
              else if (rowDrag?.seg === seg.key) { e.preventDefault(); if (e.target === e.currentTarget || e.target.classList?.contains('q')) rowOver = `end:${seg.key}`; }
            }}
-           ondrop={(e) => (cardDrag ? cardDrop(e, seg.key) : rowDrag ? rowDrop(e, seg, null) : segDrop(e, seg))}>
-        <div class="bh" draggable={dnd} role="group" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
+           ondrop={(e) => (cardDrag ? cardDrop(e) : rowDrag ? rowDrop(e, seg, null) : segDrop(e))}>
+        <div class="bh" draggable={dnd} role="group" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; ins = null; }}>
           {#if dnd}<span class="handle" title="Drag to move this schedule"></span>{/if}
           <button class="fold" onclick={() => (folded[seg.key] = !folded[seg.key])} aria-expanded={!folded[seg.key]}
                   title={folded[seg.key] ? 'Show the episodes' : 'Collapse'}>
@@ -962,6 +986,7 @@
         </ul>
         {/if}
       </div>
+      {#if ins && ((!ins.end && ins.seg === seg.key && ins.where === 'after') || (ins.end && si === segments.length - 1))}<div class="insline" aria-hidden="true"></div>{/if}
     {/each}
     </div>
   </div>
@@ -1042,7 +1067,7 @@
           <div class="saved">
             {#each view.schedules as s (s.id)}
               <div class="sv" class:playing={playingSeg?.scheduleId === s.id} class:grab={dnd} draggable={dnd} role="listitem"
-                   ondragstart={(e) => cardDragStart(e, s.id)} ondragend={() => { cardDrag = null; zoneOver = false; segOver = null; }}
+                   ondragstart={(e) => cardDragStart(e, s.id)} ondragend={() => { cardDrag = null; zoneOver = false; segOver = null; ins = null; }}
                    title={dnd ? 'Drag into the lineup to append it, or onto a schedule to go in before it' : ''}>
                 <span class="nm">{s.name}</span>
                 {#if playingSeg?.scheduleId === s.id}<span class="chip ok">playing</span>
@@ -1241,7 +1266,8 @@
   .pop { position: absolute; top: 110%; right: 0; z-index: 5; min-width: 260px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
   .blkw { border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: var(--radius); margin-top: 10px; overflow: hidden; }
   .blkw.pinned { border-left-color: var(--accent); }
-  .blkw.over { outline: 2px dashed var(--accent); }
+  .blkw.over { outline: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent); }
+  .insline { height: 3px; border-radius: 2px; background: var(--accent); margin: 6px 0; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
   .blkw.rowend { box-shadow: inset 0 -2px 0 var(--accent); }
   .zone { min-height: 48px; border-radius: var(--radius); border: 1px dashed transparent; transition: border-color .12s ease, background .12s ease; }
   .zone.armed { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
