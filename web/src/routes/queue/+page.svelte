@@ -285,6 +285,32 @@
   let rowOver = $state(null);
   let segDrag = $state(null);
   let segOver = $state(null);
+  // A saved schedule dragged from the rail: dropped on the lineup it is
+  // appended; dropped on a segment it goes in before that one.
+  let cardDrag = $state(null);
+  let zoneOver = $state(false);
+  function cardDragStart(e, sid) {
+    if (!dnd) { e.preventDefault(); return; }
+    cardDrag = sid; e.dataTransfer.effectAllowed = 'copy';
+    try { e.dataTransfer.setData('text/plain', `schedule:${sid}`); } catch { /* firefox */ }
+  }
+  async function cardDrop(e, beforeSeg = null) {
+    e.preventDefault(); e.stopPropagation();
+    const sid = cardDrag; cardDrag = null; zoneOver = false; segOver = null;
+    if (!sid) return;
+    const sch = view.schedules.find((x) => x.id === sid);
+    const restart = Boolean(sch?.finished && atEndOf(sch) === 'stop');
+    await act(async () => {
+      const v = await api.appendSchedule(sid, null, restart);
+      if (!beforeSeg) return v;
+      const segs = v.tonight.segments;
+      const added = segs[segs.length - 1];
+      const keys = segs.map((g) => g.key).filter((k) => k !== added.key);
+      const at = keys.indexOf(beforeSeg);
+      keys.splice(at < 0 ? keys.length : at, 0, added.key);
+      return api.tonightOrder(keys.map((k) => ({ seg: k, items: segs.find((g) => g.key === k).items.map((i) => i.key) })));
+    }, `${restart ? 'Started over' : 'Appended'} "${sch?.name ?? 'schedule'}".`);
+  }
   function rowDragStart(e, seg, it) {
     if (!dnd || it.state !== 'upcoming') { e.preventDefault(); return; }
     rowDrag = { seg: seg.key, key: it.key };
@@ -427,7 +453,8 @@
   let appendOpen = $state(false);
   const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
   const progress = (s) => (s.items.length ? Math.round((s.watched.length / s.items.length) * 100) : 0);
-  const startLabel = (s) => (s.finished ? (s.atEnd === 'loop' ? 'finished · loops' : s.atEnd === 'restart' ? 'finished · starts over' : 'finished') : `at ${epName(s.items[s.start]?.title ?? '')}`);
+  const atEndOf = (s) => s.atEnd ?? 'stop';
+  const startLabel = (s) => (s.finished ? (atEndOf(s) === 'loop' ? 'finished · loops' : atEndOf(s) === 'restart' ? 'finished · starts over' : 'finished') : `at ${epName(s.items[s.start]?.title ?? '')}`);
   const recur = (s) => {
     const a = s.autoStart;
     if (!a?.enabled) return 'no auto-start';
@@ -794,8 +821,12 @@
       {/if}
     </div>
 
+    <div class="zone" class:drop={zoneOver && Boolean(cardDrag)} class:armed={Boolean(cardDrag)} role="region" aria-label="Lineup"
+         ondragover={(e) => { if (cardDrag) { e.preventDefault(); zoneOver = true; } }}
+         ondragleave={(e) => { if (e.target === e.currentTarget) zoneOver = false; }}
+         ondrop={(e) => { if (cardDrag) cardDrop(e, null); }}>
     {#if !segments.length}
-      <p class="muted">Nothing lined up. Load a saved schedule from the right, or add from the library.</p>
+      <p class="muted zone-empty">{cardDrag ? 'Drop it here' : 'Nothing lined up. Load a saved schedule from the right, or add from the library.'}</p>
     {/if}
 
     {#each segments as seg (seg.key)}
@@ -803,10 +834,10 @@
       {@const past = pastOf(seg)}
       <div class="blkw" class:pinned={seg.startAt} class:over={segOver === seg.key} class:rowend={rowDrag?.seg === seg.key && rowOver === `end:${seg.key}`} role="group"
            ondragover={(e) => {
-             if (segDrag) { e.preventDefault(); segOver = seg.key; }
+             if (segDrag || cardDrag) { e.preventDefault(); segOver = seg.key; }
              else if (rowDrag?.seg === seg.key) { e.preventDefault(); if (e.target === e.currentTarget || e.target.classList?.contains('q')) rowOver = `end:${seg.key}`; }
            }}
-           ondrop={(e) => (rowDrag ? rowDrop(e, seg, null) : segDrop(e, seg))}>
+           ondrop={(e) => (cardDrag ? cardDrop(e, seg.key) : rowDrag ? rowDrop(e, seg, null) : segDrop(e, seg))}>
         <div class="bh" draggable={dnd} role="group" ondragstart={(e) => segDragStart(e, seg)} ondragend={() => { segDrag = null; segOver = null; }}>
           {#if dnd}<span class="handle" title="Drag to move this schedule"></span>{/if}
           <button class="fold" onclick={() => (folded[seg.key] = !folded[seg.key])} aria-expanded={!folded[seg.key]}
@@ -932,6 +963,7 @@
         {/if}
       </div>
     {/each}
+    </div>
   </div>
 
   <!-- ── rail ─────────────────────────────────────────────────────────── -->
@@ -1009,17 +1041,19 @@
         {:else}
           <div class="saved">
             {#each view.schedules as s (s.id)}
-              <div class="sv" class:playing={playingSeg?.scheduleId === s.id}>
+              <div class="sv" class:playing={playingSeg?.scheduleId === s.id} class:grab={dnd} draggable={dnd} role="listitem"
+                   ondragstart={(e) => cardDragStart(e, s.id)} ondragend={() => { cardDrag = null; zoneOver = false; segOver = null; }}
+                   title={dnd ? 'Drag into the lineup to append it, or onto a schedule to go in before it' : ''}>
                 <span class="nm">{s.name}</span>
                 {#if playingSeg?.scheduleId === s.id}<span class="chip ok">playing</span>
                 {:else if segments.some((g) => g.scheduleId === s.id)}<span class="chip">tonight</span>{/if}
                 <div class="progress" class:done={s.start >= s.items.length}><i style:width={`${progress(s)}%`}></i></div>
                 <div class="meta">
                   <span>{s.items.length} items · {startLabel(s)}</span>
-                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}{#if s.finished && s.autoStart?.enabled && s.atEnd === 'stop'} · paused, played through{/if}</span>
+                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}{#if s.finished && s.autoStart?.enabled && atEndOf(s) === 'stop'} · paused, played through{/if}</span>
                 </div>
                 <div class="acts">
-                  {#if s.finished && s.atEnd === 'stop'}
+                  {#if s.finished && atEndOf(s) === 'stop'}
                     <button onclick={() => act(() => api.loadSchedule(s.id, null, true), `"${s.name}" starts over.`)} disabled={busy} title="Every item has aired — load it from the first item again">Start over</button>
                     <button onclick={() => act(() => api.appendSchedule(s.id, null, true), `Appended "${s.name}" from the start.`)} disabled={busy} title="Add it after what is lined up, from the first item">Append</button>
                   {:else}
@@ -1209,6 +1243,11 @@
   .blkw.pinned { border-left-color: var(--accent); }
   .blkw.over { outline: 2px dashed var(--accent); }
   .blkw.rowend { box-shadow: inset 0 -2px 0 var(--accent); }
+  .zone { min-height: 48px; border-radius: var(--radius); border: 1px dashed transparent; transition: border-color .12s ease, background .12s ease; }
+  .zone.armed { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .zone.drop { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .zone .zone-empty { padding: 12px 10px; margin: 0; }
+  .sv.grab { cursor: grab; }
   .bh { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--surface); flex-wrap: wrap; }
   .bh .bl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bh .fold { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; padding: 0; cursor: pointer; font: inherit; color: inherit; }

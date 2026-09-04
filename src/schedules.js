@@ -119,6 +119,8 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
           schedules: Array.isArray(raw.schedules) ? raw.schedules : [],
           history: Array.isArray(raw.history) ? raw.history.slice(0, HISTORY_MAX) : [],
         };
+        // Schedules saved before 'when finished' existed behave as 'stop'.
+        for (const s of state.schedules) if (!['stop', 'restart', 'loop'].includes(s.atEnd)) s.atEnd = 'stop';
         // Whatever was on air when the process died is not on air now.
         for (const seg of state.tonight.segments) {
           for (const it of seg.items) if (it.state === 'onair') it.state = 'upcoming';
