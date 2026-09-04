@@ -18,9 +18,10 @@ import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 import {
-  config, saveConfig, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, assertRtmpUrl,
+  config, saveConfig, ensureDirs, redact,
   publishDestinations, publishTargetsRedacted, publishConfig,
-  normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary, ROOT, CONFIG_DIR,
+  normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary,
+  normalizeStoredPublish, normalizeStoredLeftovers, ROOT, CONFIG_DIR,
 } from './config.js';
 import { createScheduleStore, buildQueue } from './schedules.js';
 import { inspectVerdict } from './inspect.js';
@@ -123,14 +124,14 @@ app.use(express.json({ limit: '1mb' }));
 
 // ── state ──────────────────────────────────────────────────────────────
 
-/** The single active broadcast. One publisher is all Owncast accepts. */
+/** The single active broadcast. One publisher is all most receivers accept. */
 let engine = null;
 /**
  * The last engine built, alive or not. A finished broadcast keeps its
  * publisher for a few seconds to air what it had buffered, but the engine
  * slot is freed as soon as it ends — so without this handle the next
  * broadcast could open a second RTMP connection while the previous one is
- * still draining, and Owncast would go on showing the old programme.
+ * still draining, and the receiver would go on showing the old programme.
  */
 let lastEngine = null;
 /**
@@ -147,6 +148,13 @@ const movedLibrary = normalizeStoredLibrary();
 if (movedLibrary) {
   console.warn(`! migrated the ${movedLibrary} library into the new sources list`);
   saveConfig({ library: config.library });
+}
+// Likewise the pre-destinations RTMP target: folded into publish.rtmp, and
+// the legacy block leaves the file with this save.
+const movedPublish = normalizeStoredPublish();
+if (movedPublish) {
+  console.warn(`! ${movedPublish}`);
+  saveConfig({ publish: config.publish });
 }
 let library = makeLibrary(config);
 
@@ -421,41 +429,12 @@ function broadcast(type, payload) {
   }
 }
 
-// ── Owncast title sync ─────────────────────────────────────────────────
-//
-// Owncast's watch page shows one static stream title unless something sets
-// it. This pushes the on-air title (via the integrations API and the access
-// token from Settings) whenever the aired clip changes, so viewers see
-// "Show — S1E4" instead of whatever the stream was called last month.
-// Fire-and-forget: a failed sync is a log line, never a broken broadcast.
-
-let owncastTitleSent = null;
-function syncOwncastTitle() {
-  const oc = config.owncast ?? {};
-  if (!oc.apiUrl || !oc.accessToken || oc.syncTitle === false) return;
-  const title = streamStatus().playing?.title ?? null;
-  if (!title || title === owncastTitleSent) return;
-  owncastTitleSent = title;
-  fetch(`${String(oc.apiUrl).replace(/\/+$/, '')}/api/integrations/streamtitle`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${oc.accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ value: title }),
-  }).then((r) => {
-    if (!r.ok) dpush('warn', `Owncast title sync: HTTP ${r.status}`);
-  }).catch((err) => {
-    dpush('warn', `Owncast title sync failed: ${err.message}`);
-  });
-}
-
 // ── Streamingestarr metadata ───────────────────────────────────────────
 //
-// Structured now-playing/up-next/schedule pushes to our own receiver —
-// the un-flattened version of the Owncast title sync, riding the SAME
-// engine events (never a second clip-change source). Fire-and-forget
-// with short timeouts: a dead receiver is a log line, never a stall.
+// Structured now-playing/up-next/schedule pushes to our own receiver,
+// riding the SAME engine events as the panel's stream status (never a
+// second clip-change source). Fire-and-forget with short timeouts: a dead
+// receiver is a log line, never a stall.
 
 /**
  * Every active receiver. Two shapes coexist: the original single
@@ -1070,11 +1049,11 @@ function buildEngine({ profile, selection }) {
   wirePreview(e);
 
   e.on('status', () => {
-    broadcast('stream', streamStatus()); syncOwncastTitle();
+    broadcast('stream', streamStatus());
     sgSync(); sgQueue({ now: true, schedule: true });
   });
   e.on('nowplaying', () => {
-    broadcast('stream', streamStatus()); syncOwncastTitle();
+    broadcast('stream', streamStatus());
     // Re-push, not just sync: the spawn emits this when the on-air colour
     // range settles, and the receiver only learns it from a fresh push.
     // The beat-collapse in sgQueue keeps this cheap.
@@ -1130,7 +1109,7 @@ function buildEngine({ profile, selection }) {
     if (engine === e) engine = null;
     broadcast('stream', streamStatus());
   });
-  // A publisher that dies mid-broadcast (Owncast hung up, network dropped)
+  // A publisher that dies mid-broadcast (the receiver hung up, network dropped)
   // is just as terminal as 'fatal' — without releasing the engine here,
   // every later start bounces off "Already streaming" until the service
   // restarts.
@@ -1270,11 +1249,6 @@ function redactedConfig() {
   return {
     ...config,
     auth: { configured: Boolean(passwordHash()) },
-    owncast: {
-      ...config.owncast,
-      streamKey: config.owncast.streamKey ? '__SET__' : '',
-      accessToken: config.owncast.accessToken ? '__SET__' : '',
-    },
     streamingestarr: {
       ...config.streamingestarr,
       accessToken: config.streamingestarr?.accessToken ? '__SET__' : '',
@@ -1527,10 +1501,7 @@ app.put('/api/config', (req, res) => {
         : (r?.accessToken ?? ''),
     }));
   }
-  for (const [section, field] of [['owncast', 'streamKey'], ['owncast', 'accessToken'],
-    ['streamingestarr', 'accessToken']]) {
-    if (patch[section]?.[field] === '__SET__') delete patch[section][field];
-  }
+  if (patch.streamingestarr?.accessToken === '__SET__') delete patch.streamingestarr.accessToken;
   if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, publishConfig());
   /**
    * The bank is sized from these, so they are clamped here as well as in the
@@ -1857,49 +1828,35 @@ app.delete('/api/overlay/images/:name', (req, res) => {
 
 /**
  * "Test connection" / "Send 30s to watch". Tests the PRIMARY publish
- * destination: an optional `publish` block in the body (the settings form,
- * secrets may be "__SET__" for "use the stored one"), else what is
- * configured. The legacy owncast.rtmpUrl/streamKey pair still works when
- * given explicitly — setup no longer writes it, so reading only that
- * answered 400 on every current install.
+ * destination: an optional `publish` block in the body (the settings form
+ * or the wizard, secrets may be "__SET__" for "use the stored one"), else
+ * what is configured.
  */
-app.post('/api/check/owncast', async (req, res) => {
+app.post('/api/check/destination', async (req, res) => {
   const b = req.body ?? {};
   if (engine) return res.status(409).json({ error: 'Stop the current broadcast first' });
 
+  const pub = b.publish && typeof b.publish === 'object'
+    ? restorePublishSecrets({ ...publishDefaults(), ...b.publish }, publishConfig())
+    : publishConfig();
+  const tested = pub; // the block whose secrets the error text must never show
   let target;
-  let tested = null; // the block whose secrets the error text must never show
-  if (b.rtmpUrl) {
-    const key = b.streamKey === '__SET__' || !b.streamKey ? config.owncast.streamKey : b.streamKey;
-    if (!key) return res.status(400).json({ error: 'Address and stream key are required' });
-    try {
-      target = `${assertRtmpUrl(b.rtmpUrl)}/${key}`;
-    } catch (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    tested = { ...publishDefaults(), rtmp: { url: b.rtmpUrl, key } };
-  } else {
-    const pub = b.publish && typeof b.publish === 'object'
-      ? restorePublishSecrets({ ...publishDefaults(), ...b.publish }, publishConfig())
-      : publishConfig();
-    tested = pub;
-    let primary;
-    try {
-      // The protocol as chosen, not codec-shifted: the operator is testing
-      // the target they picked.
-      [primary] = destinations(pub, 'h264');
-      target = targetUrl(primary.protocol, primary.creds);
-    } catch (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    if (primary.protocol !== 'rtmp' && primary.protocol !== 'rtmps') {
-      return res.status(400).json({ error: 'Test is available for RTMP targets' });
-    }
+  let primary;
+  try {
+    // The protocol as chosen, not codec-shifted: the operator is testing
+    // the target they picked.
+    [primary] = destinations(pub, 'h264');
+    target = targetUrl(primary.protocol, primary.creds);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (primary.protocol !== 'rtmp' && primary.protocol !== 'rtmps') {
+    return res.status(400).json({ error: 'Test is available for RTMP targets' });
   }
   // Two different questions. "Does it accept us" only needs a few seconds and
   // no pacing. "Can I watch it appear" needs realtime pacing AND enough
-  // content for Owncast to build a playable HLS playlist — it buffers several
-  // segments before a viewer sees anything.
+  // content for an HLS receiver to build a playable playlist — it buffers
+  // several segments before a viewer sees anything.
   const watch = Boolean(req.body?.watch);
   const seconds = watch ? 30 : 3;
   const t0 = Date.now();
@@ -1911,38 +1868,6 @@ app.post('/api/check/owncast', async (req, res) => {
   res.json(result.ok
     ? { ok: true, ms: Date.now() - t0, seconds }
     : { ok: false, error: redactSecrets(redact(result.error), tested) });
-});
-
-// Proves the title sync end to end: same endpoint, same auth the live sync
-// uses, so a green result here means episode titles will reach the watch
-// page. Uses the on-air title when live, a labelled test value otherwise.
-app.post('/api/check/owncast-title', async (req, res) => {
-  const apiUrl = String(req.body?.apiUrl ?? config.owncast.apiUrl ?? '').replace(/\/+$/, '');
-  const token = req.body?.accessToken && req.body.accessToken !== '__SET__'
-    ? req.body.accessToken
-    : config.owncast.accessToken;
-  if (!apiUrl) return res.status(400).json({ ok: false, error: 'Owncast address is required' });
-  if (!token) return res.status(400).json({ ok: false, error: 'Access token is required' });
-  const value = streamStatus().playing?.title ?? 'Streamerr — title sync test';
-  try {
-    const r = await fetch(`${apiUrl}/api/integrations/streamtitle`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value }),
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!r.ok) {
-      return res.json({
-        ok: false,
-        error: r.status === 401
-          ? 'Owncast rejected the token (HTTP 401) — check it has the "change stream title" permission'
-          : `Owncast answered HTTP ${r.status}`,
-      });
-    }
-    res.json({ ok: true, value });
-  } catch (err) {
-    res.json({ ok: false, error: `Could not reach ${apiUrl}: ${err.cause?.message ?? err.message}` });
-  }
 });
 
 /**
@@ -2628,11 +2553,11 @@ const startStreamInner = async (req, res) => {
   await tuneProfile(profile, selection, items[0]?.srcPath ?? null);
 
   /**
-   * Pre-flight the destination actually configured, not the legacy field.
+   * Pre-flight the destination actually configured.
    *
-   * This still called rtmpTarget(), which reads owncast.rtmpUrl — so an
+   * This once read the legacy single RTMP field (since removed) — so an
    * install set up through the publish block refused to start with
-   * "owncast.rtmpUrl is not configured" while being perfectly configured.
+   * "not configured" while being perfectly configured.
    *
    * Only RTMP is dialled: the tester speaks the RTMP handshake and nothing
    * else, and a check that cannot understand SRT would fail a working
@@ -3245,6 +3170,11 @@ const encFixed = normalizeStoredEncoder();
 if (encFixed) {
   console.warn(`! repaired encoder config: ${encFixed.join(', ')}`);
   saveConfig({ encoder: config.encoder });
+}
+const leftovers = normalizeStoredLeftovers();
+if (leftovers) {
+  console.warn(`! dropped unused config block${leftovers.length > 1 ? 's' : ''}: ${leftovers.join(', ')}`);
+  saveConfig({});
 }
 /**
  * Fills in generated stills off the browsing path. Yields to a broadcast:

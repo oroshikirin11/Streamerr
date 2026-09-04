@@ -74,7 +74,7 @@ export const api = {
   config: () => request('GET', '/api/config'),
   saveConfig: (patch) => request('PUT', '/api/config', patch),
 
-  checkOwncast: (body) => request('POST', '/api/check/owncast', body),
+  checkDestination: (body) => request('POST', '/api/check/destination', body),
   checkEncoders: () => request('GET', '/api/check/encoders'),
   checkLibrary: (body) => request('POST', '/api/check/library', body),
   matchLibrary: (body) => request('POST', '/api/match/library', body),

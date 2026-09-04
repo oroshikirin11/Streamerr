@@ -10,8 +10,8 @@ authoritative contract lives in the receiver repo:
 
 ## Settings surface
 
-A "Streamingestarr" entry on the services/settings page, exactly like the
-Owncast integration: **receiver URL + access token** (created in the
+A "Streamingestarr" entry on the services/settings page:
+**receiver URL + access token** (created in the
 receiver's admin, scope `CAN_SEND_SYSTEM_MESSAGES`). All calls are
 `Authorization: Bearer <token>`.
 
@@ -45,8 +45,8 @@ Use it to validate the token and pick transport per codec:
    The receiver stamps receipt time and viewers extrapolate progress — no
    periodic pushes needed. `announce:true` (clip starts only) posts a
    "Now playing — …" line in the receiver's chat.
-   Everything needed already exists in the engine — this is the same data
-   that drives the Owncast stream-title sync, un-flattened.
+   Everything needed already exists in the engine — the same clip-change
+   events that update the panel's stream status.
 2. **Schedule** — `POST /api/integrations/metadata/schedule`
    `{items:[{title, subtitle, startsAt(ISO)}]}` whenever scheduled starts
    change, and re-push after receiver restarts (its list is in-memory;

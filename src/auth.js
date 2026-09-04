@@ -1,7 +1,7 @@
 /**
  * Password auth for the panel.
  *
- * The panel can start and stop broadcasts and holds the Owncast stream key
+ * The panel can start and stop broadcasts and holds the stream key
  * and Jellyfin API key, so it is not something to leave open on a port.
  *
  * Hashes with Argon2id, which node 26 provides in core — so no native addon,

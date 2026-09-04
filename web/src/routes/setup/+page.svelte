@@ -17,9 +17,9 @@
   let rtmpUrl = $state('');
   let streamKey = $state('');
   /**
-   * The wizard writes the same publish block the settings page does, rather
-   * than the legacy owncast fields — otherwise a new install could only ever
-   * be set up for RTMP and had to go and find Settings to use anything else.
+   * The wizard writes the same publish block the settings page does — one
+   * slot per protocol, so a new install can be set up for any of them
+   * without going to find Settings.
    */
   const PROTOCOLS = [
     { id: 'tcp', label: 'TCP' }, { id: 'rtmp', label: 'RTMP' },
@@ -59,11 +59,19 @@
     return { publish: { protocol, [protocol]: slot } };
   }
   let showKey = $state(false);
-  // Whether a key is already stored. The value itself never reaches the
-  // browser, so the field stays empty and blank means "keep what's there" —
-  // putting the sentinel in the input makes it look like a 7-character key.
-  let keyStored = $state(false);
-  let owncastResult = $state(null);
+  /**
+   * Whether a secret is already stored for the chosen protocol. The value
+   * itself never reaches the browser — the server sends the sentinel — so
+   * the field stays empty and blank means "keep what's there"; putting the
+   * sentinel in the input would make it look like a 7-character key.
+   * Derived from the publish slot, per protocol: switching to SRT asks
+   * about SRT's stream id and passphrase, not RTMP's key.
+   */
+  const stored = (field) => cfg?.publish?.[protocol]?.[field] === '__SET__';
+  const keyStored = $derived(protocol !== 'srt' && stored('key'));
+  const passStored = $derived((protocol === 'srt' || protocol === 'tcp') && stored('passphrase'));
+  const streamIdStored = $derived(protocol === 'srt' && stored('streamId'));
+  let destResult = $state(null);
   let testing = $state(false);
 
   // step 2
@@ -246,14 +254,13 @@
   onMount(async () => {
     try {
       cfg = await api.config();
-      // Prefilled from publish, falling back to the legacy field. Reading
-      // only the legacy one showed an empty box for an install configured
-      // the new way — and step one then wrote that emptiness back.
+      // Prefilled from the publish block, so re-running setup shows what
+      // is configured rather than an empty box that step one would then
+      // write back as emptiness.
       protocol = cfg.publish?.protocol || 'rtmp';
       codec = cfg.encoder?.codec || 'h264';
-      rtmpUrl = cfg.publish?.[protocol]?.url || cfg.owncast.rtmpUrl || '';
+      rtmpUrl = cfg.publish?.[protocol]?.url || '';
       srtUrl = cfg.publish?.srt?.url || '';
-      keyStored = cfg.owncast.streamKey === '__SET__';
       streamKey = '';
       backend = cfg.encoder.backend;
       width = cfg.encoder.width; height = cfg.encoder.height;
@@ -305,16 +312,22 @@
 
   const parseList = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
-  async function testOwncast(watch = false) {
-    testing = watch ? 'watch' : 'quick'; owncastResult = null;
+  /**
+   * Tests the destination as the form has it: the typed key, or the
+   * sentinel so the server uses the stored one when the field is blank.
+   */
+  async function testDestination(watch = false) {
+    testing = watch ? 'watch' : 'quick'; destResult = null;
     try {
-      owncastResult = await api.checkOwncast({
-        rtmpUrl,
-        streamKey: streamKey || (keyStored ? '__SET__' : ''),
+      destResult = await api.checkDestination({
+        publish: {
+          protocol,
+          [protocol]: { url: rtmpUrl.trim(), key: streamKey.trim() || (keyStored ? '__SET__' : '') },
+        },
         watch,
       });
     } catch (err) {
-      owncastResult = { ok: false, error: err.message };
+      destResult = { ok: false, error: err.message };
     } finally { testing = ''; }
   }
 
@@ -422,7 +435,7 @@
     {#if step === 0}
       <h2>Where does the stream go?</h2>
       <p class="muted">
-        Owncast speaks RTMP; pick RTMPS if your server requires TLS. SRT and
+        Most receivers speak RTMP; pick RTMPS if yours requires TLS. SRT and
         TCP carry every codec (H.265, AV1) — SRT for relays, TCP for a link
         whose packet loss shows up as picture artifacts. You can change this
         later and add more destinations in Settings.
@@ -450,9 +463,10 @@
         <input bind:value={srtUrl} placeholder="srt://relay.example.com:9000" spellcheck="false" />
         <label>Stream ID <span class="muted small">optional</span></label>
         <input bind:value={srtStreamId} spellcheck="false"
-               placeholder="e.g. #!::r=live/stream,m=publish" />
+               placeholder={streamIdStored ? 'leave blank to keep the saved stream ID' : 'e.g. #!::r=live/stream,m=publish'} />
         <label>Passphrase <span class="muted small">optional, 10–79 characters</span></label>
-        <input type="password" bind:value={srtPassphrase} placeholder="encrypts the link" />
+        <input type="password" bind:value={srtPassphrase}
+               placeholder={passStored ? 'leave blank to keep the saved passphrase' : 'encrypts the link'} />
         <p class="muted small">
           The connection test below only speaks RTMP, so it is not offered for
           SRT — finish setup and start a broadcast to check it.
@@ -467,11 +481,11 @@
       <div class="row">
         {#if showKey}
           <input bind:value={streamKey}
-                 placeholder={keyStored ? 'leave blank to keep the saved key' : 'from Owncast admin'}
+                 placeholder={keyStored ? 'leave blank to keep the saved key' : 'from your receiver'}
                  spellcheck="false" />
         {:else}
           <input type="password" bind:value={streamKey}
-                 placeholder={keyStored ? 'leave blank to keep the saved key' : 'from Owncast admin'} />
+                 placeholder={keyStored ? 'leave blank to keep the saved key' : 'from your receiver'} />
         {/if}
         {#if streamKey}
           <button onclick={() => (showKey = !showKey)}>{showKey ? 'Hide' : 'Show'}</button>
@@ -483,31 +497,32 @@
       {#if protocol === 'tcp'}
         <label>Passphrase <span class="muted small">optional, 10–79 characters, no spaces</span></label>
         <input type="password" bind:value={tcpPassphrase}
-               placeholder="if the receiver demands one" />
+               placeholder={passStored ? 'leave blank to keep the saved passphrase' : 'if the receiver demands one'} />
       {/if}
       {/if}
       {#if protocol !== 'srt' && protocol !== 'tcp'}
       <div class="row">
-        <button onclick={() => testOwncast(false)} disabled={!!testing || !rtmpUrl}>
+        <button onclick={() => testDestination(false)} disabled={!!testing || !rtmpUrl}>
           {testing === 'quick' ? 'Checking…' : 'Test connection'}
         </button>
-        <button onclick={() => testOwncast(true)} disabled={!!testing || !rtmpUrl}>
+        <button onclick={() => testDestination(true)} disabled={!!testing || !rtmpUrl}>
           {testing === 'watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
         </button>
       </div>
       <p class="muted small">
         The quick check just proves the key is accepted. To actually see colour
-        bars on your Owncast page, use the 30-second version &mdash; Owncast
-        buffers several seconds of video before it can play anything, so a
-        short burst is accepted and then gone before it ever becomes visible.
+        bars on the receiver's watch page, use the 30-second version &mdash; an
+        HLS receiver buffers several seconds of video before it can play
+        anything, so a short burst is accepted and then gone before it ever
+        becomes visible.
       </p>
       {/if}
-      {#if owncastResult}
-        <div class="result" class:bad={!owncastResult.ok}>
-          {#if owncastResult.ok}
-            Owncast accepted the stream — {owncastResult.seconds}s pushed in {(owncastResult.ms / 1000).toFixed(1)}s
+      {#if destResult}
+        <div class="result" class:bad={!destResult.ok}>
+          {#if destResult.ok}
+            The receiver accepted the stream — {destResult.seconds}s pushed in {(destResult.ms / 1000).toFixed(1)}s
           {:else}
-            {owncastResult.error}
+            {destResult.error}
           {/if}
         </div>
       {/if}

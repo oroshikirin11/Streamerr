@@ -4,8 +4,8 @@
  *
  *   node src/cli.js probe                    which encoders actually work here
  *   node src/cli.js tracks <file>            audio/subtitle tracks and what we'd pick
- *   node src/cli.js selftest                 gapless chain test, no Owncast needed
- *   node src/cli.js stream <file...>         stream files to the configured Owncast
+ *   node src/cli.js selftest                 gapless chain test, no receiver needed
+ *   node src/cli.js stream <file...>         stream files to the configured destination
  */
 
 import { spawn } from 'child_process';
@@ -13,8 +13,10 @@ import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { tmpdir, cpus } from 'os';
 import { join, resolve, basename as pathBasename } from 'path';
 import {
-  config, ensureDirs, rtmpTarget, rtmpTargetRedacted, redact, CONFIG_PATH,
+  config, ensureDirs, redact, CONFIG_PATH, normalizeStoredPublish,
+  publishDestinations, publishTargetsRedacted,
 } from './config.js';
+import { targetUrl } from './publish.js';
 import {
   probeAll, selectBackend, probeBackend, ffmpegAvailable, probeConcatCapabilities,
 } from './ffmpeg/probe.js';
@@ -28,6 +30,30 @@ import {
 } from './ffmpeg/tracks.js';
 
 const [, , cmd, ...args] = process.argv;
+
+// A config from before the publish block keeps its target in the legacy
+// field; fold it in for this process (the server persists the move).
+normalizeStoredPublish();
+
+/**
+ * The primary destination from the publish block, as the URL ffmpeg gets
+ * and a redacted line for the console. Throws the settings-page wording
+ * ("The server address is empty") when nothing is configured.
+ */
+function primaryTarget() {
+  const [primary] = publishDestinations();
+  return {
+    protocol: primary.protocol,
+    url: targetUrl(primary.protocol, primary.creds),
+    redacted: publishTargetsRedacted()[0],
+  };
+}
+
+const CONNECT_HINTS = [
+  '  • wrong stream key            → check the stream key in publish.<protocol>.key',
+  '  • another publisher connected → most receivers allow one publisher at a time',
+  '  • wrong path                  → RTMP servers usually want rtmp://host:1935/live',
+];
 
 const die = (msg) => { console.error(`\n✗ ${redact(String(msg))}\n`); process.exit(1); };
 const basename = (p) => pathBasename(p);
@@ -117,15 +143,19 @@ async function cmdTracks() {
 async function cmdTestConnect() {
   let target;
   try {
-    target = rtmpTarget();
+    target = primaryTarget();
   } catch (err) {
-    die(`${err.message}\n  Copy config.example.json and fill it in.`);
+    die(`${err.message}\n  Copy config.example.json and fill in the publish block.`);
+  }
+  if (target.protocol !== 'rtmp' && target.protocol !== 'rtmps') {
+    die(`The connection test only speaks RTMP; the configured destination is ${target.protocol}.\n`
+      + '  Start a broadcast to check it.');
   }
 
-  console.log(`\ntarget: ${rtmpTargetRedacted()}`);
+  console.log(`\ntarget: ${target.redacted}`);
   console.log('pushing 2s of colour bars …\n');
 
-  const res = await testRtmpConnection(target);
+  const res = await testRtmpConnection(target.url);
   if (res.ok) {
     console.log('✓ accepted — the server took the stream.\n');
     console.log('  It should have flickered live for ~2s. If it did not, the');
@@ -135,9 +165,8 @@ async function cmdTestConnect() {
 
   console.error(`✗ rejected\n\n${redact(res.error)}\n`);
   console.error('Common causes:');
-  console.error('  • wrong stream key            → check owncast.streamKey');
-  console.error('  • another publisher connected → Owncast allows only one at a time');
-  console.error('  • wrong path                  → Owncast requires rtmp://host:1935/live\n');
+  for (const h of CONNECT_HINTS) console.error(h);
+  console.error('');
   process.exitCode = 1;
 }
 
@@ -149,7 +178,7 @@ async function cmdTestConnect() {
  * later links written only after ffmpeg has already started, and the total
  * duration comes out exact — from deliberately mismatched sources.
  *
- * Runs entirely locally. No Owncast, no network.
+ * Runs entirely locally. No receiver, no network.
  */
 async function cmdSelftest() {
   if (!(await ffmpegAvailable())) die('ffmpeg is not on PATH.');
@@ -807,9 +836,12 @@ async function cmdStream() {
 
   let target;
   try {
-    target = rtmpTarget();
+    target = primaryTarget();
   } catch (err) {
-    die(`${err.message}\n  Copy config.example.json and fill it in.`);
+    die(`${err.message}\n  Copy config.example.json and fill in the publish block.`);
+  }
+  if (target.protocol !== 'rtmp' && target.protocol !== 'rtmps') {
+    die(`This command publishes over RTMP only; the configured destination is ${target.protocol}.`);
   }
 
   ensureDirs();
@@ -825,7 +857,7 @@ async function cmdStream() {
   const subs = await listSubtitles(paths[0], tracks);
   const selection = selectTracks(tracks, subs, config.tracks ?? {});
 
-  console.log(`\ntarget  : ${rtmpTargetRedacted()}`);
+  console.log(`\ntarget  : ${target.redacted}`);
   console.log(`encoder : ${profile.backend}`);
   console.log(`output  : ${profile.width}x${profile.height}@${profile.fps} `
     + `${profile.videoBitrate}  GOP ${profile.gopSeconds}s`);
@@ -836,19 +868,17 @@ async function cmdStream() {
   // stream key produces a perfectly healthy-looking encode that never
   // arrives anywhere.
   process.stdout.write('checking the server accepts us … ');
-  const conn = await testRtmpConnection(target);
+  const conn = await testRtmpConnection(target.url);
   if (!conn.ok) {
     console.log('rejected\n');
-    die(`Owncast would not accept the stream.\n\n${conn.error}\n\n`
-      + '  • wrong stream key            → check owncast.streamKey\n'
-      + '  • another publisher connected → Owncast allows only one at a time\n'
-      + '  • wrong path                  → Owncast requires rtmp://host:1935/live');
+    die(`The receiver would not accept the stream.\n\n${redact(conn.error)}\n\n`
+      + CONNECT_HINTS.join('\n'));
   }
   console.log('ok\n');
 
   const engine = new PlayoutEngine({
     workDir: config.paths.cache,
-    target,
+    target: target.url,
     profile,
     selection,
     endBehavior: 'end',
@@ -928,11 +958,11 @@ streamerr
 
   probe                 test which encoders actually work on this machine
   tracks <file>         list audio/subtitle tracks and what would be picked
-  testconnect           check Owncast accepts our stream key
-  selftest              prove gapless chaining locally (no Owncast needed)
+  testconnect           check the configured destination accepts our stream key
+  selftest              prove gapless chaining locally (no receiver needed)
   pipetest              prove seek/pause keep the connection alive
   benchmark <file>      measure encode speed with and without subtitles
-  stream <file...>      stream files to the configured Owncast
+  stream <file...>      stream files to the configured destination
 `);
   process.exit(cmd ? 1 : 0);
 }

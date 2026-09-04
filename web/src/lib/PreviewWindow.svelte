@@ -277,7 +277,7 @@
   {/if}
 
   <div class="bar">
-    <span class="lv" title="The exact stream Owncast is receiving — a few seconds ahead of what viewers see">
+    <span class="lv" title="The exact stream the receiver is getting — a few seconds ahead of what viewers see">
       <span class="lvdot" class:on={connected}></span>Preview
     </span>
     <div class="grow"></div>

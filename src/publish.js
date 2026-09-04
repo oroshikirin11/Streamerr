@@ -19,7 +19,7 @@ export const SECRET_FIELDS = ['key', 'passphrase', 'streamId'];
 /**
  * Credentials are stored PER PROTOCOL, side by side.
  *
- * Switching from RTMP to SRT must not cost the operator their Owncast key —
+ * Switching from RTMP to SRT must not cost the operator their RTMP key —
  * they are two different sets of credentials for two different servers, and
  * a switch is usually a trial rather than a migration. Keeping them apart
  * means switching back is free, and an operator who wants to overwrite one

@@ -10,10 +10,6 @@
   let saved = $state('');
   let testing = $state('');
 
-  // Secrets are write-only: the server returns a sentinel, never the value.
-  let keyStored = $state(false);
-  let streamKey = $state('');
-
   const PROTOCOL_INFO = [
     { id: 'tcp', label: 'TCP' },
     { id: 'rtmp', label: 'RTMP' },
@@ -200,7 +196,7 @@
    * never appears, and editing means clearing a fake string first. So the
    * field is blanked for display and the sentinel is put back on save for
    * anything the operator did not type into — which is exactly what the
-   * server expects, and how the Owncast key field has always behaved.
+   * server expects, and how the stream key field has always behaved.
    */
   const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key', 'passphrase'] };
   let publishSaved = $state({});
@@ -308,13 +304,10 @@
   function removeExtra(id) {
     cfg.publish.extras = (cfg.publish.extras ?? []).filter((e) => e.id !== id);
   }
-  let tokenStored = $state(false);
-  let accessToken = $state('');
-  let titleTest = $state(null);
   let jfKeyStored = $state(false);
   let jellyfinKey = $state('');
 
-  let owncastResult = $state(null);
+  let destResult = $state(null);
   let sgTests = $state({});
   let sgSaved = $state({});
   let libResult = $state(null);
@@ -531,8 +524,6 @@
       cfg.buffer = { seconds: 15, applySeconds: 15, studioWarnings: true, ...(cfg.buffer ?? {}) };
       bufferSel = BUFFER_PRESETS.includes(cfg.buffer.seconds)
         ? String(cfg.buffer.seconds) : 'custom';
-      keyStored = cfg.owncast.streamKey === '__SET__';
-      tokenStored = cfg.owncast.accessToken === '__SET__';
       // migrate: a legacy single receiver becomes row one of the list
       if (!(cfg.streamingestarr?.receivers ?? []).length && cfg.streamingestarr?.url) {
         cfg.streamingestarr.receivers = [{
@@ -546,8 +537,6 @@
         if (r.accessToken === '__SET__') { seen[r.id] = true; r.accessToken = ''; }
       }
       sgSaved = seen;
-      accessToken = '';
-      streamKey = '';
       jellyfinKey = '';
       metaKey = '';
       metaKeys = {};
@@ -702,15 +691,6 @@
           })),
         };
       }
-      if (section === 'owncast') {
-        patch.owncast = {
-          rtmpUrl: cfg.owncast.rtmpUrl,
-          apiUrl: cfg.owncast.apiUrl,
-          syncTitle: cfg.owncast.syncTitle !== false,
-          ...(streamKey ? { streamKey } : {}),
-          ...(accessToken ? { accessToken } : {}),
-        };
-      }
       if (section === 'encoder') {
         patch.encoder = {
           backend: cfg.encoder.backend,
@@ -782,8 +762,6 @@
       if (section === 'dev') {
         window.dispatchEvent(new CustomEvent('jsr-devmode', { detail: cfg.devMode }));
       }
-      if (streamKey) { keyStored = true; streamKey = ''; }
-      if (accessToken) { tokenStored = true; accessToken = ''; }
       if (jellyfinKey) { jfKeyStored = true; jellyfinKey = ''; }
       if (section === 'library') {
         // Every typed catalogue key is now stored server-side: show the
@@ -803,14 +781,13 @@
   /**
    * Pushes a short test feed to the primary destination as the form has
    * it — unsaved edits included, untouched secrets as the sentinel so the
-   * server fills in what is stored. The legacy owncast block is empty on
-   * a current install; the publish block is where the destination lives.
+   * server fills in what is stored.
    */
-  async function testOwncast(watch = false) {
-    testing = watch ? 'owncast-watch' : 'owncast'; owncastResult = null;
+  async function testDestination(watch = false) {
+    testing = watch ? 'destination-watch' : 'destination'; destResult = null;
     try {
-      owncastResult = await api.checkOwncast({ publish: maskPublish(cfg.publish), watch });
-    } catch (err) { owncastResult = { ok: false, error: err.message }; }
+      destResult = await api.checkDestination({ publish: maskPublish(cfg.publish), watch });
+    } catch (err) { destResult = { ok: false, error: err.message }; }
     finally { testing = ''; }
   }
 
@@ -1085,7 +1062,7 @@
 
     <label>Nickname <span class="muted small">optional — how this destination appears in logs and the on-air badge</span></label>
     <input bind:value={cfg.publish.name} spellcheck="false" maxlength="40"
-           placeholder="e.g. Owncast VPS" />
+           placeholder="e.g. Cinema VPS" />
 
     <label>Room <span class="muted small">optional override — Streamingestarr detects the room from the stream key; set this only to force one</span></label>
     <input bind:value={cfg.publish.channel} spellcheck="false" maxlength="40"
@@ -1130,19 +1107,19 @@
     </p>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('publish')}>Save</button>
-      <button onclick={() => testOwncast(false)} disabled={!!testing}>
-        {testing === 'owncast' ? 'Checking…' : 'Test connection'}
+      <button onclick={() => testDestination(false)} disabled={!!testing}>
+        {testing === 'destination' ? 'Checking…' : 'Test connection'}
       </button>
-      <button onclick={() => testOwncast(true)} disabled={!!testing}>
-        {testing === 'owncast-watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
+      <button onclick={() => testDestination(true)} disabled={!!testing}>
+        {testing === 'destination-watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
       </button>
       {#if saved === 'publish'}<span class="ok small">Saved</span>{/if}
     </div>
-    {#if owncastResult}
-      <div class="result" class:bad={!owncastResult.ok}>
-        {owncastResult.ok
-          ? `Accepted — ${owncastResult.seconds}s pushed in ${(owncastResult.ms / 1000).toFixed(0)}s`
-          : owncastResult.error}
+    {#if destResult}
+      <div class="result" class:bad={!destResult.ok}>
+        {destResult.ok
+          ? `Accepted — ${destResult.seconds}s pushed in ${(destResult.ms / 1000).toFixed(0)}s`
+          : destResult.error}
       </div>
     {/if}
   </section>
@@ -1154,7 +1131,7 @@
       Our own receiver. Beyond the video, it takes structured
       now&#8209;playing, up&#8209;next and schedule metadata &mdash; the
       theater page shows real titles with a live progress ring instead of a
-      stream title. Works alongside the Owncast integration.
+      stream title. Independent of where the video goes.
     </p>
 
     <label style="display:flex; align-items:center; gap:8px;">
@@ -1221,70 +1198,6 @@
     </div>
   </section>
 
-  <!-- Owncast -->
-  <section class="subcard">
-    <h3>Owncast title sync</h3>
-
-    <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
-      <input type="checkbox" bind:checked={cfg.owncast.syncTitle} style="width:auto" />
-      Update the Owncast stream title as episodes change
-    </label>
-    <p class="muted small">
-      Viewers see the episode ("Show &mdash; S1E4") on the watch page.
-    </p>
-
-    {#if cfg.owncast.syncTitle !== false}
-      <label>Owncast address (web)</label>
-      <input bind:value={cfg.owncast.apiUrl} spellcheck="false"
-             placeholder="https://stream.example.com" />
-
-      <label>Access token</label>
-      <input type="password" bind:value={accessToken}
-             placeholder={tokenStored ? 'leave blank to keep the saved token' : 'Owncast admin → Integrations → Access Tokens'} />
-      <p class="muted small">
-        Create it in the Owncast admin under Integrations, with the
-        "can change stream title" permission.
-        {#if tokenStored && !accessToken}A token is saved.{/if}
-      </p>
-
-      {#if !cfg.owncast.apiUrl || (!tokenStored && !accessToken)}
-        <!-- The switch is on but the sync has nothing to talk to, and it
-             fails silently by design. Say so before it is relied on. -->
-        {@const missing = [
-          !cfg.owncast.apiUrl && 'address',
-          !tokenStored && !accessToken && 'token',
-        ].filter(Boolean)}
-        <p class="warnline">
-          Not active yet — the {missing.join(' and ')}
-          {missing.length > 1 ? 'are' : 'is'} still empty, so nothing is sent.
-        </p>
-      {/if}
-
-      <div class="actions" style="margin-top:2px;">
-        <button onclick={async () => {
-          titleTest = null;
-          try { titleTest = await api.post('/api/check/owncast-title', {
-            apiUrl: cfg.owncast.apiUrl,
-            ...(accessToken ? { accessToken } : {}),
-          }); }
-          catch (err) { titleTest = { ok: false, error: err.message }; }
-        }} disabled={!!testing}>Test title sync</button>
-      </div>
-      {#if titleTest}
-        <div class="result" class:bad={!titleTest.ok}>
-          {titleTest.ok
-            ? `Owncast accepted the title — check the header of your watch page`
-            : titleTest.error}
-        </div>
-      {/if}
-    {/if}
-
-    <div class="actions">
-      <button class="primary" onclick={() => save('owncast')}>Save</button>
-      {#if saved === 'owncast'}<span class="ok small">Saved</span>{/if}
-    </div>
-  </section>
-
   </section>
 
   <!-- ===== Library: sources, metadata, languages, browsing ===== -->
@@ -1320,9 +1233,22 @@
         <button class:on={src.provider === 'smb'}
                 onclick={() => (src.provider = 'smb')}>SMB share
           <span class="tag">experimental</span></button>
+        {#if src.provider === 'jellyfin'}
+          <!-- A source from before media and catalogue were separate. It
+               keeps working as it is; the picker no longer offers it, so
+               it is shown selected and read-only rather than as nothing. -->
+          <button class="on" disabled>Jellyfin
+            <span class="tag">legacy</span></button>
+        {/if}
       </div>
 
-    {#if src.provider === 'smb'}
+    {#if src.provider === 'jellyfin'}
+      <p class="muted small" style="margin-top:6px;">
+        Streams straight from a Jellyfin server ({src.jellyfin?.url || 'address saved'}).
+        Still supported, but no longer editable here: to change it, add a
+        folder or SMB source and pick Jellyfin under Titles and artwork.
+      </p>
+    {:else if src.provider === 'smb'}
       <label>Server (hostname, IP, or a full smb:// address)</label>
       <input bind:value={src.smb.host} spellcheck="false"
              placeholder="nas.local  or  smb://user@nas/share/folder"
@@ -1412,7 +1338,7 @@
     <div class="srcfoot">
       {#if cfg.library.sources.length <= 1 && sel === 0}
         <button onclick={addSource}>Add another source</button>
-        <span class="muted small">A Jellyfin server and a folder can run side by side.</span>
+        <span class="muted small">Folders and SMB shares can run side by side, each with its own catalogue.</span>
       {:else}
         <button class="danger" onclick={() => removeSource(sel)}>Remove this source</button>
       {/if}
@@ -1581,8 +1507,9 @@
       </div>
     {/if}
     <p class="muted small">
-      Rescans Jellyfin sources and reloads the shelves, so new episodes appear
-      on their own.
+      Re-reads every source and rebuilds the shelves on this timer, so new
+      files appear without a visit to the panel. A legacy Jellyfin source is
+      asked to rescan its library first.
     </p>
       <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('autoscan')}>Save</button>
@@ -1687,6 +1614,10 @@
           <input class="exact" type="number" min="1" max="60" aria-label="Exact keyframe interval"
                  bind:value={cfg.encoder.gopSeconds} />
         {/if}
+        <p class="muted small">
+          HLS receivers cut segments on keyframes; 2 s is the common default.
+          A longer interval makes segments longer and start-up slower.
+        </p>
       </div>
     </div>
     <label>Scaling</label>
@@ -1746,12 +1677,6 @@
       that, so more bits buy upload, not quality. Above your upload speed,
       viewers stutter.
     </p>
-    <p class="muted small">
-      Must divide Owncast&rsquo;s segment length. Two seconds is its recommendation;
-      changing it can break segmenting.
-    </p>
-
-
     <label>Encoder</label>
     {#if encoderList.length}
       <ul class="enc">
@@ -2098,7 +2023,7 @@
       Floating preview window while broadcasting
     </label>
     <p class="muted small">
-      The exact stream Owncast receives, straight from the encoder. No extra
+      The exact stream the receiver gets, straight from the encoder. No extra
       encoding, just its bitrate to each viewer.
     </p>
       <div class="row" style="margin-top:12px">

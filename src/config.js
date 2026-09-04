@@ -1,7 +1,7 @@
 /**
  * Config loading.
  *
- * Everything secret — Owncast stream key, Jellyfin API key, server addresses —
+ * Everything secret — stream keys, Jellyfin API key, server addresses —
  * lives in config.json, which is gitignored. The repo must stay publishable,
  * so nothing here carries a real default.
  */
@@ -35,23 +35,15 @@ const DEFAULTS = {
    */
   publish: publishDefaults(),
   /**
-   * Streamingestarr — our own receiver (the Owncast replacement). Same
-   * integrations mechanism, plus structured now-playing/schedule metadata.
-   * Coexists with the Owncast block: both can be active at once.
+   * Streamingestarr — our own receiver. Beyond the video it takes
+   * structured now-playing/schedule metadata over its integrations API.
+   * Independent of the publish block: the video goes wherever `publish`
+   * says, the metadata goes here.
    */
   streamingestarr: {
     url: '',
     accessToken: '',
     enabled: true,
-  },
-  owncast: {
-    rtmpUrl: '',
-    streamKey: '',
-    apiUrl: '',
-    accessToken: '',
-    // Push the on-air title to Owncast's watch page as episodes change.
-    // Needs apiUrl + accessToken; does nothing without them.
-    syncTitle: true,
   },
   library: {
     /**
@@ -170,13 +162,6 @@ const DEFAULTS = {
      * once, at connect.
      */
     frameSize: 'native',
-    // Retained for config compatibility only — the engine now ALWAYS
-    // extracts embedded subtitles before their first broadcast. Burning them
-    // straight from the container makes ffmpeg read the whole file a second
-    // time (+24% cost on remuxes) and never produces a frame at all on very
-    // large files, so this must not be disableable: a stale `false` saved by
-    // an older build put the engine into an endless startup loop.
-    extractSubtitles: true,
     // Chunk-encoding concurrency. Decided per clip by the engine — see
     // _chunkWorkers — because the right answer depends on whether THIS
     // clip can use the GPU compositor, which varies by file and by driver.
@@ -199,7 +184,6 @@ const DEFAULTS = {
   // the cache is disposable and gets cleared, and a logo the user uploaded
   // is not something to lose with it.
   paths: { cache: './cache', run: './run', overlays: './overlays' },
-  normalizer: { lookahead: 2, cacheLimitGB: 50 },
   // Run-ahead cache: when the encoders outpace the broadcast, let them
   // keep going and hold the finished chunks in RAM instead of throttling
   // at the bank. Seeks and skips into the cushion are instant. ramMB
@@ -332,7 +316,52 @@ export function normalizeStoredEncoder() {
     fixed.push(`device=${JSON.stringify(enc.device)}→/dev/dri/renderD128`);
     enc.device = '/dev/dri/renderD128';
   }
+  // Nothing has read this since subtitle extraction became unconditional
+  // (a stale `false` once looped the engine at startup). Dropped rather
+  // than carried forever.
+  if (enc.extractSubtitles !== undefined) {
+    fixed.push(`extractSubtitles=${JSON.stringify(enc.extractSubtitles)}→(removed)`);
+    delete enc.extractSubtitles;
+  }
   return fixed.length ? fixed : null;
+}
+
+/**
+ * Drop top-level blocks nothing reads any more.
+ *
+ * Unknown keys are otherwise kept verbatim — merge() copies whatever the
+ * file holds, and a stale block never breaks a load — so this is tidiness,
+ * not repair: `normalizer` had no reader left at all.
+ */
+export function normalizeStoredLeftovers() {
+  const dropped = [];
+  if (config.normalizer !== undefined) { delete config.normalizer; dropped.push('normalizer'); }
+  return dropped.length ? dropped : null;
+}
+
+/**
+ * Move the pre-publish-block credentials into `publish.rtmp`.
+ *
+ * Installs from before destinations existed kept their one RTMP target in
+ * `owncast.rtmpUrl/streamKey`. Every reader of that block is gone, so the
+ * pair is folded into the RTMP slot at load (only when that slot is empty —
+ * a filled slot is newer and wins) and the block is deleted; the next save
+ * writes the file without it. Returns a note for the log, or null.
+ */
+export function normalizeStoredPublish() {
+  const legacy = config.owncast;
+  if (!legacy || typeof legacy !== 'object') { delete config.owncast; return null; }
+  const pub = config.publish ?? (config.publish = publishDefaults());
+  let note = null;
+  if (legacy.rtmpUrl && !pub.rtmp?.url) {
+    pub.rtmp = { ...(pub.rtmp ?? {}), url: String(legacy.rtmpUrl), key: String(legacy.streamKey ?? '') };
+    if (!pub.protocol) pub.protocol = 'rtmp';
+    note = `moved the RTMP destination into publish.rtmp (${pub.rtmp.url})`;
+  } else if (legacy.rtmpUrl || legacy.streamKey || legacy.apiUrl || legacy.accessToken) {
+    note = 'dropped the unused legacy owncast block';
+  }
+  delete config.owncast;
+  return note;
 }
 
 /**
@@ -388,7 +417,7 @@ export function saveConfig(patch) {
   // .tmp from an interrupted save (or from a build before this was 0600)
   // keeps its old permissions and then gets renamed over config.json.
   try { unlinkSync(tmp); } catch { /* nothing to remove */ }
-  // 0600: this file holds the Owncast stream key in clear and the panel's
+  // 0600: this file holds the stream keys in clear and the panel's
   // password hash. On a shared host the default 0644 hands both to every
   // local account.
   writeFileSync(tmp, JSON.stringify(stripComments(merged), null, 2) + '\n', { mode: 0o600 });
@@ -418,43 +447,16 @@ function stripComments(obj) {
 }
 
 /**
- * Reject anything that is not an RTMP address.
- *
- * ffmpeg picks its OUTPUT PROTOCOL from the URL, and `-f flv` only chooses the
- * muxer — so a target of `file:///etc/cron.d/x` makes ffmpeg write a file
- * there instead of opening a socket, as the service user. The container runs
- * as root and bind-mounts the media tree, so that turned "can configure the
- * panel" into "can write anywhere". `http://` is the same primitive pointed at
- * the network. Only rtmp/rtmps ever reach ffmpeg as an output.
- */
-export function assertRtmpUrl(url) {
-  const s = String(url ?? '').trim();
-  if (!/^rtmps?:\/\/[^/\s]+/i.test(s)) {
-    throw new Error('The server address must start with rtmp:// or rtmps://');
-  }
-  return s.replace(/\/+$/, '');
-}
-
-/**
- * The full RTMP target. Kept out of logs and API responses — it embeds the
- * stream key, and RTMP carries it in the handshake as plaintext.
- */
-/**
  * Every destination this broadcast should reach: the selected protocol
- * first, then any enabled extras. Legacy owncast.rtmpUrl/streamKey are read
- * as the RTMP slot when publish has not been configured, so an existing
- * install keeps streaming without being touched.
+ * first, then any enabled extras. The full target URLs embed the stream
+ * key, so they are built by targetUrl() at the point of use and never
+ * stored or logged — see publish.js, which also refuses anything that is
+ * not an rtmp/rtmps/srt/tcp address (ffmpeg picks its OUTPUT PROTOCOL
+ * from the URL, so `file://` would make it write a file as the service
+ * user instead of opening a socket).
  */
 export function publishConfig(cfg = config) {
-  const pub = { ...publishDefaults(), ...(cfg.publish ?? {}) };
-  // An install that predates the publish block keeps its credentials in
-  // owncast.*. Resolving that HERE rather than only in the engine matters:
-  // the settings page reads this too, and reading the raw block showed an
-  // empty form for an install that was streaming perfectly well.
-  if (!pub.rtmp?.url && cfg.owncast?.rtmpUrl) {
-    pub.rtmp = { url: cfg.owncast.rtmpUrl, key: cfg.owncast.streamKey ?? '' };
-  }
-  return pub;
+  return { ...publishDefaults(), ...(cfg.publish ?? {}) };
 }
 
 export function publishDestinations(cfg = config, codec = null) {
@@ -474,19 +476,6 @@ export function publishTargetsRedacted(cfg = config) {
   }
 }
 
-export function rtmpTarget(cfg = config) {
-  if (!cfg.owncast.rtmpUrl) throw new Error('owncast.rtmpUrl is not configured');
-  const base = assertRtmpUrl(cfg.owncast.rtmpUrl);
-  if (!cfg.owncast.streamKey) throw new Error('owncast.streamKey is not configured');
-  return `${base}/${cfg.owncast.streamKey}`;
-}
-
-/** Same string with the key masked, safe for logs and the UI. */
-export function rtmpTargetRedacted(cfg = config) {
-  const base = (cfg.owncast.rtmpUrl || '').replace(/\/+$/, '');
-  return base ? `${base}/${'*'.repeat(8)}` : '(unconfigured)';
-}
-
 /**
  * Remove the stream key from arbitrary text.
  *
@@ -503,9 +492,9 @@ export function redact(text, cfg = config) {
   // and in `docker logs`. Mask it wherever it appears.
   out = out.replace(/([?&]t=)[0-9a-f]{32,}/gi, `$1${'*'.repeat(8)}`);
   // Every publish secret — each protocol's key/passphrase/stream id and
-  // every extra's — plus the legacy owncast key. Masking only the legacy
-  // key left an install set up through the publish block wide open.
-  return redactSecrets(out, publishConfig(cfg), [cfg.owncast?.streamKey]);
+  // every extra's. Masking only the chosen protocol's would leave the
+  // other slots, which ffmpeg never sees but the panel still stores, bare.
+  return redactSecrets(out, publishConfig(cfg));
 }
 
 export { CONFIG_PATH, ROOT };
