@@ -101,6 +101,11 @@
         const dur = it.duration ?? 0;
         const row = { ...it, segKey: seg.key, segName: seg.name, scheduleId: seg.scheduleId, dur };
         if (it.state === 'upcoming') upcoming.push(row);
+        // Episodes watched on an earlier night lie before their schedule's
+        // marker; only the first schedule's have a place on the strip. Any
+        // later one is preceded by other items, so its earlier episodes
+        // would land on top of them. The lineup still lists them.
+        else if (it.state === 'past' && seg !== segments[0]) continue;
         else before.push(row);
       }
     }
