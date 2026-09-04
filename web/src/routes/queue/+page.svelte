@@ -342,6 +342,7 @@
   }
   /** Drop on a row: before it. Drop on the segment itself: at the end. */
   async function rowDrop(e, seg, it = null) {
+    if (cardDrag || segDrag) return;   // a schedule drop: the segment handles it
     e.preventDefault();
     e.stopPropagation();
     if (!rowDrag || rowDrag.seg !== seg.key) { rowDrag = null; rowOver = null; return; }
@@ -844,7 +845,7 @@
       {/if}
     </div>
 
-    <div class="zone" class:drop={zoneOver && Boolean(cardDrag || segDrag)} class:armed={Boolean(cardDrag)} role="region" aria-label="Lineup"
+    <div class="zone" class:drop={zoneOver && Boolean(cardDrag || segDrag)} class:armed={Boolean(cardDrag || segDrag)} role="region" aria-label="Lineup"
          ondragover={(e) => { if (cardDrag || segDrag) { e.preventDefault(); zoneOver = true; ins = { end: true }; } }}
          ondragleave={(e) => { if (e.target === e.currentTarget) { zoneOver = false; if (ins?.end) ins = null; } }}
          ondrop={(e) => { if (cardDrag) cardDrop(e); else if (segDrag) segDrop(e); }}>
@@ -1270,7 +1271,7 @@
   .insline { height: 3px; border-radius: 2px; background: var(--accent); margin: 6px 0; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
   .blkw.rowend { box-shadow: inset 0 -2px 0 var(--accent); }
   .zone { min-height: 48px; border-radius: var(--radius); border: 1px dashed transparent; transition: border-color .12s ease, background .12s ease; }
-  .zone.armed { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .zone.armed { border-color: color-mix(in srgb, var(--accent) 45%, transparent); padding-bottom: 44px; }   /* room to drop past the last one */
   .zone.drop { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .zone .zone-empty { padding: 12px 10px; margin: 0; }
   .sv.grab { cursor: grab; }
