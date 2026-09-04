@@ -17,7 +17,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { PipelinePlayout } from '../src/ffmpeg/pipeline.js';
+import {
+  PipelinePlayout, buildSourceArgs, buildHoldArgs, buildCountdownArgs,
+  planOverlayPipe, passthroughEligible,
+} from '../src/ffmpeg/pipeline.js';
 import { findSidecarSubtitles, selectTracks } from '../src/ffmpeg/tracks.js';
 
 const gpuProfile = {
@@ -202,4 +205,169 @@ test('an HDR clip copied despite sparse keyframes says so', () => {
   f._play({ id: 'a', title: 'Planet HDR', srcPath: '/hdr.mkv', duration: 1000 }, 0, { duration: 1000 });
   assert.ok(f.spawned[0].args.includes('copy'));
   assert.ok(!quiet.some((w) => /copied anyway/.test(w)));
+});
+
+// ── a hidden studio must not block HEVC passthrough ──────────────────────
+
+const hevcProfile = {
+  ...gpuProfile, codec: 'hevc', hdrWanted: false, overlayPipe: true, overlayConfigured: true,
+};
+const hevcVideo = { ...sdrVideo, codec: 'hevc' };
+const hevcSel = { video: hevcVideo, audio: { typeIndex: 0 }, subtitle: null };
+const copyOf = (args) => args[args.indexOf('-c:v') + 1] === 'copy';
+const PIPE = '/dev/shm/overlay-test.fifo';
+
+test('hidden studio + pipe + eligible HEVC passes through with no pipe attached', () => {
+  const args = buildSourceArgs({
+    srcPath: '/m.mkv', profile: hevcProfile, selection: hevcSel, duration: 1000,
+    overlayPipe: PIPE, srcKbps: 5000,
+  });
+  assert.ok(copyOf(args), 'copied');
+  assert.ok(!args.includes(PIPE), 'no pipe input');
+  assert.equal(planOverlayPipe({
+    profile: hevcProfile, selection: hevcSel, sub: {}, duration: 1000, srcKbps: 5000,
+  }), null, 'the plan agrees: nothing armed');
+  assert.equal(passthroughEligible({ profile: hevcProfile, selection: hevcSel, srcKbps: 5000 }), true);
+});
+
+test('one ENABLED text item: no copy, pipe input present', () => {
+  const profile = { ...hevcProfile, overlay: [{ type: 'text', text: 'hi', enabled: true }] };
+  const args = buildSourceArgs({
+    srcPath: '/m.mkv', profile, selection: hevcSel, duration: 1000, overlayPipe: PIPE, srcKbps: 5000,
+  });
+  assert.ok(!copyOf(args), 'encoded');
+  assert.ok(args.includes(PIPE), 'pipe input attached');
+});
+
+test('an ineligible clip (H.264 source) with a hidden studio still arms the pipe idle', () => {
+  const sel = { ...hevcSel, video: { ...hevcVideo, codec: 'h264' } };
+  const args = buildSourceArgs({
+    srcPath: '/m.mkv', profile: hevcProfile, selection: sel, duration: 1000, overlayPipe: PIPE, srcKbps: 5000,
+  });
+  assert.ok(!copyOf(args));
+  assert.ok(args.includes(PIPE), 'idle arm preserved');
+  // Over the copy ceiling the HEVC clip is ineligible too — pipe armed.
+  const heavy = buildSourceArgs({
+    srcPath: '/m.mkv', profile: hevcProfile, selection: hevcSel, duration: 1000, overlayPipe: PIPE, srcKbps: 50000,
+  });
+  assert.ok(!copyOf(heavy) && heavy.includes(PIPE));
+});
+
+test('the engine spawns a hidden-studio HEVC clip as passthrough without a renderer', () => {
+  const e = rig(hevcProfile, hevcSel);
+  e.cacheDir = mkdtempSync(join(tmpdir(), 'jsr-pt-'));
+  let rendered = 0;
+  e._ovFeed = { active: false, spawnRenderer() { rendered++; }, stopSync() {}, resetSync() {}, path: PIPE };
+  e._play({ id: 'a', title: 'A', srcPath: '/nonexistent.mkv', duration: 1000 }, 0, { duration: 1000 });
+  assert.ok(copyOf(e.spawned[0].args), 'copied');
+  assert.equal(rendered, 0, 'no renderer spawned');
+  assert.equal(e._pipedClip, false);
+  rmSync(e.cacheDir, { recursive: true, force: true });
+});
+
+// ── cards follow what is on air, not the encoder's HDR capability ────────
+
+test('pause and countdown cards stay SDR while an SDR clip is on air', () => {
+  const profile = { ...gpuProfile, codec: 'hevc', hdrWanted: true, hdrOut: true };
+  const sdrSel = { video: hevcVideo, audio: { typeIndex: 0 }, subtitle: { codec: 'ass', typeIndex: 0, external: false } };
+  for (const args of [
+    buildHoldArgs({ profile, selection: sdrSel }),
+    buildCountdownArgs({ profile, selection: sdrSel, seconds: 30 }),
+  ]) {
+    const str = args.join(' ');
+    assert.ok(!/p010/.test(str), 'no p010 upload');
+    assert.ok(!args.includes('smpte2084'), 'no PQ tags');
+  }
+  // A tone-mapped HDR clip (subtitles drawn on it) is SDR on air too.
+  const hdrVideo = { ...hevcVideo, pixFmt: 'yuv420p10le', hdr: true };
+  const toneMapped = buildHoldArgs({ profile, selection: { ...sdrSel, video: hdrVideo } });
+  assert.ok(!toneMapped.includes('smpte2084'));
+  // An HDR clip with nothing drawn on it goes out HDR — so does its card.
+  const hdrSel = { video: hdrVideo, audio: { typeIndex: 0 }, subtitle: null };
+  const hold = buildHoldArgs({ profile, selection: hdrSel });
+  assert.ok(/p010/.test(hold.join(' ')) && hold.includes('smpte2084'));
+  const cd = buildCountdownArgs({ profile, selection: hdrSel, seconds: 30 });
+  assert.ok(cd.includes('smpte2084'));
+  // No selection at all: the capability decides.
+  assert.ok(buildHoldArgs({ profile }).includes('smpte2084'));
+  assert.ok(!buildHoldArgs({ profile: { ...profile, hdrOut: false }, selection: hdrSel }).includes('smpte2084'));
+});
+
+// ── the chunked path consumes the splice lock itself ─────────────────────
+
+test('a cushion-kept seek on the chunked path releases the frontier lock without a warning', async () => {
+  const profile = { ...gpuProfile, gpuSubs: false, parallelChunks: 4 };
+  const video = { ...sdrVideo, codec: 'h264' };
+  const e = rig(profile, { video, audio: { typeIndex: 0 }, subtitle: { codec: 'ass', typeIndex: 0, external: false } });
+  let chunked = 0;
+  e._playChunked = () => { chunked++; };
+  const warns = [];
+  e.on('warn', (w) => warns.push(String(w)));
+  e.current = { item: { id: 'a', title: 'A', srcPath: '/x.mkv', duration: 1000 }, offset: 0, duration: 1000 };
+  e.position = 120; e.timeline = 120;
+  e._bank = [{ data: Buffer.alloc(188 * 4), pos: 118, tl: 118, item: e.current.item, gen: 1 }];
+  e._bankBytes = 188 * 4;
+  e.seek({ position: 300 });
+  assert.equal(chunked, 1);
+  assert.equal(e.spawned.length, 0, 'chunks never _spawnSource');
+  assert.equal(e._tlLocked, false, 'lock released by the chunked flow');
+  assert.equal(e._audioClose, null);
+  assert.equal(e._tlLockTimer?._destroyed ?? true, true, 'release valve disarmed');
+  assert.ok(!warns.some((w) => /never spawned/.test(w)), warns.join('\n'));
+});
+
+// ── skip acts on the clip ON AIR, not the clip being encoded ─────────────
+
+test('skip while the encoder is already on the next episode restarts that episode instead of skipping it', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const ep1 = { id: 'e1', title: 'S1E1', srcPath: '/e1.mkv', duration: 32 };
+  const ep2 = { id: 'e2', title: 'S1E2', srcPath: '/e2.mkv', duration: 32 };
+  const ep3 = { id: 'e3', title: 'S1E3', srcPath: '/e3.mkv', duration: 32 };
+  e.queue = [ep3];
+  e.current = { item: ep2, offset: 0, duration: 32 };
+  e.position = 8; e.timeline = 40;
+  e.airedItem = ep1; e.aired = 19.9;
+  const plays = [];
+  e._play = (item, offset, opts) => { plays.push({ item, offset, opts }); };
+  let advanced = 0;
+  e._advance = () => { advanced++; };
+  const logs = [];
+  e.on('log', (l) => logs.push(String(l)));
+  assert.equal(e.skip(), true);
+  assert.equal(advanced, 0, 'did not advance past the unplayed episode');
+  assert.equal(e.queue[0], ep3, 'queue head untouched');
+  assert.equal(plays.length, 1);
+  assert.equal(plays[0].item, ep2);
+  assert.equal(plays[0].offset, 0);
+  assert.equal(plays[0].opts.duration, 32);
+  assert.ok(logs.some((l) => /\[skip\] S1E1 \(encoder was already on S1E2\)/.test(l)), logs.join(''));
+
+  // Same situation with an EMPTY queue: the current clip is still what follows.
+  const f = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  f.queue = [];
+  f.current = { item: ep2, offset: 0, duration: 32 };
+  f.airedItem = ep1; f.aired = 19.9;
+  const fp = [];
+  f._play = (item, offset) => { fp.push({ item, offset }); };
+  assert.equal(f.skip(), true);
+  assert.deepEqual(fp, [{ item: ep2, offset: 0 }]);
+});
+
+test('skip with the encoder on the clip on air advances as before', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const ep1 = { id: 'e1', title: 'S1E1', srcPath: '/e1.mkv', duration: 32 };
+  const ep2 = { id: 'e2', title: 'S1E2', srcPath: '/e2.mkv', duration: 32 };
+  e.queue = [ep2];
+  e.current = { item: ep1, offset: 0, duration: 32 };
+  e.airedItem = ep1; e.aired = 10; e.position = 20; e.timeline = 20;
+  const plays = [];
+  e._play = (item, offset) => { plays.push({ item, offset }); };
+  let advanced = 0;
+  e._advance = () => { advanced++; };
+  assert.equal(e.skip(), true);
+  assert.equal(advanced, 1);
+  assert.equal(plays.length, 0);
+  // Nothing queued and nothing ahead: still refused.
+  e.queue = [];
+  assert.equal(e.skip(), false);
 });

@@ -1619,6 +1619,7 @@ export class PipelinePlayout extends EventEmitter {
           { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
         ),
         pin: this._pipePin ?? null,
+        srcKbps: this._srcKbps ?? null,
       });
       if (!spec) {
         // Eligibility changed underneath (a demotion mid-clip). The
@@ -4215,6 +4216,25 @@ export class PipelinePlayout extends EventEmitter {
       // them. They keep the classic apply-by-restart behaviour.
       this._pipedClip = false;
       if (this._ovFeed?.active) this._ovFeed.stopSync();
+      /**
+       * The splice lock is consumed HERE. A cushion-kept seek/apply on
+       * this path runs _bankCutForApply like any other, which locks the
+       * frontier until "the spawn" bakes it into argv — but chunks never
+       * _spawnSource: _playChunked bakes the frontier into `_clipBase` on
+       * its first line, and every chunk lands at an absolute tsOffset from
+       * it. Left set, nothing released it until the 10s valve fired its
+       * "locked but never spawned" warning on every ordinary chunked seek.
+       * Safe to release before the read: the old source is already killed
+       * above, so no progress block can move the frontier in between. The
+       * audio close goes with it — it waits on a successor generation only
+       * _spawnSource assigns, and chunk bytes enter through _bankFeed where
+       * no close is measured, so it too only ever expired into a warning.
+       * The cover card, when there is one, re-arms its own from the tail.
+       */
+      this._tlLocked = false;
+      clearTimeout(this._tlLockTimer);
+      clearTimeout(this._audioClose?.timer);
+      this._audioClose = null;
       this._playChunked(item, offset, cached, workers, flushed);
       this.emit('nowplaying', this.snapshot());
       this._fillDuration(item);
@@ -4253,6 +4273,18 @@ export class PipelinePlayout extends EventEmitter {
         { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
       )
       : null;
+    // The file's average rate, for the passthrough ceiling and the bank's
+    // re-size below. Null when unstatable (SMB hiccup) or duration-less.
+    // Read BEFORE the renderer decision: planOverlayPipe declines to arm
+    // idle on a clip that passes through, and the rate is part of that
+    // verdict — both ends must see the same number.
+    let srcKbps = null;
+    try {
+      if (clipDuration > 0) {
+        srcKbps = Math.round((statSync(item.srcPath).size * 8) / clipDuration / 1000);
+      }
+    } catch { /* keep null */ }
+    this._srcKbps = srcKbps;
     if (this.profile?.overlayPipe && this.cacheDir) {
       const rSpec = buildRendererSpec({
         profile: this.profile,
@@ -4267,6 +4299,7 @@ export class PipelinePlayout extends EventEmitter {
         overlayImages,
         subBand: pipeBand,
         overlayAnimated: pipeAnimated,
+        srcKbps,
       });
       if (rSpec) {
         try {
@@ -4312,15 +4345,6 @@ export class PipelinePlayout extends EventEmitter {
     } else if (this._ovFeed?.active) {
       this._ovFeed.stopSync();
     }
-    // The file's average rate, for the passthrough ceiling and the bank's
-    // re-size below. Null when unstatable (SMB hiccup) or duration-less.
-    let srcKbps = null;
-    try {
-      if (clipDuration > 0) {
-        srcKbps = Math.round((statSync(item.srcPath).size * 8) / clipDuration / 1000);
-      }
-    } catch { /* keep null */ }
-
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       srcKbps,
@@ -6110,9 +6134,28 @@ export class PipelinePlayout extends EventEmitter {
       return true;
     }
     if (!this.publisher || this._stopping) return false;
-    if (!this.current || !this.queue.length) return false;
+    if (!this.current) return false;
+    /**
+     * Skip means "end what the viewers are watching and go to what follows
+     * it" — and what they are watching is not always what is being
+     * encoded. The encoder runs up to a bankful ahead of the picture, so a
+     * skip pressed in the last cushion-length of an episode finds
+     * `this.current` already on the NEXT one; advancing past it threw that
+     * episode away (verified live: "[skip] S1E2" logged while S1E1 was on
+     * air, S1E3 went out, S1E2 played later from the head of the queue).
+     * When the encoder has moved on, the successor the viewers expect IS
+     * the current clip: cut the cushion the same way and restart it from
+     * its start, so it follows the runway instead of being skipped.
+     */
+    const onAir = this._onAir().item;
+    const encoderAhead = onAir != null && this.current.item != null
+      && onAir !== this.current.item;
+    if (!encoderAhead && !this.queue.length) return false;
 
-    this.emit('log', `[skip] ${this.current.item?.title ?? 'current clip'}\n`);
+    this.emit('log', encoderAhead
+      ? `[skip] ${onAir?.title ?? 'clip on air'} (encoder was already on `
+        + `${this.current.item?.title ?? 'the next clip'})\n`
+      : `[skip] ${this.current.item?.title ?? 'current clip'}\n`);
     // Skipping while paused resumes on the next clip: leaving the engine
     // "paused" while content actually plays would make every later control
     // lie about what is happening.
@@ -6132,6 +6175,10 @@ export class PipelinePlayout extends EventEmitter {
     const { rewound, gop } = this._bankCutForApply(this._applyRunway());
     if (rewound + gop > 0.05) {
       this.emit('log', `[skip] cushion cut to ${this._applyRunway().toFixed(1)}s\n`);
+    }
+    if (encoderAhead) {
+      this._play(this.current.item, 0, { duration: this.current.duration });
+      return true;
     }
     this._advance();
     return true;
@@ -6168,9 +6215,37 @@ const item = (self) => self.current?.item?.title ?? 'clip';
  *  - bitmap subtitles need the video frames themselves and cannot move into
  *    a renderer that has no access to them.
  */
+/**
+ * PASSTHROUGH eligibility — the ONE authority. buildSourceArgs uses it to
+ * decide `-c:v copy`, and planOverlayPipe consults it so the pipe is never
+ * armed idle on a clip that would otherwise ship untouched. Both ends read
+ * the same answer, so the engine and the arg builder cannot disagree.
+ *
+ * An HEVC-native file under codec=hevc with nothing to draw — no subtitle
+ * burn, no pictures, no censor boxes, nothing animated — HDR only when
+ * the operator asked for HDR output, under the copy bitrate ceiling, and
+ * with keyframes a live receiver can cut on (or HDR, which has no cheap
+ * alternative — see the gate in buildSourceArgs for both rationales).
+ */
+export function passthroughEligible({
+  profile, selection, sub = null, overlayImages = [], overlayAnimated = false,
+  censors = null, srcKbps = null,
+}) {
+  if (!profile || profile.codec !== 'hevc' || selection?.video?.codec !== 'hevc') return false;
+  if (selection?.subtitle || sub?.filter || sub?.needsComplex) return false;
+  if ((overlayImages ?? []).some((i) => i?.path) || overlayAnimated) return false;
+  const cens = censors ?? (profile.noCensor ? [] : censorBoxes(profile.overlay));
+  if (cens.length > 0) return false;
+  const hdr = Boolean(selection?.video?.hdr);
+  if (hdr && !profile.hdrWanted) return false;
+  const limit = Number(profile.copyLimitKbps) > 0 ? Number(profile.copyLimitKbps) : 30000;
+  if (srcKbps != null && srcKbps > limit) return false;
+  return copyKeyframesFitLive(profile) || (hdr && Boolean(profile.hdrWanted));
+}
+
 export function planOverlayPipe({
   profile, selection, sub, duration = null,
-  overlayImages = [], overlayAnimated = false,
+  overlayImages = [], overlayAnimated = false, censors = null, srcKbps = null,
 }) {
   if (!profile?.overlayPipe || profile.backend !== 'vaapi' || !profile.gpuFull) return null;
   if (sub?.needsComplex) return null;
@@ -6207,9 +6282,10 @@ export function planOverlayPipe({
    * before Phase 1; the first studio apply arms the pipe through the
    * cushion-kept respawn, and from then on applies are live swaps.
    */
-  const anythingToDraw = (overlayImages ?? []).length > 0
+  const visible = (overlayImages ?? []).length > 0
     || Boolean(overlayAnimated)
-    || (profile.overlay ?? []).some((i) => i?.enabled !== false)
+    || (profile.overlay ?? []).some((i) => i?.enabled !== false);
+  const anythingToDraw = visible
     // Configured-but-hidden arms the pipe too — measured armed-idle at
     // ~20% source CPU on a 1080p title, against a full source respawn
     // (splice + re-encode) for the first "show" without it. overlayAlways
@@ -6222,6 +6298,19 @@ export function planOverlayPipe({
     || ((Boolean(profile.overlayConfigured) || Boolean(profile.overlayAlways))
       && !profile.noIdleArm);
   if (!anythingToDraw) return null;
+  /**
+   * ...but never at the price of passthrough. With NOTHING visible, the
+   * idle arm exists only to make the first "show" a swap instead of a
+   * respawn — and the pipe forces a transcode (buildSourceArgs refuses
+   * copy under a pipe plan). An HEVC file that could ship untouched was
+   * re-encoded for a studio the viewer cannot see, while the inspector
+   * promised "Passthrough". The clip passes through instead; the first
+   * show pays the classic cushion-kept respawn, which is the cheaper of
+   * the two prices. Same helper as the copy gate, so the two ends agree.
+   */
+  if (!visible && passthroughEligible({
+    profile, selection, sub, overlayImages, overlayAnimated, censors, srcKbps,
+  })) return null;
   const rect = contentRect(selection?.video, profile);
 
   if (sub?.filter) {
@@ -6265,6 +6354,7 @@ export function buildRendererSpec({
   profile, selection, srcPath, shift = 0, clipOffset = null, duration = null,
   extractedPath = null, fontsDir = null, overlayPath = null,
   overlayImages = [], subBand = null, overlayAnimated = false, pin = null,
+  srcKbps = null, censors = null,
 }) {
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
@@ -6277,7 +6367,7 @@ export function buildRendererSpec({
    * pictures can appear, and the pipe never notices.
    */
   const plan = pin ?? planOverlayPipe({
-    profile, selection, sub, duration, overlayImages, overlayAnimated,
+    profile, selection, sub, duration, overlayImages, overlayAnimated, censors, srcKbps,
   });
   if (!plan) return null;
   const { rect, wide } = plan;
@@ -6551,7 +6641,7 @@ export function buildSourceArgs({
   const pipePlan = overlayPipe
     ? planOverlayPipe({
       profile, selection, sub, duration,
-      overlayImages: imgList, overlayAnimated,
+      overlayImages: imgList, overlayAnimated, censors, srcKbps,
     })
     : null;
   const audioIdx = selection?.audio?.typeIndex ?? 0;
@@ -6581,23 +6671,22 @@ export function buildSourceArgs({
    * exactly like any other source restart. Gated to HEVC on purpose:
    * H.264 is the tuned, working default path and stays untouched.
    */
-  if (profile.codec === 'hevc' && selection?.video?.codec === 'hevc'
-      && !selection?.subtitle && !sub.filter && !sub.needsComplex
-      && imgList.length === 0 && censors.length === 0 && !overlayAnimated && !pipePlan
-      // An HDR file may only ship untouched when the operator asked for
-      // HDR output — with it off the promise is SDR, so the clip goes to
-      // the tone-mapped transcode instead of quietly leaking PQ on air.
-      && (!selection?.video?.hdr || profile.hdrWanted)
-      // The bitrate ceiling: copy ships the FILE's rate, and a 54 Mbps
-      // remux against a ~53 Mbps home upload would saturate the line and
-      // stall every viewer. ABSOLUTE, not a multiple of the encode rate:
-      // a 25 Mbps 4K HDR film passing through is a verified, wanted case
-      // and must not fall off passthrough because the operator lowered
-      // the 1080p encode anchor. 30000k default; encoder.copyLimitKbps
-      // overrides for a different line.
-      && (srcKbps == null
-        || srcKbps <= (Number(profile.copyLimitKbps) > 0
-          ? Number(profile.copyLimitKbps) : 30000))
+  // The conditions live in passthroughEligible (planOverlayPipe reads the
+  // same helper, so a hidden studio can no longer arm a pipe that would
+  // block copy). Kept here as prose, because each one was earned:
+  //  - An HDR file may only ship untouched when the operator asked for
+  //    HDR output — with it off the promise is SDR, so the clip goes to
+  //    the tone-mapped transcode instead of quietly leaking PQ on air.
+  //  - The bitrate ceiling: copy ships the FILE's rate, and a 54 Mbps
+  //    remux against a ~53 Mbps home upload would saturate the line and
+  //    stall every viewer. ABSOLUTE, not a multiple of the encode rate:
+  //    a 25 Mbps 4K HDR film passing through is a verified, wanted case
+  //    and must not fall off passthrough because the operator lowered
+  //    the 1080p encode anchor. 30000k default; encoder.copyLimitKbps
+  //    overrides for a different line.
+  if (!pipePlan && passthroughEligible({
+    profile, selection, sub, overlayImages: imgList, overlayAnimated, censors, srcKbps,
+  })
       // Keyframes decide segment length, everywhere. A copied stream is
       // cut where the FILE has keyframes, so its segments are that long
       // and no latency setting downstream can shorten them; sparse or
@@ -6611,8 +6700,8 @@ export function buildSourceArgs({
       // measured 0.55x on the deploy box (the broadcast dies) and the
       // other of which throws the HDR away. Long segments are a worse
       // experience; a dead or downgraded broadcast is a worse outcome.
-      && (copyKeyframesFitLive(profile)
-        || (selection?.video?.hdr && profile.hdrWanted))) {
+      // (Both clauses are part of passthroughEligible above.)
+  ) {
     /**
      * THE SEAM ALIGNMENT. A copy-mode `-ss` splits the streams: the
      * demuxer starts VIDEO at whatever keyframe the cue table picks —
@@ -7448,7 +7537,19 @@ function cardVideoPlan(profile, selection = null) {
     fps: eff.fps,
     ...(profile.codec === 'av1' ? { av1Preset: 12 } : {}),
   };
-  const hdr = Boolean(profile.hdrOut);
+  /**
+   * HDR is what is ON AIR, not what the encoder is capable of. hdrOut is a
+   * broadcast capability (the driver encodes main10); with it on and an
+   * SDR clip playing — or an HDR clip tone-mapped because subtitles are
+   * being drawn on it — the clip goes out nv12/BT.709 and a p010/PQ card
+   * behind it is the mid-stream profile+VUI flip that kills receivers.
+   * The card follows the clip's own answer: HDR only for an HDR source
+   * with nothing drawn on it (the copy and hdrPass cases, see
+   * buildSourceArgs). No selection at all (a countdown before any clip)
+   * falls back to the capability.
+   */
+  const hdr = Boolean(profile.hdrOut)
+    && (selection?.video ? Boolean(selection.video.hdr) && !selection.subtitle : true);
   const upload = be.uploadFilter();
   return {
     rate: eff.rate,
