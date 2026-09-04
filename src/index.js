@@ -868,6 +868,7 @@ function streamStatus() {
       breakOffline: q.breakOffline ?? false,
     })),
     position: s.position,
+    pending: s.pending ?? null,
     cachedAhead: s.cachedAhead ?? 0,
     cachedBehind: s.cachedBehind ?? 0,
     rebuilding: s.rebuilding ?? false,
@@ -1068,6 +1069,8 @@ function buildEngine({ profile, selection }) {
   });
   e.on('queue', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true, schedule: true }); });
   e.on('seeked', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
+  // A skip or seek announced, or landed: every open page repaints from it.
+  e.on('pending', () => broadcast('stream', streamStatus()));
   e.on('selection', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
   e.on('progress', (b) => {
     sgSync();

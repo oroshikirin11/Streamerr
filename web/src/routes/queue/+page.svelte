@@ -651,6 +651,10 @@
   let tracks = $state(null);
   let switching = $state(false);
   let skipping = $state(false);
+  // The engine's announced skip or seek, until it reaches the picture.
+  const pending = $derived(status.pending ?? null);
+  const pendLeft = $derived(pending ? Math.max(0, Math.ceil(pending.expectedAt - now)) : 0);
+  const pendChip = $derived(pending?.kind === 'skip' ? (pendLeft > 0 ? `skipping to · ~${pendLeft} s` : 'skipping to · any moment') : '');
   async function loadTracks() {
     if (tracks) { tracks = null; return; }
     try { tracks = await api.liveTracks(); } catch (err) { error = err.message; }
@@ -741,12 +745,14 @@
            onpointerdown={(e) => startBlockDrag(e, p)}>
         {#if p.image}<img class="cv" src={p.image} alt="" draggable="false" onerror={(e) => e.currentTarget.remove()} />{/if}
         <span class="bt">{epName(p.title)}{#if p.onAir} · on air{/if}</span>
+        {#if pending?.kind === 'skip' && pending.toKey === p.key}<span class="tgt" aria-hidden="true"></span>{/if}
         {#if drag?.kind === 'block' && drag.key === p.key}
           <span class="dt" class:early={drag.at <= drag.earliest + 60}>{drag.at <= drag.earliest + 60 ? `earliest ${hhmm(drag.earliest)}` : hhmm(drag.at)}</span>
         {/if}
       </div>
     {/each}
     {#if live && status.playing && !card}<div class="nowline" style:left={pct(now)}></div>{/if}
+    {#if pending && live}<div class="cutline" style:left={pct(pending.expectedAt)} title={pending.kind === 'skip' ? 'Where the broadcast jumps' : 'Where the seek lands'}></div>{/if}
     {#if startFlag}
       <div class="startflag" class:grab={dnd} style:left={pct(drag?.kind === 'flag' ? drag.at : startFlag.at)}
            title={dnd ? 'Drag to change where the schedule starts' : 'Where the schedule starts — move it with the arrows in the lineup'}
@@ -799,10 +805,10 @@
           {/if}
         </div>
         <div class="acts">
-          <button onclick={skipCurrent} disabled={skipping || (!card && !status.queue?.length)}
+          <button onclick={skipCurrent} disabled={skipping || Boolean(pending) || (!card && !status.queue?.length)}
                   title={card ? 'Start the show now instead of waiting' : status.queue?.length ? `Skip to ${status.queue[0].title}` : 'Nothing queued to skip to'}>
             <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg>
-            {skipping ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
+            {skipping || pending?.kind === 'skip' ? 'Skipping…' : card ? 'Start now' : 'Skip episode'}
           </button>
           {#if !card && status.playing?.id}
             <button onclick={() => (inspect = { id: status.playing.id, title: status.playing.title })} title="What this file is, and what the encoder is doing with it">
@@ -966,6 +972,7 @@
               </li>
             {/if}
             <li class:past={isPast} class:start={it.onAir} class:over={rowOver === it.key} class:skipped={it.state === 'skipped'}
+                class:leaving={pending?.kind === 'skip' && it.onAir} class:next={pending?.kind === 'skip' && pending.toKey === it.key}
                 draggable={dnd && it.state === 'upcoming'}
                 ondragstart={(e) => rowDragStart(e, seg, it)} ondragover={(e) => rowDragOver(e, seg, it)}
                 ondrop={(e) => rowDrop(e, seg, it)} ondragend={() => { rowDrag = null; rowOver = null; }}>
@@ -974,7 +981,8 @@
               <span class="qt">
                 {#if isPast}<span class="tick" class:sk={it.state === 'skipped'}>{it.state === 'skipped' ? '↷' : '✓'}</span>{/if}
                 {epName(it.title)}{#if it.name}<span class="en">{it.name}</span>{/if}
-                {#if it.onAir}<small>on air</small>{:else if it.state === 'skipped'}<small>skipped</small>{:else if it.state === 'aired'}<small>aired</small>{:else if it.watched}<small>watched</small>{/if}
+                {#if pending?.kind === 'skip' && pending.toKey === it.key}<small class="pchip">{pendChip}</small>
+                {:else if it.onAir}<small>{pending?.kind === 'skip' ? 'on air · leaving' : 'on air'}</small>{:else if it.state === 'skipped'}<small>skipped</small>{:else if it.state === 'aired'}<small>aired</small>{:else if it.watched}<small>watched</small>{/if}
               </span>
               {#if it.state === 'upcoming'}
                 {#if pinKey === it.key}
@@ -1268,6 +1276,14 @@
   .cd2 { position: absolute; top: 9px; height: 38px; border-radius: 6px; border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-size: 11px; display: grid; place-items: center; }
   .nowline { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--success); z-index: 2; }
   .nowline::before { content: "now"; position: absolute; top: -13px; left: -10px; font-size: 10px; color: var(--success); }
+  .cutline { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--warn, #e0a33a); z-index: 2; }
+  .cutline::before { content: "cut"; position: absolute; top: -13px; left: -8px; font-size: 10px; color: var(--warn, #e0a33a); }
+  .blk .tgt { position: absolute; inset: -1px; border: 2px solid var(--warn, #e0a33a); border-radius: inherit; pointer-events: none; }
+  .q li.leaving .qt { opacity: .55; text-decoration: line-through; text-decoration-color: var(--muted); }
+  .q li.next { border-left: 3px solid var(--warn, #e0a33a); background: linear-gradient(90deg, color-mix(in srgb, var(--warn, #e0a33a) 14%, transparent), transparent 60%); animation: pnext 1.6s ease-in-out infinite; }
+  .q li.next .pchip { color: var(--warn, #e0a33a); }
+  @keyframes pnext { 50% { background: linear-gradient(90deg, color-mix(in srgb, var(--warn, #e0a33a) 26%, transparent), transparent 60%); } }
+  @media (prefers-reduced-motion: reduce) { .q li.next { animation: none; } }
   .flag { position: absolute; top: 2px; width: 2px; height: 52px; background: var(--accent); z-index: 1; }
   .flag::after { content: attr(data-t); position: absolute; top: -2px; left: 5px; font-size: 10px; color: var(--accent); white-space: nowrap; }
   .startflag { position: absolute; top: 0; width: 3px; height: 56px; background: var(--accent); z-index: 2; border-radius: 2px; }

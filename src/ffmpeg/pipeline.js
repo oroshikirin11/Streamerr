@@ -945,6 +945,59 @@ export class PipelinePlayout extends EventEmitter {
    * handler that normally ends a broadcast will never run — finish it
    * here, the way stop() does for an off-air break.
    */
+  /**
+   * A skip or seek is not instant: the cushion is cut, a successor spawns
+   * at a keyframe, and the change reaches the picture only once the bytes
+   * already in flight have aired. `pending` names what is coming and when
+   * the engine expects it, for the panel to show one honest state from the
+   * click until it lands. Cleared by _checkPending when the on-air item or
+   * position gets there, or by a timer if it never does.
+   */
+  _setPending(kind, { from = null, to = null } = {}) {
+    clearTimeout(this._pendingTimer);
+    const keyOf = (it) => (it ? (it.seg?.item ?? it.id ?? null) : null);
+    const now = Date.now() / 1000;
+    const runway = Math.max(0.5, Number(this._applyRunway?.() ?? 0) || 0);
+    this._pendingRefs = { from, to };
+    this.pending = {
+      kind, at: now, expectedAt: now + runway,
+      fromKey: keyOf(from), fromTitle: from?.title ?? null,
+      toKey: kind === 'skip' ? keyOf(to) : null,
+      toTitle: kind === 'skip' ? (to?.title ?? null) : null,
+      to: kind === 'seek' ? Number(to) : null,
+    };
+    this._pendingTimer = setTimeout(() => {
+      if (!this.pending) return;
+      this.emit('warn', `${kind === 'skip' ? 'Skip' : 'Seek'} took longer than expected — the panel stopped waiting for it`);
+      this._clearPending();
+    }, 30_000);
+    this._pendingTimer.unref?.();
+    this.emit('pending', this.pending);
+  }
+
+  _clearPending() {
+    clearTimeout(this._pendingTimer);
+    this._pendingTimer = null;
+    if (!this.pending) return;
+    this.pending = null;
+    this._pendingRefs = null;
+    this.emit('pending', null);
+  }
+
+  _checkPending() {
+    const p = this.pending;
+    if (!p) return;
+    if (this.status === 'stopped') { this._clearPending(); return; }
+    const air = this._onAir();
+    const refs = this._pendingRefs ?? {};
+    if (p.kind === 'skip') {
+      if (air.item && air.item !== refs.from) this._clearPending();
+      return;
+    }
+    if (air.item !== refs.from) { this._clearPending(); return; }
+    if (air.position != null && air.position >= p.to - 1 && air.position <= p.to + 4) this._clearPending();
+  }
+
   _abortStart() {
     if (this._startAborted) return;   // stop() already finished it
     this._startAborted = true;
@@ -1259,6 +1312,7 @@ export class PipelinePlayout extends EventEmitter {
     const sub = this.selection?.subtitle ?? null;
     return {
       status: this.status,
+      pending: this.pending ?? null,
       breakUntil: this._break?.until ?? null,
       playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: this.queue.map((q, i) => ({ ...q, at: sched[i] ?? null })),
@@ -1365,6 +1419,7 @@ export class PipelinePlayout extends EventEmitter {
     if (this.current.duration) {
       next = Math.min(next, Math.max(0, this.current.duration - 2));
     }
+    this._setPending('seek', { from: this._onAir().item ?? this.current.item, to: next });
 
     // A target already in the run-ahead cache needs no rebuild: the
     // scheduler trims the containing chunk's head to the target (keyframe
@@ -5688,6 +5743,7 @@ export class PipelinePlayout extends EventEmitter {
         }
       }
 
+      this._checkPending();
       const reserve = this._reserve();
       this.emit('progress', {
         position: this._onAir().position,
@@ -6111,6 +6167,7 @@ export class PipelinePlayout extends EventEmitter {
     // clearing the pin, _advance sees the same future time and simply
     // starts another card — the button appeared to do nothing. The
     // off-air branch below already did this; the card path did not.
+    if (this.pending?.kind === 'skip') return true;   // already on its way
     if (this.current?.item?.countdown) {
       const first = this.queue[0];
       if (first) {
@@ -6118,6 +6175,7 @@ export class PipelinePlayout extends EventEmitter {
         delete first.breakOffline;
       }
       this._bankFlush();
+      this._setPending('skip', { from: this.current.item, to: first ?? null });
       this._advance();
       return true;
     }
@@ -6177,9 +6235,11 @@ export class PipelinePlayout extends EventEmitter {
       this.emit('log', `[skip] cushion cut to ${this._applyRunway().toFixed(1)}s\n`);
     }
     if (encoderAhead) {
+      this._setPending('skip', { from: onAir, to: this.current.item });
       this._play(this.current.item, 0, { duration: this.current.duration });
       return true;
     }
+    this._setPending('skip', { from: onAir ?? this.current.item, to: this.queue[0] ?? null });
     this._advance();
     return true;
   }

@@ -367,7 +367,52 @@ test('skip with the encoder on the clip on air advances as before', () => {
   assert.equal(e.skip(), true);
   assert.equal(advanced, 1);
   assert.equal(plays.length, 0);
-  // Nothing queued and nothing ahead: still refused.
+  // Nothing queued and nothing ahead: still refused (once the first skip
+  // has landed — while it is pending a second press is a no-op).
+  e._clearPending();
   e.queue = [];
   assert.equal(e.skip(), false);
+});
+
+test('a skip announces where it is going and clears once the picture gets there', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const ep1 = { id: 'e1', title: 'S1E1', srcPath: '/e1.mkv', duration: 32, seg: { item: 'k1' } };
+  const ep2 = { id: 'e2', title: 'S1E2', srcPath: '/e2.mkv', duration: 32, seg: { item: 'k2' } };
+  e.queue = [ep2];
+  e.current = { item: ep1, offset: 0, duration: 32 };
+  e.airedItem = ep1; e.aired = 10;
+  e._advance = () => { e.queue.shift(); };
+  const events = [];
+  e.on('pending', (p) => events.push(p ? p.kind : null));
+  assert.equal(e.skip(), true);
+  assert.equal(e.pending.kind, 'skip');
+  assert.equal(e.pending.toKey, 'k2');
+  assert.equal(e.pending.fromKey, 'k1');
+  assert.ok(e.pending.expectedAt >= e.pending.at);
+  assert.equal(e.skip(), true, 'a second press while pending is a no-op');
+  assert.equal(events.length, 1, 'and announces nothing new');
+  e._checkPending();
+  assert.ok(e.pending, 'still pending while the old clip airs');
+  e.airedItem = ep2; e.aired = 0.2;
+  e._checkPending();
+  assert.equal(e.pending, null);
+  assert.deepEqual(events, ['skip', null]);
+  assert.equal(e.snapshot().pending, null);
+});
+
+test('a seek announces its target position and clears when the aired position reaches it', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const ep1 = { id: 'e1', title: 'S1E1', srcPath: '/e1.mkv', duration: 600 };
+  e.current = { item: ep1, offset: 0, duration: 600 };
+  e.airedItem = ep1; e.aired = 100;
+  e.position = 112; e.timeline = 112;
+  e._spawnSource = () => {};
+  e._play = () => {};
+  try { e.seek({ position: 300 }); } catch { /* the rebuild path needs a real bank; the intent is set before it */ }
+  assert.equal(e.pending?.kind, 'seek');
+  assert.equal(e.pending.to, 300);
+  e.aired = 105; e._checkPending();
+  assert.ok(e.pending, 'old bytes still airing');
+  e.aired = 300.4; e._checkPending();
+  assert.equal(e.pending, null);
 });

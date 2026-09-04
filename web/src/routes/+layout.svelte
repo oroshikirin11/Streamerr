@@ -156,6 +156,7 @@
 
   onMount(() => {
     const tick = setInterval(() => {
+      nowSec = Date.now() / 1000;
       if (stream.status === 'running' && stream.playing && !paused) {
         position += 1;
       }
@@ -314,7 +315,23 @@
   const stopStream = () => ctl(() => api.stop());
   const togglePause = () => ctl(() => (paused ? api.resume() : api.pause()));
   const skip = (delta) => ctl(() => api.seek({ delta }));
-  const nextClip = () => ctl(async () => {
+  // What the engine is in the middle of: a skip or seek it accepted but
+  // that has not reached the picture yet. Painted from the same field on
+  // every page; a second press while it is pending only flashes it.
+  const pending = $derived(stream.pending ?? null);
+  let nowSec = $state(Date.now() / 1000);
+  let pendFlash = $state(false);
+  const pendLeft = $derived(pending ? Math.max(0, Math.ceil(pending.expectedAt - nowSec)) : 0);
+  const pendText = $derived.by(() => {
+    if (!pending) return '';
+    const eta = pendLeft > 0 ? ` · on air in ~${pendLeft} s` : ' · any moment';
+    if (pending.kind === 'seek') return `Seeking to ${fmtTime(pending.to ?? 0)}${eta}`;
+    const to = pending.toTitle ? epShort(pending.toTitle) : 'the next clip';
+    return `Skipping to ${to}${eta}`;
+  });
+  const epShort = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(i + 3) : t; };
+  const flashPending = () => { pendFlash = true; setTimeout(() => { pendFlash = false; }, 700); };
+  const nextClip = () => pending ? flashPending() : ctl(async () => {
     await api.next();
     tracks = null;   // they describe the clip that just left the air
   });
@@ -586,7 +603,9 @@
                 {:else}
                   {fmtTime(position)}
                   {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
-                  {#if stream.queue?.length} · next: {stream.queue[0].title}{/if}
+                  {#if pending}
+                    <span class="pend" class:flash={pendFlash} role="status"><i class="spin" aria-hidden="true"></i>{pendText}</span>
+                  {:else if stream.queue?.length} · next: {stream.queue[0].title}{/if}
                 {/if}
               </p>
             </div>
@@ -606,7 +625,7 @@
             <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing || counting} title="Forward 30 seconds" aria-label="Forward 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
             </button>
-            <button class="ic" onclick={nextClip} disabled={busyCtl || !stream.queue?.length}
+            <button class="ic" onclick={nextClip} disabled={busyCtl || (!pending && !stream.queue?.length)} class:pending={Boolean(pending)}
                     title={counting
                       ? 'Start the show now'
                       : stream.queue?.length ? `Skip to ${stream.queue[0].title}` : 'Nothing queued to skip to'}
@@ -962,6 +981,13 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .np p { margin: 2px 0 0; }
+  .pend { color: var(--warn, #e0a33a); margin-left: 8px; display: inline-flex; align-items: center; gap: 6px; }
+  .pend .spin { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: pspin 1s linear infinite; }
+  .pend.flash { animation: pflash .7s ease; }
+  @keyframes pspin { to { transform: rotate(360deg); } }
+  @keyframes pflash { 30% { filter: brightness(1.8); } }
+  @media (prefers-reduced-motion: reduce) { .pend .spin { animation: none; } .pend.flash { animation: none; } }
+  .ic.pending { opacity: .45; }
   .pill {
     display: inline-block; margin-left: 6px; padding: 1px 8px;
     font-size: 11px; font-weight: 500; border-radius: 999px;
