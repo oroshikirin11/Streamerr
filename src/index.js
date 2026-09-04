@@ -2888,7 +2888,7 @@ function scheduleView() {
   }
   const t = sched.tonight();
   return {
-    schedules: sched.list().map((x) => ({ ...x, nextRun: sched.nextRun(x.id) })),
+    schedules: sched.list().map((x) => ({ ...x, nextRun: sched.nextRun(x.id), finished: sched.finished(x.id) })),
     tonight: {
       segments: t.segments.map((seg) => ({
         ...seg,
@@ -2973,8 +2973,8 @@ app.put('/api/schedule/schedules/:id', sroute(async (req) => {
 app.delete('/api/schedule/schedules/:id', sroute((req) => sched.remove(req.params.id)));
 app.post('/api/schedule/schedules/:id/reset', sroute((req) => sched.resetProgress(req.params.id)));
 app.post('/api/schedule/schedules/:id/duplicate', sroute((req) => sched.duplicate(req.params.id)));
-app.post('/api/schedule/schedules/:id/load', sroute((req) => sched.load(req.params.id, { startAt: Number(req.body?.startAt) || null })));
-app.post('/api/schedule/schedules/:id/append', sroute((req) => sched.append(req.params.id, { startAt: Number(req.body?.startAt) || null })));
+app.post('/api/schedule/schedules/:id/load', sroute((req) => sched.load(req.params.id, { startAt: Number(req.body?.startAt) || null, restart: Boolean(req.body?.restart) })));
+app.post('/api/schedule/schedules/:id/append', sroute((req) => sched.append(req.params.id, { startAt: Number(req.body?.startAt) || null, restart: Boolean(req.body?.restart) })));
 
 app.post('/api/schedule/tonight/items', sroute(async (req) => sched.addItems(await resolveItems(req.body?.itemIds ?? []))));
 app.put('/api/schedule/tonight/order', sroute((req) => sched.reorder(req.body?.order ?? [])));
@@ -2997,7 +2997,11 @@ app.post('/api/schedule/tonight/live', wrap(async (req, res) => {
  * running they are appended instead, pinned to that time.
  */
 setInterval(() => {
-  for (const { schedule, at } of sched.dueAutoStarts(Date.now())) {
+  for (const { schedule, at, skipped } of sched.dueAutoStarts(Date.now())) {
+    if (skipped) {
+      dpush('warn', `auto-start skipped: "${schedule.name}" has played through — set it to start over when finished, or reset it`);
+      continue;
+    }
     (async () => {
       if (engine) {
         sched.append(schedule.id, { startAt: at });

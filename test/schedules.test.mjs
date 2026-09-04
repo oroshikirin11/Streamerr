@@ -207,3 +207,30 @@ test('a stop under a barely-started item releases it: upcoming again, no history
   assert.equal(st.history().length, 0);
   assert.equal(st.get(s.id).start, 0);
 });
+
+test('a finished schedule: stop by default, start over when set to or asked', () => {
+  const st = createScheduleStore({ now });
+  const s = st.create({ name: 'A', items: eps(2), watched: [0, 1], start: 2 });
+  assert.equal(st.finished(s.id), true);
+  st.load(s.id);
+  assert.equal(st.upcomingEntries().length, 0, 'default: nothing lined up');
+  st.load(s.id, { restart: true });
+  assert.equal(st.upcomingEntries().length, 2, 'asked to start over');
+  assert.equal(st.get(s.id).start, 0);
+  assert.deepEqual(st.get(s.id).watched, []);
+  const r = st.create({ name: 'R', items: eps(2), watched: [0, 1], start: 2, atEnd: 'restart' });
+  st.load(r.id);
+  assert.equal(st.upcomingEntries().length, 2, "set to 'restart': starts over by itself");
+});
+
+test('auto-start skips a finished schedule set to stop, and runs one set to restart', () => {
+  const st = createScheduleStore({ now });
+  const base = new Date(2026, 8, 4, 19, 50).getTime();   // Friday 19:50
+  const a = st.create({ name: 'Stop', items: eps(1), watched: [0], start: 1, autoStart: { time: '20:00', days: [5], countdownMin: 15 } });
+  const b = st.create({ name: 'Loop', items: eps(1), watched: [0], start: 1, atEnd: 'restart', autoStart: { time: '20:00', days: [5], countdownMin: 15 } });
+  const due = st.dueAutoStarts(base);
+  assert.deepEqual(due.map((d) => [d.schedule.name, d.skipped]), [['Stop', true], ['Loop', false]]);
+  st.load(b.id);
+  assert.equal(st.upcomingEntries().length, 1);
+  assert.equal(st.dueAutoStarts(base + 60_000).length, 0, 'each occurrence once, skipped or not');
+});

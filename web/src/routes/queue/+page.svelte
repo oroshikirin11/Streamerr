@@ -427,7 +427,7 @@
   let appendOpen = $state(false);
   const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
   const progress = (s) => (s.items.length ? Math.round((s.watched.length / s.items.length) * 100) : 0);
-  const startLabel = (s) => (s.start >= s.items.length ? 'finished' : `at ${epName(s.items[s.start]?.title ?? '')}`);
+  const startLabel = (s) => (s.finished ? (s.atEnd === 'restart' ? 'finished · starts over' : 'finished') : `at ${epName(s.items[s.start]?.title ?? '')}`);
   const recur = (s) => {
     const a = s.autoStart;
     if (!a?.enabled) return 'no auto-start';
@@ -475,6 +475,7 @@
       days: [...(s.autoStart?.days ?? [])], date: isoToDmy(s.autoStart?.date),
       countdownMin: s.autoStart?.countdownMin ?? 15,
       breaks: s.breaks === 'none' ? 'none' : s.breaks === 'global' ? 'global' : 'custom',
+      atEnd: s.atEnd === 'restart' ? 'restart' : 'stop',
       every: s.breaks?.every ?? 3, minutes: s.breaks?.minutes ?? 5,
       items: s.items.map((i) => i.id),
     };
@@ -493,7 +494,7 @@
     const breaks = e.breaks === 'custom' ? { every: Number(e.every), minutes: Number(e.minutes) } : e.breaks;
     const s = view.schedules.find((x) => x.id === id);
     const itemsChanged = s && s.items.map((i) => i.id).join('|') !== e.items.join('|');
-    await act(() => api.updateSchedule(id, { name: e.name, start: e.start, autoStart, breaks, ...(itemsChanged ? { itemIds: e.items } : {}) }), 'Saved.');
+    await act(() => api.updateSchedule(id, { name: e.name, start: e.start, autoStart, breaks, atEnd: e.atEnd, ...(itemsChanged ? { itemIds: e.items } : {}) }), 'Saved.');
     if (error) { editError = error; return; }
     editId = null; edit = null;
   }
@@ -979,6 +980,12 @@
             <label>Breaks
               <select bind:value={edit.breaks}><option value="global">Use the break rule</option><option value="none">None</option><option value="custom">Custom</option></select>
             </label>
+            <label>When finished
+              <select bind:value={edit.atEnd}>
+                <option value="stop">Stop — Load offers a start-over, auto-start pauses</option>
+                <option value="restart">Start over from the first item</option>
+              </select>
+            </label>
             {#if edit.breaks === 'custom'}
               <div class="l"><span>Every</span><span><input class="tin" bind:value={edit.every} /> episodes · <input class="tin" bind:value={edit.minutes} /> min</span></div>
             {/if}
@@ -1008,11 +1015,16 @@
                 <div class="progress" class:done={s.start >= s.items.length}><i style:width={`${progress(s)}%`}></i></div>
                 <div class="meta">
                   <span>{s.items.length} items · {startLabel(s)}</span>
-                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}</span>
+                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}{#if s.finished && s.autoStart?.enabled && s.atEnd !== 'restart'} · paused, played through{/if}</span>
                 </div>
                 <div class="acts">
-                  <button onclick={() => act(() => api.loadSchedule(s.id), `Loaded "${s.name}".`)} disabled={busy} title="Replace tonight with this schedule">Load</button>
-                  <button onclick={() => act(() => api.appendSchedule(s.id), `Appended "${s.name}".`)} disabled={busy} title="Add it after what is already lined up">Append</button>
+                  {#if s.finished && s.atEnd !== 'restart'}
+                    <button onclick={() => act(() => api.loadSchedule(s.id, null, true), `"${s.name}" starts over.`)} disabled={busy} title="Every item has aired — load it from the first item again">Start over</button>
+                    <button onclick={() => act(() => api.appendSchedule(s.id, null, true), `Appended "${s.name}" from the start.`)} disabled={busy} title="Add it after what is lined up, from the first item">Append</button>
+                  {:else}
+                    <button onclick={() => act(() => api.loadSchedule(s.id), `Loaded "${s.name}".`)} disabled={busy} title="Replace tonight with this schedule">Load</button>
+                    <button onclick={() => act(() => api.appendSchedule(s.id), `Appended "${s.name}".`)} disabled={busy} title="Add it after what is already lined up">Append</button>
+                  {/if}
                   <button onclick={() => openEdit(s)}>Edit</button>
                   <button onclick={() => act(() => api.duplicateSchedule(s.id), 'Duplicated.')} disabled={busy}>Copy</button>
                   {#if s.start >= s.items.length || s.watched.length}<button onclick={() => act(() => api.resetSchedule(s.id), 'Progress reset.')} disabled={busy} title="Forget what was watched; start from the first item">Reset</button>{/if}
