@@ -155,9 +155,11 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
       autoStart: normalizeAutoStart(autoStart),
       breaks: normalizeBreaks(breaks),
       // When the last item has aired: 'stop' (the marker rests past the
-      // end, auto-start pauses, Load offers a start-over) or 'restart'
-      // (progress resets by itself — a fixed weekly programme).
-      atEnd: atEnd === 'restart' ? 'restart' : 'stop',
+      // end, auto-start pauses, Load offers a start-over), 'restart'
+      // (progress resets by itself next time — a fixed weekly programme)
+      // or 'loop' (that, and while on air it appends itself from the first
+      // item as its last one starts, so the night never runs dry).
+      atEnd: ['restart', 'loop'].includes(atEnd) ? atEnd : 'stop',
       createdAt: now(), updatedAt: now(), lastRunAt: null,
     };
     state.schedules.push(s);
@@ -181,7 +183,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     if (patch.start != null) s.start = clampInt(patch.start, 0, s.items.length, s.start);
     if ('autoStart' in patch) s.autoStart = normalizeAutoStart(patch.autoStart);
     if ('breaks' in patch) s.breaks = normalizeBreaks(patch.breaks);
-    if ('atEnd' in patch) s.atEnd = patch.atEnd === 'restart' ? 'restart' : 'stop';
+    if ('atEnd' in patch) s.atEnd = ['restart', 'loop'].includes(patch.atEnd) ? patch.atEnd : 'stop';
     if (Array.isArray(patch.watched)) {
       s.watched = [...new Set(patch.watched.map((i) => clampInt(i, 0, s.items.length - 1, -1)).filter((i) => i >= 0))].sort((a, b) => a - b);
     }
@@ -216,8 +218,8 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   }
 
   // ---- tonight -----------------------------------------------------------
-  function segmentFrom(schedule, { startAt = null } = {}) {
-    const start = Math.min(schedule.start, schedule.items.length);
+  function segmentFrom(schedule, { startAt = null, fromStart = false } = {}) {
+    const start = fromStart ? 0 : Math.min(schedule.start, schedule.items.length);
     return {
       key: uid(),
       scheduleId: schedule.id,
@@ -237,7 +239,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
   const finished = (s) => s.items.length > 0 && s.start >= s.items.length;
   /** A finished schedule starts over when it is set to, or when asked. */
   function readyToPlay(s, opts = {}) {
-    if (finished(s) && (opts.restart || s.atEnd === 'restart')) { s.watched = []; s.start = 0; s.updatedAt = now(); }
+    if (finished(s) && (opts.restart || s.atEnd === 'restart' || s.atEnd === 'loop')) { s.watched = []; s.start = 0; s.updatedAt = now(); }
   }
 
   function load(id, opts = {}) {
@@ -535,7 +537,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
         s.autoStart.firedKey = key;
         // Played through and set to stop: this occurrence is skipped, once,
         // and the caller says so. 'restart' schedules start over on load.
-        due.push({ schedule: s, at, skipped: finished(s) && s.atEnd !== 'restart' });
+        due.push({ schedule: s, at, skipped: finished(s) && s.atEnd === 'stop' });
       }
     }
     if (due.length) save();

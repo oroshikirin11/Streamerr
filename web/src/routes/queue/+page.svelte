@@ -427,7 +427,7 @@
   let appendOpen = $state(false);
   const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
   const progress = (s) => (s.items.length ? Math.round((s.watched.length / s.items.length) * 100) : 0);
-  const startLabel = (s) => (s.finished ? (s.atEnd === 'restart' ? 'finished · starts over' : 'finished') : `at ${epName(s.items[s.start]?.title ?? '')}`);
+  const startLabel = (s) => (s.finished ? (s.atEnd === 'loop' ? 'finished · loops' : s.atEnd === 'restart' ? 'finished · starts over' : 'finished') : `at ${epName(s.items[s.start]?.title ?? '')}`);
   const recur = (s) => {
     const a = s.autoStart;
     if (!a?.enabled) return 'no auto-start';
@@ -475,7 +475,7 @@
       days: [...(s.autoStart?.days ?? [])], date: isoToDmy(s.autoStart?.date),
       countdownMin: s.autoStart?.countdownMin ?? 15,
       breaks: s.breaks === 'none' ? 'none' : s.breaks === 'global' ? 'global' : 'custom',
-      atEnd: s.atEnd === 'restart' ? 'restart' : 'stop',
+      atEnd: ['restart', 'loop'].includes(s.atEnd) ? s.atEnd : 'stop',
       every: s.breaks?.every ?? 3, minutes: s.breaks?.minutes ?? 5,
       items: s.items.map((i) => i.id),
     };
@@ -983,7 +983,8 @@
             <label>When finished
               <select bind:value={edit.atEnd}>
                 <option value="stop">Stop — Load offers a start-over, auto-start pauses</option>
-                <option value="restart">Start over from the first item</option>
+                <option value="restart">Start over next time it is loaded or auto-started</option>
+                <option value="loop">Loop — keep playing from the first item until stopped</option>
               </select>
             </label>
             {#if edit.breaks === 'custom'}
@@ -1015,10 +1016,10 @@
                 <div class="progress" class:done={s.start >= s.items.length}><i style:width={`${progress(s)}%`}></i></div>
                 <div class="meta">
                   <span>{s.items.length} items · {startLabel(s)}</span>
-                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}{#if s.finished && s.autoStart?.enabled && s.atEnd !== 'restart'} · paused, played through{/if}</span>
+                  <span class={s.autoStart?.enabled ? 'rec' : ''}>{recur(s)}{#if s.nextRun} · next {clock(s.nextRun)}{/if}{#if s.finished && s.autoStart?.enabled && s.atEnd === 'stop'} · paused, played through{/if}</span>
                 </div>
                 <div class="acts">
-                  {#if s.finished && s.atEnd !== 'restart'}
+                  {#if s.finished && s.atEnd === 'stop'}
                     <button onclick={() => act(() => api.loadSchedule(s.id, null, true), `"${s.name}" starts over.`)} disabled={busy} title="Every item has aired — load it from the first item again">Start over</button>
                     <button onclick={() => act(() => api.appendSchedule(s.id, null, true), `Appended "${s.name}" from the start.`)} disabled={busy} title="Add it after what is lined up, from the first item">Append</button>
                   {:else}

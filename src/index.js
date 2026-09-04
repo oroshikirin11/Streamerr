@@ -969,6 +969,15 @@ function wirePreview(e) {
       finish();
       track.key = key; track.item = p; track.max = 0; track.dur = p.duration ?? null;
       sched.onAir(p.seg?.item ?? null);
+      // A looping schedule appends itself from its first item as its last
+      // one goes on air, so the next pass is lined up with a full clip of
+      // preparation time — and the schedule's own memory is left alone.
+      const loop = p.seg?.scheduleId ? sched.get(p.seg.scheduleId) : null;
+      if (loop?.atEnd === 'loop' && !(s.queue?.length) && !sched.upcomingEntries().length) {
+        sched.append(loop.id, { fromStart: true });
+        syncTonight().catch((err) => dpush('warn', `loop: could not line up "${loop.name}" again: ${err.message}`));
+        dpush('info', `loop: "${loop.name}" lined up again from the first item`);
+      }
     }
     if (s.position > track.max) track.max = s.position;
     if (p.duration) track.dur = p.duration;

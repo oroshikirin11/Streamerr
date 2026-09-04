@@ -234,3 +234,18 @@ test('auto-start skips a finished schedule set to stop, and runs one set to rest
   assert.equal(st.upcomingEntries().length, 1);
   assert.equal(st.dueAutoStarts(base + 60_000).length, 0, 'each occurrence once, skipped or not');
 });
+
+test('a loop pass appends from the first item without touching the schedule memory', () => {
+  const st = createScheduleStore({ now });
+  const s = st.create({ name: 'L', items: eps(2), watched: [0], start: 1, atEnd: 'loop' });
+  st.load(s.id);
+  assert.equal(st.upcomingEntries().length, 1, 'plays on from the marker');
+  st.append(s.id, { fromStart: true });
+  assert.equal(st.upcomingEntries().length, 3, 'a whole pass follows');
+  assert.equal(st.get(s.id).start, 1, 'memory untouched');
+  assert.deepEqual(st.get(s.id).watched, [0]);
+  // Finished and looping: load starts over by itself, and auto-start is not skipped.
+  st.update(s.id, { watched: [0, 1], start: 2 });
+  st.load(s.id);
+  assert.equal(st.upcomingEntries().length, 2);
+});
