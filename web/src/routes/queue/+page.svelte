@@ -973,7 +973,7 @@
               {#if it.image}<img class="cv xs" src={it.image} alt="" onerror={(e) => e.currentTarget.remove()} />{/if}
               <span class="qt">
                 {#if isPast}<span class="tick" class:sk={it.state === 'skipped'}>{it.state === 'skipped' ? '↷' : '✓'}</span>{/if}
-                {epName(it.title)}
+                {epName(it.title)}{#if it.name}<span class="en">{it.name}</span>{/if}
                 {#if it.onAir}<small>on air</small>{:else if it.state === 'skipped'}<small>skipped</small>{:else if it.state === 'aired'}<small>aired</small>{:else if it.watched}<small>watched</small>{/if}
               </span>
               {#if it.state === 'upcoming'}
@@ -1048,7 +1048,7 @@
             <label>Name <input bind:value={edit.name} /></label>
             <label>Starts from
               <select bind:value={edit.start}>
-                {#each editItems as it, i}<option value={i}>{epName(it.title)}{#if s?.watched.includes(i)} · watched{/if}</option>{/each}
+                {#each editItems as it, i}<option value={i}>{epName(it.title)}{#if it.name} · {it.name}{/if}{#if s?.watched.includes(i)} · watched{/if}</option>{/each}
                 <option value={editItems.length}>finished</option>
               </select>
             </label>
@@ -1335,6 +1335,7 @@
   .tick.sk { color: var(--muted); }
   .qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .qt small { color: var(--muted); margin-left: 6px; }
+  .qt .en { color: var(--muted); margin-left: 8px; }
   .cv.xs { width: 26px; height: 36px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
   .dur { flex-shrink: 0; }
   .startbar { display: flex; align-items: center; gap: 8px; padding: 3px 10px !important; font-size: 11px; color: var(--accent); letter-spacing: .06em; text-transform: uppercase; border-bottom: none !important; }

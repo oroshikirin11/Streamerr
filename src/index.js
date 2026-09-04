@@ -2808,6 +2808,7 @@ app.post('/api/stream/queue', wrap(async (req, res) => {
  * the engine's queue is derived from tonight whenever it changes.
  * ---------------------------------------------------------------------- */
 const sched = createScheduleStore({ path: join(CONFIG_DIR, 'schedules.json') });
+backfillEpisodeNames().catch((err) => dpush('warn', `schedule: could not fill in episode names: ${err.message}`));
 
 /** Extra fields an entry may carry into the engine queue. */
 function queueExtras(entry) {
@@ -2850,6 +2851,10 @@ async function resolveItems(ids) {
       title: item.seriesName
         ? `${item.seriesName} — S${item.season ?? '?'}E${item.episode ?? '?'}`
         : item.title,
+      // The episode's own name ("Uplink"), kept apart from the title the
+      // broadcast announces ("Satellites — S1E1"), so the lineup can show
+      // both without parsing one out of the other.
+      name: item.seriesName ? (item.title ?? null) : null,
       series: item.seriesName ?? null,
       season: item.season ?? null,
       episode: item.episode ?? null,
@@ -2858,6 +2863,25 @@ async function resolveItems(ids) {
     });
   }
   return out;
+}
+
+/**
+ * Schedules saved before episodes carried their names get them filled in
+ * from the library, once, best effort: a title that no longer resolves is
+ * simply left as it was.
+ */
+async function backfillEpisodeNames() {
+  const misses = new Set();
+  const changed = await sched.patchItems(async (it) => {
+    if (!it.series || it.name != null || misses.has(it.id)) return false;
+    try {
+      const item = await library.item(it.id);
+      if (!item?.seriesName || !item.title) return false;
+      it.name = item.title;
+      return true;
+    } catch { misses.add(it.id); return false; }
+  });
+  if (changed) dpush('info', `schedule: filled in episode names for ${changed} lineup ${changed === 1 ? 'item' : 'items'}`);
 }
 
 /** Tonight with the engine's projections folded in: air times and what is on. */

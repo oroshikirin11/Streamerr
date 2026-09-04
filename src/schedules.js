@@ -50,6 +50,7 @@ export function pickItem(it) {
   return {
     id: it.id,
     title: String(it.title ?? ''),
+    name: it.name != null ? String(it.name) : null,
     series: it.series ?? it.seriesName ?? null,
     season: it.season ?? null,
     episode: it.episode ?? null,
@@ -328,6 +329,19 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
 
   const finished = (s) => s.items.length > 0 && s.start >= s.items.length;
   /** A finished schedule starts over when it is set to, or when asked. */
+  /**
+   * Visit every item, saved schedules and tonight alike, with a function
+   * that may change it in place and returns whether it did. Saves once
+   * when anything changed; returns the count.
+   */
+  async function patchItems(fn) {
+    let n = 0;
+    const all = [...state.schedules.flatMap((s) => s.items), ...state.tonight.segments.flatMap((g) => g.items)];
+    for (const it of all) if (await fn(it)) n++;
+    if (n) save();
+    return n;
+  }
+
   function readyToPlay(s, opts = {}) {
     if (finished(s) && (opts.restart || s.atEnd === 'restart' || s.atEnd === 'loop')) { s.watched = []; s.start = 0; s.updatedAt = now(); }
   }
@@ -731,7 +745,7 @@ export function createScheduleStore({ path = null, now = () => Date.now() } = {}
     nextRun: (id, nowMs) => nextRun(must(id), nowMs),
     upcomingEntries,
     // schedules
-    create, update, remove, resetProgress, duplicate,
+    create, update, remove, resetProgress, duplicate, patchItems,
     // tonight
     load, append, addItems, reorder, moveItem, moveSegment, removeItem, removeSegment,
     setItem, setSegment, setSegmentStart, clearTonight, saveTonightAs, linedUp, markMissing,

@@ -444,3 +444,14 @@ test('buildQueue leaves out what cannot be built and reports it, keeping pins an
   assert.deepEqual(items[0].seg, { item: 'k1' });
   assert.equal(items[1].breakBefore, 120); assert.equal(items[1].startAt, undefined);
 });
+
+test('items keep the episode name, and patchItems fills it in later', async () => {
+  const st = createScheduleStore();
+  st.create({ name: 'N', items: [{ id: 'fs~e1', title: 'Show — S1E1', series: 'Show', season: 1, episode: 1, name: 'Uplink' }, { id: 'fs~e2', title: 'Show — S1E2', series: 'Show', season: 1, episode: 2 }] });
+  const s = st.list().find((x) => x.name === 'N');
+  assert.equal(s.items[0].name, 'Uplink');
+  assert.equal(s.items[1].name, null);
+  const n = await st.patchItems(async (it) => { if (it.name == null) { it.name = 'Orbit'; return true; } return false; });
+  assert.equal(n, 1);
+  assert.equal(st.get(s.id).items[1].name, 'Orbit');
+});
