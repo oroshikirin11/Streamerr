@@ -211,7 +211,14 @@
    * control would have to be rebuilt to add it.
    */
   const metaProvider = $derived(src?.metadata?.provider ?? 'none');
+  /**
+   * The catalogue key being typed for the SELECTED source. A switch of the
+   * source chips stashes it under that source's id and shows the one typed
+   * for the new source (usually nothing), so a key is only ever saved to
+   * the source it was typed for — never to whichever chip is lit at Save.
+   */
   let metaKey = $state('');
+  let metaKeys = {};
   let match = $state(null);
   let matching = $state(false);
 
@@ -251,10 +258,16 @@
         if (pub?.[proto]?.[f] === '__SET__') { seen[`${proto}.${f}`] = true; pub[proto][f] = ''; }
       }
     }
+    // Plain strings, always: an input bound to a missing field would send
+    // nothing back on save, so a cleared Room could never reach the server.
+    pub.name = String(pub.name ?? '');
+    pub.channel = String(pub.channel ?? '');
     for (const e of pub?.extras ?? []) {
       for (const f of SECRET_OF[e.protocol] ?? []) {
         if (e[f] === '__SET__') { seen[`x.${e.id}.${f}`] = true; e[f] = ''; }
       }
+      e.name = String(e.name ?? '');
+      e.channel = String(e.channel ?? '');
     }
     publishSaved = seen;
     return pub;
@@ -536,6 +549,8 @@
       accessToken = '';
       streamKey = '';
       jellyfinKey = '';
+      metaKey = '';
+      metaKeys = {};
       cfg.library ??= {};
       cfg.library.sources = (cfg.library.sources ?? []).map(shapeSource);
       if (!cfg.library.sources.length) {
@@ -587,6 +602,8 @@
 
   /** Secrets and the roots box are per source, so re-seed them on a switch. */
   function selectSource(i) {
+    const prev = cfg?.library?.sources?.[sel];
+    if (prev) metaKeys[prev.id] = metaKey;
     sel = i;
     jellyfinKey = '';
     smbPassword = '';
@@ -594,6 +611,7 @@
     const x = cfg.library.sources[i];
     jfKeyStored = x?.jellyfin?.apiKey === '__SET__';
     fsRoots = (x?.filesystem?.roots ?? []).join('\n');
+    metaKey = metaKeys[x?.id] ?? '';
   }
 
   function addSource() {
@@ -645,10 +663,11 @@
          * so a stored one survives a save of anything else.
          */
         const m = x.metadata ?? {};
+        const typedMeta = i === sel ? metaKey : metaKeys[x.id];
         out.metadata = {
           provider: m.provider ?? 'none',
           url: m.url ?? '',
-          apiKey: x === src && metaKey ? metaKey : (m.apiKey || ''),
+          apiKey: typedMeta || (m.apiKey || ''),
           pathMap: m.pathMap ?? [],
         };
         out.smb = {
@@ -766,19 +785,31 @@
       if (streamKey) { keyStored = true; streamKey = ''; }
       if (accessToken) { tokenStored = true; accessToken = ''; }
       if (jellyfinKey) { jfKeyStored = true; jellyfinKey = ''; }
+      if (section === 'library') {
+        // Every typed catalogue key is now stored server-side: show the
+        // "saved" hint on its source and forget the plaintext.
+        for (const x of cfg.library.sources) {
+          const typed = x === src ? metaKey : metaKeys[x.id];
+          if (typed && x.metadata) x.metadata.apiKey = '__SET__';
+        }
+        metaKey = '';
+        metaKeys = {};
+      }
       saved = section;
       setTimeout(() => { if (saved === section) saved = ''; }, 2500);
     } catch (err) { error = err.message; }
   }
 
+  /**
+   * Pushes a short test feed to the primary destination as the form has
+   * it — unsaved edits included, untouched secrets as the sentinel so the
+   * server fills in what is stored. The legacy owncast block is empty on
+   * a current install; the publish block is where the destination lives.
+   */
   async function testOwncast(watch = false) {
     testing = watch ? 'owncast-watch' : 'owncast'; owncastResult = null;
     try {
-      owncastResult = await api.checkOwncast({
-        rtmpUrl: cfg.owncast.rtmpUrl,
-        streamKey: streamKey || (keyStored ? '__SET__' : ''),
-        watch,
-      });
+      owncastResult = await api.checkOwncast({ publish: maskPublish(cfg.publish), watch });
     } catch (err) { owncastResult = { ok: false, error: err.message }; }
     finally { testing = ''; }
   }
@@ -1099,8 +1130,21 @@
     </p>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('publish')}>Save</button>
+      <button onclick={() => testOwncast(false)} disabled={!!testing}>
+        {testing === 'owncast' ? 'Checking…' : 'Test connection'}
+      </button>
+      <button onclick={() => testOwncast(true)} disabled={!!testing}>
+        {testing === 'owncast-watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
+      </button>
       {#if saved === 'publish'}<span class="ok small">Saved</span>{/if}
     </div>
+    {#if owncastResult}
+      <div class="result" class:bad={!owncastResult.ok}>
+        {owncastResult.ok
+          ? `Accepted — ${owncastResult.seconds}s pushed in ${(owncastResult.ms / 1000).toFixed(0)}s`
+          : owncastResult.error}
+      </div>
+    {/if}
   </section>
 
   <!-- Streamingestarr -->
@@ -1237,21 +1281,8 @@
 
     <div class="actions">
       <button class="primary" onclick={() => save('owncast')}>Save</button>
-      <button onclick={() => testOwncast(false)} disabled={!!testing}>
-        {testing === 'owncast' ? 'Checking…' : 'Test connection'}
-      </button>
-      <button onclick={() => testOwncast(true)} disabled={!!testing}>
-        {testing === 'owncast-watch' ? 'Streaming… 30s' : 'Send 30s to watch'}
-      </button>
       {#if saved === 'owncast'}<span class="ok small">Saved</span>{/if}
     </div>
-    {#if owncastResult}
-      <div class="result" class:bad={!owncastResult.ok}>
-        {owncastResult.ok
-          ? `Accepted — ${owncastResult.seconds}s pushed in ${(owncastResult.ms / 1000).toFixed(0)}s`
-          : owncastResult.error}
-      </div>
-    {/if}
   </section>
 
   </section>

@@ -42,17 +42,15 @@
   let position = $state(0);
 
   // The clock ticks LOCALLY at exactly one second per second, like any
-  // video player. The rule that keeps it from rubberbanding: a PERIODIC
-  // estimate never moves a running clock — the server's position stamps
-  // swing around true airtime by up to the bank depth, and letting them
-  // correct the clock yanked it forward and back. Only EVENTS move it:
-  // a seek, a skip, a broadcast starting — those arrive as stream
-  // messages, which are authoritative. Progress ticks keep a gross
-  // safety net for a genuinely lost clock, far beyond any stamp swing.
-  const syncPosition = (server, { authoritative = false } = {}) => {
+  // video player — while a clip plays and while a countdown card counts
+  // (its "live in" is duration minus position). Every server stamp —
+  // stream events and the half-second progress ticks alike — carries the
+  // AIRED position, which advances at realtime, so each one may correct
+  // the clock; the small threshold only keeps sub-second jitter from
+  // rewriting a clock that is already right.
+  const syncPosition = (server) => {
     if (server == null) return;
-    const gap = Math.abs(server - position);
-    if (authoritative ? gap > 1.5 : gap > 20) position = server;
+    if (Math.abs(server - position) > 1.5) position = server;
   };
   let speed = $state(null);
   // Redacted server-side; nothing here ever holds a stream key.
@@ -140,7 +138,7 @@
 
   onMount(() => {
     const tick = setInterval(() => {
-      if (stream.status === 'running' && stream.playing && !paused && !counting) {
+      if (stream.status === 'running' && stream.playing && !paused) {
         position += 1;
       }
     }, 1000);
@@ -246,7 +244,7 @@
         // Kept rather than replaced when absent, so a payload that predates
         // this field does not blank the hint.
         if (msg.payload.targets) targets = msg.payload.targets;
-        syncPosition(msg.payload.position, { authoritative: true });
+        syncPosition(msg.payload.position);
         if (msg.payload.status === 'stopped') bufPts = [];
       } else if (msg.type === 'schedule') {
         tonight = msg.payload.tonight ?? tonight;

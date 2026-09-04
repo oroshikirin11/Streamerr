@@ -27,13 +27,36 @@
       status = s; view = v;
     } catch (err) { error = err.message; }
   }
+  /**
+   * The aired position, ticked locally once a second like the footer's
+   * clock (a countdown card counts down the same way — its "live in" is
+   * duration minus position). Stream messages carry an authoritative
+   * position and are adopted wholesale; progress ticks arrive twice a
+   * second and only correct a clock that has drifted.
+   */
+  const syncPosition = (server) => {
+    if (server == null) return;
+    if (status.position == null || Math.abs(server - status.position) > 1.5) status.position = server;
+  };
   onMount(() => {
     refresh();
     stopFeed = connectStatus((msg) => {
       if (msg.type === 'stream') status = msg.payload;
       if (msg.type === 'schedule') view = msg.payload;
+      if (msg.type === 'progress') {
+        const p = msg.payload;
+        syncPosition(p.position);
+        if (p.cachedAhead != null) status.cachedAhead = p.cachedAhead;
+        if (p.cachedBehind != null) status.cachedBehind = p.cachedBehind;
+        if (p.rebuilding != null) status.rebuilding = p.rebuilding;
+      }
     });
-    tick = setInterval(() => { now = Date.now() / 1000; }, 1000);
+    // One interval moves both clocks, so the strip's on-air block (anchored
+    // at now minus position) stays put between events instead of sliding.
+    tick = setInterval(() => {
+      now = Date.now() / 1000;
+      if (status.status === 'running' && status.playing) status.position = (status.position ?? 0) + 1;
+    }, 1000);
   });
   onDestroy(() => { stopFeed?.(); clearInterval(tick); });
 
@@ -542,13 +565,17 @@
     editError = '';
     const iso = e.date ? dmyToIso(e.date) : null;
     if (e.auto && e.date && !iso) { editError = 'The date should read day.month.year, like 05.09.2026.'; return; }
+    const s = view.schedules.find((x) => x.id === id);
+    // The fired marker is the server's, not the form's: rebuilding the
+    // block without it made a schedule fire again during its own countdown.
+    const firedKey = s?.autoStart?.firedKey ?? null;
     const autoStart = e.auto && parseClock(e.time) ? {
       time: e.time, days: iso ? [] : e.days, date: iso, countdownMin: Number(e.countdownMin), enabled: true,
+      ...(firedKey ? { firedKey } : {}),
     } : null;
     if (e.auto && !autoStart) { editError = 'Auto-start needs a time like 20:00.'; return; }
     if (e.auto && !iso && !e.days.length) { editError = 'Pick the days it repeats on, or type a date.'; return; }
     const breaks = e.breaks === 'custom' ? { every: Number(e.every), minutes: Number(e.minutes) } : e.breaks;
-    const s = view.schedules.find((x) => x.id === id);
     const itemsChanged = s && s.items.map((i) => i.id).join('|') !== e.items.join('|');
     await act(() => api.updateSchedule(id, { name: e.name, start: e.start, autoStart, breaks, atEnd: e.atEnd, ...(itemsChanged ? { itemIds: e.items } : {}) }), 'Saved.');
     if (error) { editError = error; return; }
