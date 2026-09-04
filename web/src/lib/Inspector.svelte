@@ -124,8 +124,8 @@
   {#if pick}<p class="muted small">Click a track to use it for the next broadcast instead.</p>{/if}
 {/snippet}
 
-<div class="backdrop" onclick={(e) => { if (e.target === e.currentTarget) onclose?.(); }} role="presentation">
-  <aside class="drawer" role="dialog" aria-label="Media details">
+<div class="overlay" onclick={(e) => { if (e.target === e.currentTarget) onclose?.(); }} role="presentation">
+  <div class="card modal" role="dialog" aria-label="Media details">
     <header>
       <h3>{title || data?.title}</h3>
       <button class="ic" onclick={onclose} title="Close" aria-label="Close">×</button>
@@ -154,15 +154,15 @@
     {:else if data}
       {@render sheet(data)}
     {/if}
-  </aside>
+  </div>
 </div>
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 40; }
-  .drawer {
-    position: absolute; top: 0; right: 0; bottom: 0; width: min(560px, 100%);
-    background: var(--surface); border-left: 1px solid var(--border); padding: 18px 22px 30px;
-    overflow: auto; box-shadow: -20px 0 50px rgba(0,0,0,.35);
+  /* The same overlay and card every other dialog in the panel uses. */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 20px; z-index: 40; }
+  .modal {
+    width: min(680px, 92vw); max-height: 85vh; overflow: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
   }
   header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   header h3 { margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
