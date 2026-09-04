@@ -1092,9 +1092,9 @@
           <input type="password" bind:value={ex.key}
                  placeholder={savedHint(`x.${ex.id}.key`) ?? 'stream key'} />
         {/if}
-        {#if ex.protocol === 'tcp'}
+        {#if ex.protocol === 'tcp' || ex.protocol === 'srt'}
           <input type="password" bind:value={ex.passphrase}
-                 placeholder={savedHint(`x.${ex.id}.passphrase`) ?? 'passphrase (if the receiver demands one)'} />
+                 placeholder={savedHint(`x.${ex.id}.passphrase`) ?? (ex.protocol === 'srt' ? 'passphrase (optional) — encrypts the link' : 'passphrase (if the receiver demands one)')} />
         {/if}
         <input bind:value={ex.channel} spellcheck="false" maxlength="40"
                placeholder="room override (optional) — auto-detected from the stream key" />
