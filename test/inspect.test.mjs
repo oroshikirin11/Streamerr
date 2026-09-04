@@ -10,6 +10,21 @@ test('helpers', () => {
   assert.equal(bitDepthOf('yuv420p10le'), 10);
   assert.equal(bitDepthOf('yuv420p'), 8);
   assert.equal(bitDepthOf(null), null);
+  // Only an explicit depth component counts: the digits in these describe
+  // bits per pixel or chroma layout, not depth.
+  for (const f of ['rgb24', 'yuyv422', 'nv12', 'bgra', 'yuvj420p', 'uyvy422', 'gray', 'pal8']) {
+    assert.equal(bitDepthOf(f), 8, f);
+  }
+  assert.equal(bitDepthOf('yuv420p10be'), 10);
+  assert.equal(bitDepthOf('yuv444p12'), 12);
+  assert.equal(bitDepthOf('yuv420p16le'), 16);
+  assert.equal(bitDepthOf('gbrp10le'), 10);
+  assert.equal(bitDepthOf('p010le'), 10);
+  assert.equal(bitDepthOf('p016le'), 16);
+  assert.equal(bitDepthOf('gray16le'), 16);
+  assert.equal(bitDepthOf('gray10le'), 10);
+  assert.equal(bitDepthOf('rgb48le'), 16);
+  assert.equal(bitDepthOf('x2rgb10le'), 10);
   assert.equal(fpsOf('24000/1001'), 23.976);
   assert.equal(fpsOf('25/1'), 25);
 });

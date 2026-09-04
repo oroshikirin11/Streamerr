@@ -7,11 +7,27 @@
 
 const up = (s) => String(s ?? '').toUpperCase();
 
-/** "10" from "yuv420p10le", "8" from "yuv420p", null when unknown. */
+/**
+ * Bits per component: 10 from "yuv420p10le", 16 from "gray16le", null when
+ * unknown. Only formats that SPELL a depth report more than 8 — the digits
+ * in "rgb24", "yuyv422" and "nv12" are bits per pixel or chroma layout,
+ * and reading them as a depth put "24-bit decode" warnings on plain RGB.
+ */
 export function bitDepthOf(pixFmt) {
   if (!pixFmt) return null;
-  const m = /(\d{2})(?:le|be)?$/.exec(pixFmt);
-  return m ? Number(m[1]) : 8;
+  const f = String(pixFmt).toLowerCase();
+  const depth = (re) => { const m = re.exec(f); return m ? Number(m[1]) : null; };
+  // Planar: the depth follows the 'p' — yuv420p10le, gbrp12, yuva444p16be.
+  return depth(/p(9|1[0-6])(?:le|be)?$/)
+    // Grey and grey+alpha: gray10le, gray16be, ya16le.
+    ?? depth(/^(?:gray|ya)(9|1[0-6])(?:le|be)?$/)
+    // Semi-planar 10/12/16-bit: p010le, p012le, p016le, p210le, p416be.
+    ?? depth(/^p[024](1[026])(?:le|be)?$/)
+    // Packed high-depth RGB: rgb48le, bgra64be (16 per component),
+    // x2rgb10le (10 per component).
+    ?? (/^(?:rgb|bgr)a?(?:48|64)(?:le|be)?$/.test(f) ? 16 : null)
+    ?? (/^x2(?:rgb|bgr)10(?:le|be)?$/.test(f) ? 10 : null)
+    ?? 8;
 }
 
 /** "24000/1001" → 23.976, "25/1" → 25. */

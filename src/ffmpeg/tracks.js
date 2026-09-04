@@ -179,8 +179,20 @@ export function findSidecarSubtitles(mediaPath) {
     if (!name.startsWith(stem)) continue;
 
     // Whatever sits between the stem and the extension describes the track.
-    const middle = basename(name, ext).slice(stem.length).replace(/^[.\-_]+/, '');
+    const rest = basename(name, ext).slice(stem.length);
+    const middle = rest.replace(/^[.\-_]+/, '');
     const parts = middle.split(/[.\-_]+/).filter(Boolean);
+    // A prefix match is not a match: "Episode 1" must not claim
+    // "Episode 10.eng.srt". The stem has to be the whole name, be followed
+    // by a dot, or by a dash/underscore run of nothing but language and
+    // flag markers ("Episode 1-eng-forced.srt") — "Episode 1-2.srt" is a
+    // different title.
+    if (rest && !rest.startsWith('.')) {
+      if (!/^[\-_]/.test(rest)) continue;
+      const known = (p) => p === 'forced' || p === 'sdh' || p === 'cc' || p === 'hi'
+        || Boolean(LANG_ALIASES[p]);
+      if (!parts.length || !parts.every((p) => known(p.toLowerCase()))) continue;
+    }
 
     let language = null;
     let forced = false;
@@ -287,7 +299,7 @@ export function selectTracks(tracks, subtitles, prefs = {}) {
     } else if (subtitleMode === 'forced') {
       // Forced subs only translate foreign dialogue — the usual choice when
       // you understand the spoken language.
-      subtitle = pickByLanguage(subtitles.filter((s) => s.forced), subtitleLanguages);
+      subtitle = pickByLanguage(subtitles.filter((s) => s.forced), subtitleLanguages.map(normLang));
     } else {
       const audioLang = audio?.language ?? null;
       const wanted = subtitleLanguages.map(normLang);

@@ -886,23 +886,24 @@ export class PipelinePlayout extends EventEmitter {
       await this._extract(first);
       this.emit('log', `[subs] prepared in ${((Date.now() - t0) / 1000).toFixed(0)}s\n`);
       // The user may have hit Stop while the extraction ran.
-      if (this._stopping) {
-        this.status = 'stopped';
-        this.emit('status', this.status);
-        this.emit('ended');
-        return;
-      }
+      if (this._stopping) return this._abortStart();
     } else {
       await this.prepare(first);
+      if (this._stopping) return this._abortStart();
     }
     // Warm before connecting: Owncast drops a session that is silent for its
     // first 10s, and a cold Bluray over SMB can take longer than that to
     // open. Reading the head first means the source starts hot.
     await this._warm(first);
+    // A Stop during any of these waits has no publisher close to finish
+    // the broadcast for it: spawning the source anyway left the engine
+    // 'starting' forever, with a watchdog ticking over nothing.
+    if (this._stopping) return this._abortStart();
     // Raw-TCP destinations publish through a loopback bridge that owns the
     // real connection (see tcp-bridge.js). Listeners are created once here
     // and survive publisher restarts; only the remote dial is per-session.
     await this._prepareTcpBridges();
+    if (this._stopping) return this._abortStart();
     // A chunked clip produces nothing until its first chunk has finished
     // encoding, and then nothing again until the second one does. Opening
     // the RTMP session before that cushion exists put the encode latency
@@ -929,6 +930,27 @@ export class PipelinePlayout extends EventEmitter {
 
     this._lastBlockAt = Date.now();
     this._lastAiredAt = Date.now();
+    this._armWatch();
+  }
+
+  /**
+   * stop() arrived while start() was still awaiting (extraction, warm-up,
+   * bridges). Nothing is on air and no publisher exists, so the close
+   * handler that normally ends a broadcast will never run — finish it
+   * here, the way stop() does for an off-air break.
+   */
+  _abortStart() {
+    if (this._watch) { clearInterval(this._watch); this._watch = null; }
+    this._killSource();
+    this.current = null;
+    this.status = 'stopped';
+    this.emit('status', this.status);
+    this.emit('ended', { code: 0 });
+  }
+
+  /** The stall watchdog; idempotent, so every path that brings a publisher up can call it. */
+  _armWatch() {
+    if (this._watch) return;
     this._watch = setInterval(() => this._checkHealth(), 2000);
     this._watch.unref?.();
   }
@@ -3587,6 +3609,9 @@ export class PipelinePlayout extends EventEmitter {
     }
     if (this._stopping) return;
     this._spawnPublisher();
+    // The publisher's close cleared the watchdog when the break began;
+    // the broadcast is back on, so it has to supervise again.
+    this._armWatch();
     this._advance();
   }
 
@@ -4092,10 +4117,7 @@ export class PipelinePlayout extends EventEmitter {
     this._spawnPublisher();
     // The publisher's close cleared the watchdog; the broadcast is
     // continuing, so it has to be re-armed or nothing supervises it again.
-    if (!this._watch) {
-      this._watch = setInterval(() => this._checkHealth(), 2000);
-      this._watch.unref?.();
-    }
+    this._armWatch();
     this._play(next.item, next.offset, { duration: next.duration });
   }
 
@@ -4129,6 +4151,11 @@ export class PipelinePlayout extends EventEmitter {
     // A change needs a new RTMP session, so hand off to _reshape and let it
     // call back into _play once the new publisher is up.
     const shape = this._shapeFor(this.selection?.video);
+    // swDecode is a per-clip demotion (cleared by _rearmGpu at the clip
+    // boundary). Whoever set it on the live profile meant it for THIS
+    // clip's retry, and the rebuild below reads the box — so it goes into
+    // the box first, or the retry spawns the very command that just failed.
+    if (this.profile?.swDecode) this._box.swDecode = true;
     const shapeChanged = shape.width !== this.profile.width
       || shape.height !== this.profile.height;
     if (shapeChanged && this.publisher && !this._reshaping) {
@@ -4397,6 +4424,11 @@ export class PipelinePlayout extends EventEmitter {
               + `audio seeks there too so the streams stay glued\n`);
           }
           this._copyAlignFor = { req: offset, landing: landing ?? offset };
+          // A pause landed while the probe ran: the hold card is up and
+          // spawning the clip now would silently un-pause the broadcast.
+          // The landing is kept, so resume()'s _play at this offset uses
+          // it without probing again.
+          if (this.status === 'paused') return;
           /**
            * No reconnect. That was tried — a copy->copy splice starting on
            * a CRA does not reset decoders, so the session was recycled to
@@ -4439,13 +4471,14 @@ export class PipelinePlayout extends EventEmitter {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
           + `bytes ship untouched (~${srcKbps ?? kbps} kbps); encode cost zero. An Apply `
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
-      } else if (isCopy && !copyKeyframesFitLive(this.profile)) {
-        // Kept on the copy path only because re-encoding it would be
-        // worse — say so, since the latency is the visible consequence.
-        this.emit('warn', `${this.current?.item?.title ?? 'This title'} keyframes only `
-          + `every ${this.profile.srcGopSeconds.toFixed(1)}s, so viewers will sit further `
-          + `behind live on it. It is being copied anyway because it is HDR and `
-          + `re-encoding would cost the HDR or the broadcast.`);
+        if (!copyKeyframesFitLive(this.profile)) {
+          // Kept on the copy path only because re-encoding it would be
+          // worse — say so, since the latency is the visible consequence.
+          this.emit('warn', `${this.current?.item?.title ?? 'This title'} keyframes only `
+            + `every ${this.profile.srcGopSeconds.toFixed(1)}s, so viewers will sit further `
+            + `behind live on it. It is being copied anyway because it is HDR and `
+            + `re-encoding would cost the HDR or the broadcast.`);
+        }
       } else if (this.profile?.codec === 'hevc'
           && this.selection?.video?.codec === 'hevc' && !this.selection?.subtitle
           && !copyKeyframesFitLive(this.profile)) {
@@ -5661,9 +5694,17 @@ export class PipelinePlayout extends EventEmitter {
         // software frames, the VAAPI filters reject them, and the encoder
         // reports -22 — so match on the real message, not the symptom.
         // Decoding on the CPU keeps filters and encode on the GPU.
+        // Once per clip: _demote writes the box, which the retry's _play
+        // rebuilds the profile from — a profile-only write was erased by
+        // that rebuild, and the retry spawned byte-identical args forever.
+        // A clip that fails the same way with software decode falls
+        // through to the dead-clip handling below and is skipped.
+        this._hwDecodeRetried ??= new WeakSet();
         if (!this._sawBlock && !this.profile?.swDecode && this.current
+            && !this._hwDecodeRetried.has(this.current.item)
             && /hwaccel initialisation returned error|Failed setup for format vaapi/i.test(stderr)) {
-          this.profile.swDecode = true;
+          this._hwDecodeRetried.add(this.current.item);
+          this._demote({ swDecode: true });
           this.emit('warn', 'This file cannot be decoded by the GPU '
             + '(10-bit H.264 is the usual reason) — decoding on the CPU and '
             + 'keeping the rest on the GPU.');
@@ -5895,7 +5936,9 @@ export class PipelinePlayout extends EventEmitter {
    * and does not loop.
    */
   _rearmGpu() {
+    // Both stores: the next _play rebuilds the profile from the box.
     if (this.profile?.swDecode) delete this.profile.swDecode;
+    if (this._box?.swDecode) delete this._box.swDecode;
     if (!this._demoted) return;
     // Both, or the next _play rebuilds the profile from the box and undoes
     // the re-arm exactly as it used to undo the demotion.
