@@ -1,5 +1,6 @@
 <script>
   import { api } from '$lib/api.js';
+  import { modal } from '$lib/modal.js';
 
   /**
    * The media inspector: a drawer that says what a file is and what the
@@ -66,10 +67,7 @@
   const pickedSub = (s) => (pick && 'subtitleKey' in pick ? pick.subtitleKey : (s.chosen?.subtitleKey ?? null));
 
   $effect(() => { if (id) load(); });
-  function onKey(e) { if (e.key === 'Escape') onclose?.(); }
 </script>
-
-<svelte:window onkeydown={onKey} />
 
 {#snippet sheet(s)}
   <div class="verdict" class:ok={s.verdict?.passthrough}>
@@ -125,7 +123,8 @@
 {/snippet}
 
 <div class="overlay" onclick={(e) => { if (e.target === e.currentTarget) onclose?.(); }} role="presentation">
-  <div class="card modal" role="dialog" aria-label="Media details">
+  <div class="card modal" role="dialog" aria-modal="true" aria-label="Media details" tabindex="-1"
+       use:modal={{ onClose: onclose }}>
     <header>
       <h3>{title || data?.title}</h3>
       <button class="ic" onclick={onclose} title="Close" aria-label="Close">×</button>

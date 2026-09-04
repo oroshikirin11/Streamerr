@@ -1,7 +1,10 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import { api, fmtTime , maskClock, parseClock } from '$lib/api.js';
   import Inspector from '$lib/Inspector.svelte';
+  import { modal } from '$lib/modal.js';
 
   let libraries = $state([]);
   // Null = showing the folder cards. The grid only exists inside a library.
@@ -138,13 +141,66 @@
       window.dispatchEvent(new CustomEvent('jsr-toast', { detail: {
         kind: 'info', message: `Added ${ordered.length} to "${name}".`, href: '/queue', hrefLabel: 'Open Schedule',
       } }));
-      selected = new Set();
+      clearSelection();
     } catch (err) { error = err.message; }
     finally { starting = false; schedName = ''; }
   }
 
   // Drill-down state. Null series = showing the grid.
+  //
+  // The open show also lives in the URL (`/?series=<id>`), so Back leaves
+  // the show for the grid rather than the whole Library, Forward returns
+  // to it, and a show can be linked. State follows the URL: opening pushes
+  // an entry, and the effect below turns URL changes — Back, Forward, a
+  // pasted link — back into state.
   let series = $state(null);
+  const seriesParam = $derived(page.url.searchParams.get('series'));
+  /** Whether the entry under this show is the grid, so "← Shows" can go back. */
+  let pushedFromGrid = false;
+  /** Shelf labels by show id, so Back/Forward keeps the "← Movies" name. */
+  const fromLabels = new Map();
+  const seriesUrl = (id) => `/?series=${encodeURIComponent(id)}`;
+  function pushSeriesUrl(id) {
+    if (seriesParam === id) return;
+    pushedFromGrid = seriesParam == null;
+    goto(seriesUrl(id), { keepFocus: true, noScroll: true });
+  }
+  /** Leave the show for the grid: pop our own entry when there is one. */
+  function showGrid() {
+    error = '';
+    if (seriesParam == null) { series = null; return; }
+    if (pushedFromGrid) history.back();
+    else goto('/', { keepFocus: true });
+  }
+  /** Something to open from the URL when it is not on a loaded shelf. */
+  async function itemFromUrl(id) {
+    for (const sh of shelves) {
+      const it = sh.items.find((x) => x.id === id);
+      if (it) return { item: it, from: shelfTitle(sh.library) };
+    }
+    const r = await api.inspect(id);
+    if (r.kind !== 'series') return null;
+    return { item: { id: r.id, title: r.title, type: 'Series' }, from: null };
+  }
+  // Depends on the URL (and the initial load) ONLY: reading `series` here
+  // would re-run this the moment openSeries assigns it — before goto has
+  // put the id in the URL — and close the show it just opened.
+  $effect(() => {
+    const id = seriesParam;
+    if (loading) return;
+    untrack(() => syncFromUrl(id));
+  });
+  function syncFromUrl(id) {
+    if (id == null) { pushedFromGrid = false; if (series) { series = null; clearSelection(); } return; }
+    if (series?.id !== id) openFromUrl(id);
+  }
+  async function openFromUrl(id) {
+    let found;
+    try { found = await itemFromUrl(id); }
+    catch (err) { found = null; error = err.message; }
+    if (!found) { goto('/', { replaceState: true }); return; }
+    await openSeries(found.item, found.from ?? fromLabels.get(id) ?? null, { fromUrl: true });
+  }
   let seasons = $state([]);
   let seasonId = $state(null);
   let episodes = $state([]);
@@ -169,8 +225,15 @@
   function openInspectPick(ep) {
     inspect = { id: ep.id, title: ep.title, pick: true };
   }
-  // Per-broadcast track choice, picked before starting.
+  // Per-broadcast track choice, picked before starting. It describes the
+  // files of THIS selection: it goes with the selection when that is
+  // cleared, and with the show when another one opens — a subtitle index
+  // picked for one series is meaningless in the next.
   let trackOverride = $state(null);
+  function clearSelection() {
+    selected = new Set();
+    trackOverride = null;
+  }
 
   /**
    * Background still generation, polled only while it is running — and once
@@ -389,19 +452,22 @@
   /** Looking inside a folder before deciding what clicking it means. */
   let opening = $state(false);
 
-  async function openSeries(item, from = null) {
+  async function openSeries(item, from = null, { fromUrl = false } = {}) {
     refreshLive();
 
     // A movie is a single playable file — it has no seasons to list, and
     // asking Jellyfin for its episodes returns nothing.
     if (item.type === 'Movie') {
       fromLibrary = from;
+      fromLabels.set(item.id, from);
       series = item;
       seasonId = null;
       seasons = [];
       error = '';
       episodes = [{ ...item, season: null, episode: null }];
       selected = new Set([item.id]);
+      trackOverride = null;
+      if (!fromUrl) pushSeriesUrl(item.id);
       return;
     }
 
@@ -424,23 +490,27 @@
     finally { opening = false; }
 
     if (!failed && !ss.length && eps.length === 1 && eps[0].type === 'Movie') {
+      // Reached by link: the URL names a show that turned out to be a film.
+      if (fromUrl) goto('/', { replaceState: true });
       await playMovie(eps[0]);
       return;
     }
 
     fromLibrary = from;
+    fromLabels.set(item.id, from);
     series = item;
     seasonId = null;
     seasons = ss;
     episodes = eps;
-    selected = new Set();
+    clearSelection();
     error = failed ?? '';
+    if (!fromUrl) pushSeriesUrl(item.id);
   }
 
   async function pickSeason(id) {
     seasonId = id;
     episodes = await api.episodes(series.id, id ?? undefined);
-    selected = new Set();
+    clearSelection();
   }
 
   function toggle(id) {
@@ -453,7 +523,8 @@
   const allSelected = $derived(
     episodes.length > 0 && episodes.every((e) => selected.has(e.id)));
   function toggleAll() {
-    selected = allSelected ? new Set() : new Set(episodes.map((e) => e.id));
+    if (allSelected) clearSelection();
+    else selected = new Set(episodes.map((e) => e.id));
   }
 
   /** Everything from this episode to the end — the usual "watch on" case. */
@@ -522,21 +593,25 @@
         await api.goLive(startAtEpoch(), trackOverride);
       } else {
         const n = ordered.length;
+        // A tonight item is just an id — the lineup has nowhere to keep a
+        // track choice, and only the start call takes one. Say so rather
+        // than let a pick made in the Inspector vanish quietly.
+        const dropped = Boolean(trackOverride && Object.keys(trackOverride).length);
         window.dispatchEvent(new CustomEvent('jsr-toast', { detail: {
-          kind: 'info',
-          message: live
+          kind: dropped ? 'warn' : 'info',
+          message: (live
             ? `Added ${n} ${n === 1 ? 'title' : 'titles'} — they play after what is lined up.`
-            : `Added ${n} ${n === 1 ? 'title' : 'titles'} to tonight.`,
+            : `Added ${n} ${n === 1 ? 'title' : 'titles'} to tonight.`)
+            + (dropped ? ' Track choice applies only when starting a broadcast — it was not kept for the queued items.' : ''),
           href: '/queue', hrefLabel: 'Open Schedule',
         } }));
       }
       await refreshSched();
-      selected = new Set();
-      trackOverride = null;
+      clearSelection();
       scheduling = false;
       // Back to the grid: once it is playing, the transport bar is where you
       // control it, and the season list has served its purpose.
-      series = null;
+      showGrid();
     } catch (err) {
       error = err.detail ? `${err.message}: ${err.detail}` : err.message;
     } finally {
@@ -675,7 +750,7 @@
 
 {:else}
   <header class="row">
-    <button onclick={() => { series = null; error = ''; }}>← {fromLibrary ?? 'Library'}</button>
+    <button onclick={showGrid}>← {fromLibrary ?? 'Library'}</button>
     <h1 style="margin:0">{series.title}</h1>
     <div class="spacer"></div>
     {#if continueAt >= 0 && !selected.size}
@@ -747,7 +822,7 @@
       </label>
       {#if selected.size}
         <span class="muted small selcount">{selected.size} selected</span>
-        <button class="ghost small" onclick={() => (selected = new Set())}>Clear</button>
+        <button class="ghost small" onclick={clearSelection}>Clear</button>
       {/if}
     </div>
   {/if}
@@ -811,9 +886,10 @@
 {/if}
 
 {#if fixItem}
-  <div class="overlay" onclick={() => (fixItem = null)} role="presentation">
-    <div class="card modal fixmodal" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Pick the right match</h3>
+  <div class="overlay" onclick={(e) => { if (e.target === e.currentTarget) fixItem = null; }} role="presentation">
+    <div class="card modal fixmodal" role="dialog" aria-modal="true" tabindex="-1"
+         aria-labelledby="fix-title" use:modal={{ onClose: () => (fixItem = null) }}>
+      <h3 id="fix-title">Pick the right match</h3>
       <p class="muted small">For <b>{fixItem.rawTitle}</b> — the choice is
         remembered and never re-matched.</p>
       <form class="fixsearch" onsubmit={(e) => { e.preventDefault(); fixSearch(); }}>

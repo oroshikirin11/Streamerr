@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { api } from '$lib/api.js';
+  import { modal } from '$lib/modal.js';
 
   /**
    * Modal directory picker for the filesystem library provider — typing
@@ -34,9 +35,10 @@
   onMount(() => load(start || '/'));
 </script>
 
-<div class="overlay" onclick={onclose} role="presentation">
-  <div class="card modal" onclick={(e) => e.stopPropagation()} role="presentation">
-    <h3>Choose a folder</h3>
+<div class="overlay" onclick={(e) => { if (e.target === e.currentTarget) onclose?.(); }} role="presentation">
+  <div class="card modal" role="dialog" aria-modal="true" tabindex="-1"
+       aria-labelledby="dirbrowser-title" use:modal={{ onClose: onclose }}>
+    <h3 id="dirbrowser-title">Choose a folder</h3>
     <p class="path" title={path}>{path}</p>
     {#if error}<p class="err">{error}</p>{/if}
 

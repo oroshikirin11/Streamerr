@@ -4,6 +4,7 @@
   import { page } from '$app/state';
   import { api, connectStatus, fmtTime, clockTime, subtitleChoice } from '$lib/api.js';
   import PreviewWindow from '$lib/PreviewWindow.svelte';
+  import { modal } from '$lib/modal.js';
 
   let { children } = $props();
 
@@ -35,7 +36,7 @@
   async function goLiveTray() {
     goingLive = true;
     try { await api.goLive(); }
-    catch (err) { toast = { kind: 'error', message: err.message }; setTimeout(() => { toast = null; }, 8000); }
+    catch (err) { showToast({ kind: 'error', message: err.message }); }
     finally { goingLive = false; }
   }
   const tonightNames = $derived((tonight.segments ?? []).map((s) => s.name).filter(Boolean).slice(0, 2).join(', '));
@@ -59,6 +60,23 @@
     ? `Publishing to:\n${targets.join('\n')}`
     : 'No destination configured');
   let toast = $state(null);
+  /**
+   * Every toast goes through here so every toast also goes away: errors
+   * after ten seconds, the rest after seven, or on its × button. The token
+   * keeps an older timer from dismissing a newer message — a proxy of the
+   * detail is stored, so comparing objects would never match.
+   */
+  let toastSeq = 0;
+  let toastTimer = null;
+  function showToast(t) {
+    if (!t) return;
+    const seq = ++toastSeq;
+    toast = t;
+    clearTimeout(toastTimer);
+    const ms = t.ms ?? (t.kind === 'error' ? 10000 : 7000);
+    toastTimer = setTimeout(() => { if (toastSeq === seq) toast = null; }, ms);
+  }
+  function closeToast() { toastSeq++; clearTimeout(toastTimer); toast = null; }
   let tracks = $state(null);
   // The panel lives in the layout, so it would otherwise survive
   // navigation and greet you already-open on the next page.
@@ -233,12 +251,11 @@
     connectStatus((msg) => {
       if (msg.type === 'stream') {
         if (msg.payload.status === 'preparing' && stream.status !== 'preparing') {
-          toast = {
-            kind: 'info',
+          showToast({
+            kind: 'info', ms: 12000,
             message: 'Preparing subtitles — the first playback of a file reads '
               + 'it once in full, then it goes live automatically.',
-          };
-          setTimeout(() => { toast = null; }, 12000);
+          });
         }
         stream = msg.payload;
         // Kept rather than replaced when absent, so a payload that predates
@@ -265,8 +282,7 @@
           bufPts = [...bufPts.slice(-89), msg.payload.buffer];
         }
       } else if (msg.type === 'error' || msg.type === 'warn') {
-        toast = { kind: msg.type, message: msg.payload.message };
-        setTimeout(() => { toast = null; }, 8000);
+        showToast({ kind: msg.type, message: msg.payload.message });
       }
     }, onFeedLiveness);
   }
@@ -291,7 +307,7 @@
   async function ctl(fn) {
     busyCtl = true;
     try { await fn(); stream = await api.streamStatus(); targets = stream?.targets ?? targets; }
-    catch (err) { toast = { kind: 'error', message: err.message }; }
+    catch (err) { showToast({ kind: 'error', message: err.message }); }
     finally { busyCtl = false; }
   }
 
@@ -306,18 +322,17 @@
   async function openTracks() {
     if (tracks) { tracks = null; return; }
     try { tracks = await api.liveTracks(); }
-    catch (err) { toast = { kind: 'error', message: err.message }; }
+    catch (err) { showToast({ kind: 'error', message: err.message }); }
   }
 
   async function applyTrack(audioIndex, subtitleKey, subtitleMode) {
     busyCtl = true;
     try {
       const r = await api.setTracks({ audioIndex, subtitleKey, subtitleMode });
-      toast = { kind: 'info', message: r.tracks };
-      setTimeout(() => { toast = null; }, 6000);
+      showToast({ kind: 'info', message: r.tracks });
       tracks = await api.liveTracks();
       stream = await api.streamStatus();
-    } catch (err) { toast = { kind: 'error', message: err.message }; }
+    } catch (err) { showToast({ kind: 'error', message: err.message }); }
     finally { busyCtl = false; }
   }
 
@@ -374,16 +389,8 @@
   // you are still looking, and a page-level banner ends up wherever the
   // markup happens to sit — at the bottom of a long scrolling library, in
   // the case that prompted this.
-  let toastSeq = 0;
   $effect(() => {
-    const h = (e) => {
-      // Compare a token, not the object. Assigning into $state stores a
-      // PROXY of the detail, so `toast === e.detail` is never true and the
-      // dismissal silently never fired — the toast simply stayed forever.
-      const seq = ++toastSeq;
-      toast = e.detail;
-      setTimeout(() => { if (toastSeq === seq) toast = null; }, e.detail?.ms ?? 7000);
-    };
+    const h = (e) => showToast(e.detail);
     window.addEventListener('jsr-toast', h);
     // A page that lines something up and starts it in one go keeps the
     // tray from offering "Go live" for a broadcast already on its way.
@@ -626,7 +633,11 @@
       </footer>
 
       {#if tracks}
-        <div class="panel" bind:clientHeight={panelH}>
+        <!-- Docked under the transport bar, not over it: Escape closes and
+             focus lands inside, but Tab is NOT trapped — the bar's controls
+             stay reachable while the panel is open. -->
+        <div class="panel" bind:clientHeight={panelH} role="dialog" aria-label="Audio and subtitles"
+             use:modal={{ onClose: () => (tracks = null), trap: false }}>
           <div class="phead">
             <strong>{tracks.title}</strong>
             <span class="muted small">{tracks.chosen.reason}</span>
@@ -690,10 +701,14 @@
 {#if toast}
   <!-- Raised above the pre-build chip when both occupy the corner. -->
   <div class="toast" class:error={toast.kind === 'error'}
+       role={toast.kind === 'error' ? 'alert' : 'status'}
        class:raised={stream.playing && (stream.status === 'starting'
          || (stream.status === 'running' && stream.rebuilding))}>
-    {toast.message}
-    {#if toast.href}<a href={toast.href}>{toast.hrefLabel ?? 'Open'}</a>{/if}
+    <span class="tmsg">
+      {toast.message}
+      {#if toast.href}<a href={toast.href}>{toast.hrefLabel ?? 'Open'}</a>{/if}
+    </span>
+    <button class="tx" onclick={closeToast} title="Dismiss" aria-label="Dismiss">×</button>
   </div>
 {/if}
 
@@ -1022,8 +1037,16 @@
     box-shadow: 0 6px 24px rgba(0,0,0,.3);
     animation: slidein .2s ease;
     z-index: 30;
+    display: flex; align-items: flex-start; gap: 8px;
   }
   .toast.error { border-left-color: var(--danger); }
+  .toast .tmsg { flex: 1; min-width: 0; }
+  .toast .tx {
+    flex-shrink: 0; width: 20px; height: 20px; padding: 0; margin: -3px -4px 0 0;
+    background: transparent; border: none; border-radius: 999px;
+    color: var(--muted); font-size: 15px; line-height: 1;
+  }
+  .toast .tx:hover { background: var(--surface-2); color: var(--text); border: none; }
   @keyframes slidein {
     from { opacity: 0; transform: translateX(-8px); }
     to { opacity: 1; transform: none; }

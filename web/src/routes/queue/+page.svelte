@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { api, connectStatus, fmtTime, clockTime, clockDay, maskClock, parseClock, audioLabel, subtitleLabel, subtitleChoice } from '$lib/api.js';
   import Inspector from '$lib/Inspector.svelte';
+  import { modal } from '$lib/modal.js';
 
   /**
    * The Schedule page, timeline first.
@@ -506,6 +507,12 @@
   const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
   const progress = (s) => (s.items.length ? Math.round((s.watched.length / s.items.length) * 100) : 0);
   const atEndOf = (s) => s.atEnd ?? 'stop';
+  /** The "When finished" choices: short label in the select, the rest below it. */
+  const AT_END = {
+    stop: { label: 'Stop', hint: 'Load offers a start-over; an auto-start pauses until you reset it.' },
+    restart: { label: 'Start over', hint: 'Plays from the first item again the next time it is loaded or auto-started.' },
+    loop: { label: 'Loop', hint: 'Keeps playing from the first item until you stop it.' },
+  };
   const startLabel = (s) => (s.finished ? (atEndOf(s) === 'loop' ? 'finished · loops' : atEndOf(s) === 'restart' ? 'finished · starts over' : 'finished') : `at ${epName(s.items[s.start]?.title ?? '')}`);
   const recur = (s) => {
     const a = s.autoStart;
@@ -1072,10 +1079,9 @@
             </label>
             <label>When finished
               <select bind:value={edit.atEnd}>
-                <option value="stop">Stop — Load offers a start-over, auto-start pauses</option>
-                <option value="restart">Start over next time it is loaded or auto-started</option>
-                <option value="loop">Loop — keep playing from the first item until stopped</option>
+                {#each Object.entries(AT_END) as [v, o] (v)}<option value={v}>{o.label}</option>{/each}
               </select>
+              <span class="muted tiny">{AT_END[edit.atEnd]?.hint ?? AT_END.stop.hint}</span>
             </label>
             {#if edit.breaks === 'custom'}
               <div class="l"><span>Every</span><span><input class="tin" bind:value={edit.every} /> episodes · <input class="tin" bind:value={edit.minutes} /> min</span></div>
@@ -1165,7 +1171,8 @@
 <!-- ── picker ─────────────────────────────────────────────────────────── -->
 {#if picker}
   <div class="backdrop" onclick={(e) => { if (e.target === e.currentTarget) picker = null; }} role="presentation">
-    <div class="modal" role="dialog" aria-label="Add from library">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Add from library" tabindex="-1"
+         use:modal={{ onClose: () => (picker = null) }}>
       <div class="mh">
         {#if picker.series}<button class="sm ghost" onclick={() => (picker.series = null)}>← back</button><h3>{picker.series.title}</h3>
         {:else}
