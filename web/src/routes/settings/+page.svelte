@@ -869,7 +869,7 @@
 </script>
 
 
-<div class="wrap">
+<div class="wrap" class:narrow={viewMode === 'simple'}>
 <div class="pagehead">
   <h1>Settings</h1>
   <div class="segc" role="radiogroup" aria-label="Settings view">
@@ -2166,6 +2166,9 @@
   /* Full-width inputs on a wide monitor stretch absurdly; settings read as a
      form, and forms want a centered column, not a strip down the left edge. */
   .wrap { max-width: 1120px; margin: 0 auto; }
+  /* Simple is one column: the title and the view toggle share its edges,
+     instead of floating at the edges of a wider, invisible frame. */
+  .wrap.narrow { max-width: 640px; }
   section { margin-bottom: 16px; }
 
   /* Two explicit columns of group cards — curated, not masonry: with only
