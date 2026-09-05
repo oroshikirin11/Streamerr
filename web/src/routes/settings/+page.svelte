@@ -17,8 +17,63 @@
     { id: 'srt', label: 'SRT' },
   ];
   // Protocols that can carry a non-H.264 codec — mirror of the server's
-  // protocolCarries(): container-honest transports only.
+  // protocolCodecs(): container-honest transports only.
   const MODERN_CARRIERS = ['srt', 'tcp'];
+  const CODEC_OPTIONS = [
+    ['h264', 'H.264 — universal'],
+    ['hevc', 'H.265 — 2/3 the bitrate'],
+    ['av1', 'AV1 — half the bitrate; software encode'],
+  ];
+  const CODEC_NAMES = { h264: 'H.264', hevc: 'H.265', av1: 'AV1' };
+  const codecOptions = (protocol) => (MODERN_CARRIERS.includes(protocol) ? CODEC_OPTIONS : CODEC_OPTIONS.slice(0, 1));
+  const codecOfDest = (protocol, creds) => (MODERN_CARRIERS.includes(protocol) && ['hevc', 'av1'].includes(creds?.codec) ? creds.codec : 'h264');
+  // Every destination as a row: the primary slot then the extras.
+  const destRows = () => {
+    const pub = cfg.publish;
+    const rows = [{ key: 'primary', name: pub.name || 'Primary', protocol: pub.protocol, codec: codecOfDest(pub.protocol, pub[pub.protocol]), on: pub.enabled !== false }];
+    for (const e of pub.extras ?? []) rows.push({ key: e.id, name: e.name || e.protocol.toUpperCase(), protocol: e.protocol, codec: codecOfDest(e.protocol, e), on: e.enabled !== false });
+    return rows;
+  };
+  // What the destinations that are on agree to; null while none is on.
+  const broadcastCodec = () => destRows().find((r) => r.on)?.codec ?? null;
+  /**
+   * The tick wins: switching a destination on, or changing its codec,
+   * switches off every other destination that disagrees — the rule is
+   * "the ones that are on share one codec", and a dead end where nothing
+   * can be ticked is not allowed. The page says what it switched off.
+   */
+  let codecNotice = $state('');
+  function enforceCodec(winnerKey) {
+    const pub = cfg.publish;
+    const rows = destRows();
+    const winner = rows.find((r) => r.key === winnerKey);
+    if (!winner || !winner.on) { syncDerivedCodec(); return; }
+    const losers = rows.filter((r) => r.key !== winnerKey && r.on && r.codec !== winner.codec);
+    for (const l of losers) {
+      if (l.key === 'primary') pub.enabled = false;
+      else { const e = pub.extras.find((x) => x.id === l.key); if (e) e.enabled = false; }
+    }
+    codecNotice = losers.length
+      ? `${losers.map((l) => l.name).join(', ')} switched off — ${CODEC_NAMES[losers[0].codec]} and ${CODEC_NAMES[winner.codec]} cannot share a broadcast`
+      : '';
+    syncDerivedCodec();
+  }
+  // encoder.codec is derived from the destinations; the page keeps its
+  // copy in step so the bitrate slot and the HDR gate follow.
+  function syncDerivedCodec() {
+    const c = broadcastCodec();
+    if (c && cfg.encoder.codec !== c) { cfg.encoder.codec = c; syncVbr(); }
+  }
+  function setPrimaryCodec(codec) {
+    const pub = cfg.publish;
+    pub[pub.protocol] = { ...(pub[pub.protocol] ?? {}), codec };
+    enforceCodec('primary');
+  }
+  function setExtraProtocol(ex, protocol) {
+    ex.protocol = protocol;
+    if (!MODERN_CARRIERS.includes(protocol)) ex.codec = 'h264';
+    if (ex.enabled !== false) enforceCodec(ex.id);
+  }
   const uid = () => Math.random().toString(36).slice(2, 10);
 
   /**
@@ -65,7 +120,6 @@
   });
   // The Simple view's destination list reads the same publish block
   // Advanced edits; nothing here is a second copy.
-  const simpleCodec = $derived(cfg?.encoder?.codec || 'h264');
   const primaryUrl = $derived(cfg?.publish?.[cfg?.publish?.protocol]?.url || '');
   // How many destinations are on, and which one leads: the first one on,
   // in the order primary then extras, skipping those that cannot carry
@@ -74,10 +128,8 @@
     + (cfg?.publish?.extras ?? []).filter((e) => e.enabled !== false).length);
   const leadIndex = $derived.by(() => {
     if (!cfg?.publish) return -1;
-    const carries = (proto) => simpleCodec === 'h264' || MODERN_CARRIERS.includes(proto)
-      || (proto === 'rtmp' && Boolean(cfg.publish.srt?.url));
-    if (cfg.publish.enabled !== false && carries(cfg.publish.protocol)) return 0;
-    const i = (cfg.publish.extras ?? []).findIndex((e) => e.enabled !== false && carries(e.protocol));
+    if (cfg.publish.enabled !== false) return 0;
+    const i = (cfg.publish.extras ?? []).findIndex((e) => e.enabled !== false);
     return i >= 0 ? i + 1 : -1;
   });
   const timingCurrent = $derived.by(() => (cfg
@@ -141,16 +193,28 @@
   async function applyPictureSnap() {
     const s = pictureSnap?.fields;
     if (!s) return;
+    const before = cfg.encoder.codec;
     cfg.encoder.codec = s.codec;
     cfg.encoder.hdrOutput = s.hdrOutput;
     cfg.encoder.copyLimitKbps = s.copyLimitKbps;
     syncPickers();
     await save('encoder');
+    if (error) { cfg.encoder.codec = before; syncPickers(); return; }
+    await reloadPublish();
     if (Array.isArray(s.overlayEnabled) && cfg.overlay?.items?.length) {
       cfg.overlay.items = cfg.overlay.items.map((i, idx) => (
         { ...i, enabled: Boolean(s.overlayEnabled[idx]) }));
       await api.saveConfig({ overlay: { items: cfg.overlay.items } });
     }
+  }
+  // The destinations' codecs as the server stored them after a lever move.
+  async function reloadPublish() {
+    try {
+      const fresh = await api.getConfig();
+      cfg.publish = fresh.publish;
+      cfg.encoder.codec = fresh.encoder?.codec || cfg.encoder.codec;
+      syncVbr();
+    } catch { /* the next load shows it */ }
   }
   async function applyTimingSnap() {
     const s = timingSnap?.fields;
@@ -164,6 +228,7 @@
     // A lever click on a hand-tuned state saves it as "My settings"
     // first, so the custom setup is one click away instead of gone.
     if (pictureCurrent === null && !pictureIsCustom) await savePictureSnap();
+    const before = cfg.encoder.codec;
     if (id === 'best') {
       cfg.encoder.codec = 'hevc';
       cfg.encoder.hdrOutput = true;
@@ -174,7 +239,12 @@
       cfg.encoder.codec = 'h264';
     }
     syncPickers();
+    // The codec is bound to the destinations: the server gives every one
+    // that is on this codec, or refuses by name when one cannot carry it
+    // (an RTMP destination on Best). The refusal shows under the lever.
     await save('encoder');
+    if (error) { cfg.encoder.codec = before; syncPickers(); return; }
+    await reloadPublish();
     // Simple means no studio overlays: an enabled item (even hidden) can
     // demote HDR and change the pipeline. The lever switches every item
     // off; the items themselves stay in Studio, one click from returning.
@@ -310,20 +380,16 @@
   // The codec decides the carrier: H.264 rides the protocol chosen below,
   // anything newer needs SRT — the server routes the primary to its SRT
   // slot automatically. These helpers let the card say what will happen.
-  const codecLabel = () => ({ hevc: 'H.265', av1: 'AV1' }[cfg.encoder.codec] ?? 'H.264');
-  const effProto = () => {
-    if ((cfg.encoder.codec || 'h264') === 'h264') return cfg.publish.protocol;
-    // A modern codec keeps a carrier that can hold it; otherwise the
-    // server routes to the SRT slot, so show that.
-    return MODERN_CARRIERS.includes(cfg.publish.protocol) ? cfg.publish.protocol : 'srt';
-  };
-  const sitOuts = () => (cfg.publish.extras ?? [])
-    .filter((e) => e.enabled !== false && !MODERN_CARRIERS.includes(e.protocol))
-    .map((e) => e.name || e.protocol);
+  const codecLabel = () => CODEC_NAMES[cfg.encoder.codec] ?? 'H.264';
+  const effProto = () => cfg.publish.protocol;
   function addExtra() {
+    // A new destination starts with the codec the others are on, so
+    // adding one never switches anything off.
     cfg.publish.extras = [...(cfg.publish.extras ?? []),
       { id: uid(), enabled: true, protocol: 'rtmp', url: '', key: '',
-        streamId: '', passphrase: '', latencyMs: 200, channel: '' }];
+        streamId: '', passphrase: '', latencyMs: 200, channel: '', codec: 'h264' }];
+    const added = cfg.publish.extras[cfg.publish.extras.length - 1];
+    if (broadcastCodec() && broadcastCodec() !== 'h264') added.enabled = false;
   }
   function removeExtra(id) {
     cfg.publish.extras = (cfg.publish.extras ?? []).filter((e) => e.id !== id);
@@ -741,11 +807,10 @@
         };
       }
       if (section === 'publish') {
+        // The codec rides on each destination; the server derives the
+        // broadcast codec from the ones that are on and refuses a
+        // disagreeing set by name.
         patch.publish = maskPublish(cfg.publish);
-        // The codec choice lives on this card now; it rides along so one
-        // Save keeps connection and codec consistent. The server merges
-        // per-key, so the encoder card's other fields are untouched.
-        patch.encoder = { codec: cfg.encoder.codec || 'h264' };
       }
       // Two cards write to the same block; the server merges, so each sends
       // only the keys it owns and neither can clobber the other's.
@@ -943,27 +1008,28 @@
 
     <section class="card">
       <h3>Destinations</h3>
-      <p class="muted small">Where the next broadcast goes. Tick the ones that should receive it; the first one that is on leads, the rest are copies of it.</p>
+      <p class="muted small">Where the next broadcast goes. Tick the ones that should receive it; the first one that is on leads, the rest are copies of it. Each carries its own codec, and the ones that are on share one — a tick that disagrees wins and switches the others off.</p>
       <ul class="dests">
         <li class="dest" class:off={cfg.publish?.enabled === false}>
           <input type="checkbox" class="dcheck" checked={cfg.publish?.enabled !== false}
                  disabled={cfg.publish?.enabled !== false && onCount <= 1}
-                 onchange={(e) => { cfg.publish.enabled = e.currentTarget.checked; save('publish'); }}
+                 onchange={(e) => { cfg.publish.enabled = e.currentTarget.checked; if (cfg.publish.enabled) enforceCodec('primary'); else syncDerivedCodec(); save('publish'); }}
                  aria-label={`Stream to ${cfg.publish?.name || 'the primary destination'}`} />
-          <span class="dname">{cfg.publish?.name || 'Primary'} <small class="proto">{(cfg.publish?.protocol || '').toUpperCase()}</small>{#if leadIndex === 0}<small class="lead">leads</small>{/if}</span>
+          <span class="dname">{cfg.publish?.name || 'Primary'} <small class="proto">{(cfg.publish?.protocol || '').toUpperCase()}</small><small class="codec">{CODEC_NAMES[codecOfDest(cfg.publish?.protocol, cfg.publish?.[cfg.publish?.protocol])]}</small>{#if leadIndex === 0}<small class="lead">leads</small>{/if}</span>
           <span class="durl">{primaryUrl || 'not set — see Advanced › Broadcast'}</span>
         </li>
         {#each cfg.publish?.extras ?? [] as ex, i (ex.id)}
-          {@const sitsOut = simpleCodec !== 'h264' && !MODERN_CARRIERS.includes(ex.protocol)}
           <li class="dest" class:off={ex.enabled === false}>
-            <input type="checkbox" class="dcheck" bind:checked={ex.enabled} onchange={() => save('publish')}
+            <input type="checkbox" class="dcheck" checked={ex.enabled !== false}
+                   onchange={(e) => { ex.enabled = e.currentTarget.checked; if (ex.enabled) enforceCodec(ex.id); else syncDerivedCodec(); save('publish'); }}
                    disabled={ex.enabled !== false && onCount <= 1}
                    aria-label={`Stream to ${ex.name || ex.url || ex.protocol}`} />
-            <span class="dname">{ex.name || 'Extra'} <small class="proto">{(ex.protocol || '').toUpperCase()}</small>{#if leadIndex === i + 1}<small class="lead">leads</small>{/if}</span>
-            <span class="durl">{ex.url || 'no address yet'}{#if sitsOut} · sits out on {simpleCodec.toUpperCase()}{/if}</span>
+            <span class="dname">{ex.name || 'Extra'} <small class="proto">{(ex.protocol || '').toUpperCase()}</small><small class="codec">{CODEC_NAMES[codecOfDest(ex.protocol, ex)]}</small>{#if leadIndex === i + 1}<small class="lead">leads</small>{/if}</span>
+            <span class="durl">{ex.url || 'no address yet'}</span>
           </li>
         {/each}
       </ul>
+      {#if codecNotice}<p class="notice small">{codecNotice}</p>{/if}
       {#if onCount <= 1}<p class="muted small">One destination has to stay on, so the last one cannot be unticked.</p>{/if}
       {#if !(cfg.publish?.extras ?? []).length}
         <p class="muted small">Only the primary so far. Add more under Advanced › Broadcast › Also send to.</p>
@@ -1033,37 +1099,10 @@
     <label class="switch" style="display:flex; align-items:center; gap:8px; margin:0 0 10px;">
       <input type="checkbox" checked={cfg.publish.enabled !== false}
              disabled={cfg.publish.enabled !== false && onCount <= 1}
-             onchange={(e) => { cfg.publish.enabled = e.currentTarget.checked; }} style="width:auto" />
+             onchange={(e) => { cfg.publish.enabled = e.currentTarget.checked; if (cfg.publish.enabled) enforceCodec('primary'); else syncDerivedCodec(); }} style="width:auto" />
       Send the broadcast here
       <span class="muted small">{cfg.publish.enabled === false ? '— off: the first enabled extra leads' : onCount <= 1 ? '— the only destination on' : ''}</span>
     </label>
-    <label>Codec</label>
-    <select bind:value={cfg.encoder.codec} onchange={syncVbr}>
-      <option value="h264">H.264 — baseline bitrate; universal</option>
-      <option value="hevc">H.265 — 2/3 the bitrate; most</option>
-      <option value="av1">AV1 — half the bitrate; patchy; software encode, no preview</option>
-    </select>
-    {#if (cfg.encoder.codec || 'h264') !== 'h264'}
-      <p class="muted small">
-        {codecLabel()} needs SRT or TCP. Pick either below — with RTMP
-        selected the stream uses the SRT slot automatically, and your RTMP
-        setup is kept and comes back with H.264.
-        {#if !cfg.publish[effProto()]?.url}
-          <strong>No {effProto().toUpperCase()} server is configured yet —
-          fill the slot or the stream will refuse to start.</strong>
-        {/if}
-        {#if sitOuts().length}
-          Sitting out: {sitOuts().join(', ')} — RTMP cannot carry
-          {codecLabel()}; they rejoin on H.264.
-        {/if}
-      </p>
-      <p class="muted small">
-        Its bitrate is set in the Output card — the Video bitrate dropdown
-        always shows the rate of the codec chosen here, and each codec
-        keeps its own.
-      </p>
-    {/if}
-
     <!-- Credentials live in a slot per protocol, so switching here never
          discards the other set. Switch back and the fields are as they
          were; overwrite by typing over them. -->
@@ -1074,17 +1113,7 @@
              obvious at a glance that switching away from one will not lose
              it — and that the one in use is genuinely configured. -->
         <button type="button" class:on={effProto() === pr.id}
-                disabled={(cfg.encoder.codec || 'h264') !== 'h264' && !MODERN_CARRIERS.includes(pr.id)}
-                title={(cfg.encoder.codec || 'h264') !== 'h264' && !MODERN_CARRIERS.includes(pr.id)
-                  ? `${pr.label} cannot carry ${codecLabel()} — pick SRT or TCP`
-                  : undefined}
-                onclick={() => {
-                  // With H.264 any protocol is choosable; with a modern
-                  // codec only the carriers that can hold it are, and the
-                  // impossible ones are disabled above.
-                  if ((cfg.encoder.codec || 'h264') === 'h264'
-                    || MODERN_CARRIERS.includes(pr.id)) cfg.publish.protocol = pr.id;
-                }}>
+                onclick={() => { cfg.publish.protocol = pr.id; if (cfg.publish.enabled !== false) enforceCodec('primary'); }}>
           <strong>{pr.label}</strong>
           {#if pr.id === 'tcp'}<span class="sgr">Streamingestarr</span>{/if}
           {#if cfg.publish[pr.id]?.url}
@@ -1093,6 +1122,17 @@
         </button>
       {/each}
     </div>
+
+    <label>Codec <span class="muted small">— bound to this destination</span></label>
+    {#if MODERN_CARRIERS.includes(cfg.publish.protocol)}
+      <select value={codecOfDest(cfg.publish.protocol, cfg.publish[cfg.publish.protocol])} onchange={(e) => setPrimaryCodec(e.currentTarget.value)}>
+        {#each codecOptions(cfg.publish.protocol) as [id, label]}<option value={id}>{label}</option>{/each}
+      </select>
+    {:else}
+      <p class="muted small" style="margin:0 0 8px">H.264 — {cfg.publish.protocol.toUpperCase()} carries H.264 only. SRT or TCP take H.265 and AV1.</p>
+    {/if}
+    {#if codecNotice}<p class="notice small">{codecNotice}</p>{/if}
+    <p class="muted small">Destinations that are on share one codec: switching one on, or changing its codec, switches off the ones that disagree. The bitrate of the codec in use is set in the Output card.</p>
 
     {#if effProto() === 'srt'}
       <label>Server address</label>
@@ -1158,10 +1198,18 @@
       <div class="extra">
         <div class="extrahead">
           <label style="display:flex; align-items:center; gap:8px; margin:0;">
-            <input type="checkbox" bind:checked={ex.enabled} style="width:auto" />
-            <select bind:value={ex.protocol} style="width:auto">
+            <input type="checkbox" checked={ex.enabled !== false} style="width:auto"
+                   onchange={(e) => { ex.enabled = e.currentTarget.checked; if (ex.enabled) enforceCodec(ex.id); else syncDerivedCodec(); }} />
+            <select value={ex.protocol} style="width:auto" onchange={(e) => setExtraProtocol(ex, e.currentTarget.value)}>
               {#each PROTOCOL_INFO as pr}<option value={pr.id}>{pr.label}{pr.id === 'tcp' ? ' · Streamingestarr' : ''}</option>{/each}
             </select>
+            {#if MODERN_CARRIERS.includes(ex.protocol)}
+              <select value={codecOfDest(ex.protocol, ex)} style="width:auto" aria-label="Codec" onchange={(e) => { ex.codec = e.currentTarget.value; if (ex.enabled !== false) enforceCodec(ex.id); }}>
+                {#each codecOptions(ex.protocol) as [id, label]}<option value={id}>{label.split(' — ')[0]}</option>{/each}
+              </select>
+            {:else}
+              <span class="muted small">H.264</span>
+            {/if}
           </label>
           <span class="row" style="gap:6px">
             <button type="button" onclick={() => testDestination(false, ex.id)} disabled={!!testing}>{testing === 'destination:' + ex.id ? 'Checking…' : 'Test'}</button>
@@ -2232,6 +2280,8 @@
   .dest.off .dname, .dest.off .durl { color: var(--muted); }
   .dest .dcheck { width: 16px; height: 16px; margin: 0; grid-row: 1 / span 2; justify-self: center; }
   .dest .lead { color: var(--success); font-size: 11px; margin-left: 8px; letter-spacing: .04em; text-transform: uppercase; }
+  .dest .codec { color: var(--muted); font-size: 11px; margin-left: 6px; border: 1px solid var(--border, #333); border-radius: 4px; padding: 0 5px; }
+  .notice { color: var(--warn, #e0a85c); margin: 6px 0 0; }
   .dest .dname { font-size: 14px; }
   .dest .proto { color: var(--muted); font-size: 11px; letter-spacing: .04em; margin-left: 6px; }
   .dest .durl { grid-column: 2; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

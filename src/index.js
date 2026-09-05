@@ -27,8 +27,7 @@ import { ControlClient, pendingOf } from './control.js';
 import { createScheduleStore, buildQueue } from './schedules.js';
 import { inspectVerdict } from './inspect.js';
 import {
-  redactPublish, restorePublishSecrets, targetUrl, destinations, publishDefaults, redactSecrets,
-} from './publish.js';
+  redactPublish, restorePublishSecrets, targetUrl, destinations, publishDefaults, redactSecrets, agreedCodec, applyCodecToPublish } from './publish.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession,
   validSession, tokenFromRequest, requireAuth, sessionCookie, SESSION_COOKIE,
@@ -1575,6 +1574,32 @@ app.put('/api/config', (req, res) => {
   if (patch.streamingestarr?.accessToken === '__SET__') delete patch.streamingestarr.accessToken;
   if (patch.publish) patch.publish = restorePublishSecrets(patch.publish, publishConfig());
   /**
+   * The codec is bound to the destinations, and the ones that are on must
+   * agree. A publish patch is checked as it will be stored; a bare
+   * encoder.codec (the picture lever, an older client) is applied to every
+   * destination that is on, or refused by name when one cannot carry it.
+   * Either way encoder.codec ends up as the derived value.
+   */
+  {
+    const merged = { ...publishConfig(), ...(patch.publish ?? {}) };
+    if (patch.encoder?.codec !== undefined && !patch.publish) {
+      const want = String(patch.encoder.codec);
+      const now = agreedCodec(merged);
+      if (now.codec !== want) {
+        try { applyCodecToPublish(merged, want); } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+        patch.publish = merged;
+      }
+    }
+    const agreed = agreedCodec(patch.publish ?? merged);
+    if (agreed.conflict && !/No destination is switched on/.test(agreed.conflict)) {
+      return res.status(400).json({ error: agreed.conflict });
+    }
+    if (agreed.codec) patch.encoder = { ...(patch.encoder ?? {}), codec: agreed.codec };
+    else if (patch.encoder) delete patch.encoder.codec;
+  }
+  /**
    * The bank is sized from these, so they are clamped here as well as in the
    * engine — a hand-edited config should not be able to ask for a 10-hour
    * cushion, and applySeconds above the depth would silently do nothing.
@@ -2525,6 +2550,7 @@ const startStreamInner = async (req, res) => {
     sgChannels = await sgResolveChannels(publishDestinations(config, config.encoder.codec ?? 'h264'));
   } catch { sgChannels = ['']; }
   let codec = config.encoder.codec ?? 'h264';
+  try { codec = publishDestinations(config).codec ?? codec; } catch { /* refused below, by name */ }
   const relayRooms = sgRelayRooms();
   if (relayRooms.length && codec !== 'h264') {
     dpush('info', `relay room ${relayRooms.join(', ')} on the receiver: sending H.264 SDR for this broadcast so external players can play it (the picture setting stays ${codec.toUpperCase()})`);

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { redactSecrets, publishSecrets, redactPublish, publishDefaults, destinations } from '../src/publish.js';
+import { redactSecrets, publishSecrets, redactPublish, publishDefaults, destinations, codecOf, protocolCodecs, agreedCodec, applyCodecToPublish } from '../src/publish.js';
 import { FilesystemLibrary } from '../src/library/filesystem.js';
 
 const publish = {
@@ -99,23 +99,33 @@ test('a film in its own folder carries the poster the grid shows, by the same im
 });
 
 test('a switched-off primary hands the anchor role to the first enabled extra', () => {
-  const pub = { ...publishDefaults(), protocol: 'tcp', enabled: false, tcp: { url: 'tcp://a:1', key: 'k' },
+  const pub = { ...publishDefaults(), protocol: 'tcp', enabled: false, tcp: { url: 'tcp://a:1', key: 'k', codec: 'hevc' },
     extras: [
-      { id: 'x1', enabled: false, protocol: 'srt', url: 'srt://b:2', streamId: '', passphrase: '', latencyMs: 200 },
-      { id: 'x2', enabled: true, protocol: 'rtmp', url: 'rtmp://c/live', key: 'k2' },
-      { id: 'x3', enabled: true, protocol: 'tcp', url: 'tcp://d:4', key: 'k3' },
+      { id: 'x1', enabled: false, protocol: 'srt', url: 'srt://b:2', streamId: '', passphrase: '', latencyMs: 200, codec: 'hevc' },
+      { id: 'x2', enabled: true, protocol: 'rtmp', url: 'rtmp://c/live', key: 'k2', name: 'Relay' },
+      { id: 'x3', enabled: true, protocol: 'tcp', url: 'tcp://d:4', key: 'k3', codec: 'h264', name: 'Cinema' },
     ] };
-  const d = destinations(pub, 'h264');
+  const d = destinations(pub);
   assert.deepEqual(d.map((x) => [x.id ?? 'primary', x.primary]), [['x2', true], ['x3', false]]);
-  // Under HEVC the RTMP extra cannot lead: the TCP one does, RTMP sits out.
-  const h = destinations(pub, 'hevc');
-  assert.deepEqual(h.map((x) => [x.id, x.primary]), [['x3', true]]);
-  assert.deepEqual(h.skipped.map((x) => x.id), ['x2']);
+  assert.equal(d.codec, 'h264', 'the destinations that are on agree on H.264');
   // Nothing on at all is refused with a sentence, not an empty tee.
-  assert.throws(() => destinations({ ...pub, extras: [] }, 'h264'), /No destination is switched on/);
-  assert.throws(() => destinations({ ...pub, extras: [pub.extras[1]] }, 'hevc'), /can carry HEVC/);
-  // The default keeps today's behaviour: the primary leads.
-  const p = destinations({ ...pub, enabled: true }, 'h264');
-  assert.equal(p[0].primary, true); assert.equal(p[0].id, undefined);
+  assert.throws(() => destinations({ ...pub, extras: [] }), /No destination is switched on/);
+  // The primary back on with HEVC disagrees with the H.264 extras: refused by name.
+  assert.throws(() => destinations({ ...pub, enabled: true }), /Primary is H\.265 but Relay is H\.264/);
+  // Alone, the HEVC primary leads and the codec is its own.
+  const p = destinations({ ...pub, enabled: true, extras: [] });
+  assert.equal(p[0].primary, true); assert.equal(p[0].id, undefined); assert.equal(p.codec, 'hevc');
+  // An RTMP slot carries H.264 whatever it says; SRT/TCP keep theirs.
+  assert.equal(codecOf('rtmp', { codec: 'hevc' }), 'h264');
+  assert.equal(codecOf('srt', { codec: 'av1' }), 'av1');
+  assert.deepEqual(protocolCodecs('rtmps'), ['h264']);
+  // agreedCodec never throws; applyCodecToPublish binds one codec to every destination that is on, or names the one that cannot.
+  assert.deepEqual(agreedCodec({ ...pub, enabled: true }).codec, null);
+  assert.match(agreedCodec({ ...pub, enabled: true }).conflict, /share one codec/);
+  assert.throws(() => applyCodecToPublish(JSON.parse(JSON.stringify(pub)), 'hevc'), /Relay \(RTMP\) cannot carry H\.265/);
+  const off = JSON.parse(JSON.stringify(pub)); off.extras[1].enabled = false;
+  applyCodecToPublish(off, 'hevc');
+  assert.equal(off.extras[2].codec, 'hevc');
+  assert.equal(destinations(off).codec, 'hevc');
   assert.equal(redactPublish(pub).enabled, false);
 });

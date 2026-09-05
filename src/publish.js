@@ -13,6 +13,32 @@
 /** Protocols that can be published to, in the order the UI offers them. */
 export const PROTOCOLS = ['tcp', 'rtmp', 'rtmps', 'srt'];
 
+/** Codecs a destination can be bound to, in the order the UI offers them. */
+export const CODECS = ['h264', 'hevc', 'av1'];
+
+/**
+ * The codecs a protocol can carry. RTMP/RTMPS speak FLV, which has no
+ * deployed home for HEVC or AV1 on the receivers we target; SRT and TCP
+ * carry a container-honest stream and take all three.
+ */
+export function protocolCodecs(protocol) {
+  return protocol === 'srt' || protocol === 'tcp' ? [...CODECS] : ['h264'];
+}
+
+/**
+ * A destination's codec: its own setting when the protocol carries it,
+ * H.264 otherwise. The codec is bound to the destination — there is no
+ * broadcast-wide codec setting any more; the set of destinations that
+ * are on decides it, and they have to agree (see destinations()).
+ */
+export function codecOf(protocol, creds = {}) {
+  const c = String(creds?.codec ?? '').toLowerCase();
+  return protocolCodecs(protocol).includes(c) ? c : 'h264';
+}
+
+const CODEC_LABEL = { h264: 'H.264', hevc: 'H.265', av1: 'AV1' };
+export const codecLabel = (c) => CODEC_LABEL[c] ?? String(c ?? '').toUpperCase();
+
 /** Fields that must never be logged, echoed to a client, or put in an error. */
 export const SECRET_FIELDS = ['key', 'passphrase', 'streamId'];
 
@@ -198,53 +224,84 @@ export const protocolCarries = (protocol, codec = 'h264') => (
   codec === 'h264' ? true : protocol === 'srt' || protocol === 'tcp'
 );
 
-export function destinations(publish, codec = 'h264') {
+export function destinations(publish) {
   const p = publish ?? publishDefaults();
-  let protocol = PROTOCOLS.includes(p.protocol) ? p.protocol : 'rtmp';
+  const protocol = PROTOCOLS.includes(p.protocol) ? p.protocol : 'rtmp';
   /**
-   * Codec-aware selection, switch-resistant by design (see
-   * docs/codec-protocol-unification.md): configs persist per protocol
-   * and the codec CHOOSES — it never overwrites. A non-h264 codec moves
-   * the primary to its SRT slot when one is configured; extras that
-   * cannot carry the codec sit out (returned in `skipped` for the
-   * caller to warn about) and rejoin when the codec allows them.
+   * The codec is bound to each destination and the ones that are on must
+   * agree — one encode feeds them all. A disagreement is refused with the
+   * two names in the sentence; the page keeps it from happening by
+   * switching the losers off when a tick or a codec change wins.
    */
-  if (!protocolCarries(protocol, codec) && String(p.srt?.url ?? '').trim()) {
-    protocol = 'srt';
-  }
   const out = [];
-  const skipped = [];
   if (p.enabled !== false) {
-    out.push({ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name),
+    const creds = p[protocol] ?? {};
+    out.push({ protocol, creds, primary: true, name: destName(p.name),
+      label: destName(p.name) || 'Primary', codec: codecOf(protocol, creds),
       channel: String(p.channel ?? '').trim().slice(0, 64) });
   }
   for (const e of p.extras ?? []) {
     if (!e || e.enabled === false) continue;
     if (!PROTOCOLS.includes(e.protocol)) continue;
-    const d = { protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name),
-      channel: String(e.channel ?? '').trim().slice(0, 64) };
-    if (protocolCarries(e.protocol, codec)) out.push(d);
-    else skipped.push(d);
+    out.push({ protocol: e.protocol, creds: e, primary: false, id: e.id, name: destName(e.name),
+      label: destName(e.name) || e.protocol.toUpperCase(), codec: codecOf(e.protocol, e),
+      channel: String(e.channel ?? '').trim().slice(0, 64) });
+  }
+  if (!out.length) {
+    throw new Error('No destination is switched on — turn one on under Settings');
+  }
+  const odd = out.find((d) => d.codec !== out[0].codec);
+  if (odd) {
+    throw new Error(`${out[0].label} is ${codecLabel(out[0].codec)} but ${odd.label} is ${codecLabel(odd.codec)} — `
+      + 'destinations that are on share one codec; switch one off, or give it the same codec');
   }
   // Whoever is first leads: the encoder writes to it and the rest are
   // fanned out from that stream. With the configured primary off, an
   // enabled extra takes the anchor role for this broadcast.
-  if (!out.length) {
-    throw new Error(skipped.length
-      ? `No destination can carry ${codec.toUpperCase()} — switch one on that speaks SRT or TCP, or pick H.264`
-      : 'No destination is switched on — turn one on under Settings');
-  }
   out.forEach((d, i) => { d.primary = i === 0; });
-  out.skipped = skipped;
+  out.codec = out[0].codec;
+  out.skipped = [];
   return out;
 }
 
 /**
- * The tee muxer splits slaves on `|` and reads options up to `]`, so both
- * have to be escaped inside a slave. A stream key containing one is
- * unlikely and silently truncating the broadcast target is not an
- * acceptable way to find out.
+ * The codec the destinations that are on agree to, or the conflict as a
+ * sentence — never throws, for status lines and the page.
+ * @returns {{codec: string|null, conflict: string|null}}
  */
+export function agreedCodec(publish) {
+  try {
+    return { codec: destinations(publish).codec, conflict: null };
+  } catch (err) {
+    return { codec: null, conflict: err.message };
+  }
+}
+
+/**
+ * Bind one codec to every destination that is on — the picture lever's
+ * move. A destination that cannot carry it is named and nothing changes.
+ * Returns the mutated publish block.
+ */
+export function applyCodecToPublish(publish, codec) {
+  const p = publish;
+  if (!CODECS.includes(codec)) throw new Error(`Unknown codec ${codec}`);
+  const cannot = [];
+  if (p.enabled !== false && !protocolCodecs(p.protocol).includes(codec)) cannot.push(`${destName(p.name) || 'Primary'} (${String(p.protocol).toUpperCase()})`);
+  for (const e of p.extras ?? []) {
+    if (e && e.enabled !== false && PROTOCOLS.includes(e.protocol) && !protocolCodecs(e.protocol).includes(codec)) {
+      cannot.push(`${destName(e.name) || e.protocol} (${String(e.protocol).toUpperCase()})`);
+    }
+  }
+  if (cannot.length) {
+    throw new Error(`${cannot.join(', ')} cannot carry ${codecLabel(codec)} — RTMP takes H.264 only; switch it off, or move it to SRT or TCP`);
+  }
+  if (p.enabled !== false) p[p.protocol] = { ...(p[p.protocol] ?? {}), codec };
+  for (const e of p.extras ?? []) {
+    if (e && e.enabled !== false && PROTOCOLS.includes(e.protocol)) e.codec = codec;
+  }
+  return p;
+}
+
 const teeEscape = (s) => String(s).replace(/[\\|\]]/g, (c) => `\\${c}`);
 
 /**

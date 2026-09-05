@@ -70,7 +70,7 @@ test('legacy owncast.rtmpUrl/streamKey move into publish.rtmp when that slot is 
   assert.equal(config.publish.srt.passphrase, 'srt-pass-keep');
   assert.equal(config.publish.extras[1].passphrase, 'srt-x-keep');
   assert.equal(config.publish.protocol, 'rtmp');
-  assert.deepEqual(config.publish.rtmp, { url: 'rtmp://legacy.example:1935/live', key: 'legacy-key-123' });
+  assert.deepEqual(config.publish.rtmp, { url: 'rtmp://legacy.example:1935/live', key: 'legacy-key-123', codec: 'h264' });
   assert.equal('owncast' in config, false, 'the legacy block is gone from the live config');
   assert.equal(publishConfig().rtmp.key, 'legacy-key-123');
   // The moved key is still masked wherever ffmpeg output is quoted.
@@ -132,4 +132,18 @@ test('streamingestarr.tcpTls: defaulted, sanitized on read and on save, carried 
   assert.doesNotMatch(publishTargetsRedacted().find((l) => l.startsWith('tcp:')), /TLS/);
   // Defaults for a config that never mentions it.
   assert.deepEqual(sanitizeTcpTls({}), { enabled: false, caFile: '' });
+});
+
+test('the codec is bound to every destination slot at load, seeded from the old broadcast codec', async () => {
+  const { config, normalizeStoredPublish } = await import('../src/config.js');
+  config.encoder.codec = 'hevc';
+  config.publish = { protocol: 'srt', srt: { url: 'srt://x:1' }, rtmp: { url: 'rtmp://y/live', key: 'k' },
+    extras: [{ id: 'e1', enabled: true, protocol: 'tcp', url: 'tcp://z:2', key: 'k' }, { id: 'e2', enabled: false, protocol: 'rtmp', url: 'rtmp://w/live', key: 'k' }] };
+  const note = normalizeStoredPublish();
+  assert.match(String(note), /a codec \(HEVC where/);
+  assert.equal(config.publish.srt.codec, 'hevc', 'SRT keeps the HEVC it was streaming');
+  assert.equal(config.publish.rtmp.codec, 'h264', 'RTMP can only take H.264');
+  assert.equal(config.publish.extras[0].codec, 'hevc');
+  assert.equal(config.publish.extras[1].codec, 'h264');
+  assert.equal(config.encoder.codec, 'hevc', 'the derived codec is what the destinations that are on agree to');
 });

@@ -6,7 +6,7 @@
  * so nothing here carries a real default.
  */
 
-import { publishDefaults, targetUrl, redactUrl, destinations, redactSecrets } from './publish.js';
+import { publishDefaults, targetUrl, redactUrl, destinations, redactSecrets, protocolCodecs, agreedCodec } from './publish.js';
 
 // Re-exported so callers have one place to ask about configuration.
 export { publishDefaults, PROTOCOLS } from './publish.js';
@@ -383,6 +383,29 @@ export function normalizeStoredPublish() {
   }
   if (dropped) notes.push('dropped the retired TCP passphrase (TLS replaces it)');
 
+  /**
+   * The codec moved onto the destinations (Sep 2026). A slot without one
+   * inherits the broadcast-wide codec that used to rule them all — so an
+   * HEVC setup stays HEVC on its SRT/TCP slots — and RTMP slots take the
+   * only codec FLV carries. encoder.codec lives on as the derived value
+   * of the destinations that are on, kept in step at every save.
+   */
+  const legacyCodec = ['h264', 'hevc', 'av1'].includes(config.encoder?.codec) ? config.encoder.codec : 'h264';
+  let seeded = 0;
+  for (const proto of ['rtmp', 'rtmps', 'srt', 'tcp']) {
+    if (!pub[proto] || typeof pub[proto] !== 'object') pub[proto] = { url: '', key: '' };
+    if (!pub[proto].codec) { pub[proto].codec = protocolCodecs(proto).includes(legacyCodec) ? legacyCodec : 'h264'; seeded += 1; }
+  }
+  for (const e of Array.isArray(pub.extras) ? pub.extras : []) {
+    if (e && !e.codec) { e.codec = protocolCodecs(e.protocol).includes(legacyCodec) ? legacyCodec : 'h264'; seeded += 1; }
+  }
+  if (seeded) notes.push(`gave ${seeded} destination slot${seeded === 1 ? '' : 's'} a codec (${legacyCodec.toUpperCase()} where the protocol carries it, H.264 otherwise)`);
+  const agreed = agreedCodec(pub);
+  if (agreed.codec && config.encoder && config.encoder.codec !== agreed.codec) {
+    config.encoder.codec = agreed.codec;
+    notes.push(`the broadcast codec follows the destinations: ${agreed.codec.toUpperCase()}`);
+  }
+
   const legacy = config.owncast;
   if (legacy && typeof legacy === 'object') {
     if (legacy.rtmpUrl && !pub.rtmp?.url) {
@@ -532,7 +555,10 @@ export function publishConfig(cfg = config) {
 }
 
 export function publishDestinations(cfg = config, codec = null) {
-  const dests = destinations(publishConfig(cfg), codec ?? cfg.encoder?.codec ?? 'h264');
+  // The codec rides on the destinations now; the parameter is kept for
+  // callers that still pass one and is not consulted.
+  void codec;
+  const dests = destinations(publishConfig(cfg));
   // Validate here rather than at spawn: a bad target should be an error on
   // the settings page, not a publisher that dies thirty seconds into a show.
   for (const d of dests) targetUrl(d.protocol, d.creds);
