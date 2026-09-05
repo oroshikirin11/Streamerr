@@ -196,4 +196,23 @@
   .eps .sum { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .eps .sum.reading { opacity: .6; }
   .eps .body { padding: 6px 4px 14px 24px; }
+
+  @media (max-width: 720px) {
+    /* A full-screen sheet; the close stays at the top right. */
+    .overlay { padding: 0; }
+    .modal {
+      width: 100%; max-height: 100vh; max-height: 100dvh; position: fixed; inset: 0;
+      border-radius: 0; border: none; padding: 14px;
+      padding-top: calc(10px + env(safe-area-inset-top));
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    }
+    header { margin-bottom: 10px; }
+    .ic { width: 44px; height: 44px; font-size: 22px; flex-shrink: 0; }
+    .facts { grid-template-columns: 86px minmax(0, 1fr); font-size: 13px; }
+    .tr { flex-wrap: wrap; min-height: 40px; padding: 8px 10px; }
+    .tr span { white-space: normal; flex: 1 1 auto; }
+    .eps .row { flex-wrap: wrap; min-height: 44px; }
+    .eps .sum { flex-basis: 100%; padding-left: 20px; white-space: normal; }
+    .eps .body { padding-left: 8px; }
+  }
 </style>

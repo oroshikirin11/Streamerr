@@ -642,9 +642,12 @@
         matching titles
       </span>
     {/if}
-    <button class="ghost small" onclick={refreshLibrary} disabled={refreshing}
-            title="Look for media added since this page was opened">
-      {refreshing ? 'Refreshing…' : 'Refresh'}
+    <button class="ghost small refresh" onclick={refreshLibrary} disabled={refreshing}
+            title="Look for media added since this page was opened"
+            aria-label={refreshing ? 'Refreshing…' : 'Refresh'}>
+      <!-- Icon only on a phone; the text carries it on desktop. -->
+      <svg class="bi" class:spinning={refreshing} viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg>
+      <span class="lbl">{refreshing ? 'Refreshing…' : 'Refresh'}</span>
     </button>
     <input class="find" type="search" bind:value={shelfSearch} oninput={onSearchInput}
            placeholder="Search the library" aria-label="Search the library" />
@@ -729,8 +732,8 @@
 
 
 {:else}
-  <header class="row">
-    <button onclick={showGrid}>← {fromLibrary ?? 'Library'}</button>
+  <header class="row showhead">
+    <button class="back" onclick={showGrid}>← {fromLibrary ?? 'Library'}</button>
     <h1 style="margin:0">{series.title}</h1>
     <div class="spacer"></div>
     {#if selected.size}
@@ -843,8 +846,15 @@
             </span>
           </span>
         </label>
-        <button class="ghost small" onclick={() => openInspectPick(ep)} title="What this file is, and which tracks to use">Info</button>
-        <button class="ghost small" onclick={() => selectFrom(ep.id)}>From here</button>
+        <!-- On a phone these are icon buttons; the labels stay for desktop. -->
+        <button class="ghost small act" onclick={() => openInspectPick(ep)} title="What this file is, and which tracks to use" aria-label="Info">
+          <svg class="bi" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+          <span class="lbl">Info</span>
+        </button>
+        <button class="ghost small act" onclick={() => selectFrom(ep.id)} title="From here — select this episode and everything after it" aria-label="From here">
+          <svg class="bi" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          <span class="lbl">From here</span>
+        </button>
       </li>
     {/each}
   </ul>
@@ -863,6 +873,9 @@
   <div class="overlay" onclick={(e) => { if (e.target === e.currentTarget) fixItem = null; }} role="presentation">
     <div class="card modal fixmodal" role="dialog" aria-modal="true" tabindex="-1"
          aria-labelledby="fix-title" use:modal={{ onClose: () => (fixItem = null) }}>
+      <!-- Phone only: the sheet fills the screen, so a close sits at the
+           top right within thumb's reach. Desktop keeps the footer Close. -->
+      <button class="sheetx" onclick={() => (fixItem = null)} title="Close" aria-label="Close">×</button>
       <h3 id="fix-title">Pick the right match</h3>
       <p class="muted small">For <b>{fixItem.rawTitle}</b> — the choice is
         remembered and never re-matched.</p>
@@ -1159,4 +1172,94 @@
   .pop .line:hover { background: var(--surface-2); }
   .pop .newrow { display: flex; gap: 6px; margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
   .pop .newrow input { flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px; }
+
+  /* Phone-only pieces, off on desktop. */
+  .bi, .sheetx { display: none; }
+
+  @media (max-width: 720px) {
+    .row { gap: 10px; margin-bottom: 14px; }
+    /* Chips scroll sideways on one line; the search takes the next line
+       in full, with Refresh as an icon beside it. */
+    .shelfbar { gap: 10px; margin-bottom: 14px; }
+    .shelfbar .spacer { display: none; }
+    .chips {
+      flex: 0 0 auto; flex-wrap: nowrap; overflow-x: auto; order: 0;
+      scrollbar-width: none; -webkit-overflow-scrolling: touch;
+      margin: 0 -14px; padding: 2px 14px; width: calc(100% + 28px);
+    }
+    .chips::-webkit-scrollbar { display: none; }
+    .chip { flex-shrink: 0; min-height: 34px; }
+    .stills { order: 1; flex: 0 0 100%; }
+    .find { order: 2; flex: 1 1 0; width: auto; min-width: 0; min-height: 40px; }
+    .refresh {
+      order: 3; display: inline-grid; place-items: center;
+      width: 40px; height: 40px; padding: 0; border-color: var(--border);
+    }
+    .refresh .bi { display: block; }
+    .refresh .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    .refresh .bi.spinning { animation: stillspin 1s linear infinite; }
+
+    .shelf { margin-bottom: 18px; }
+    .shead { margin: 0 0 8px; padding: 6px 0 6px; }
+    .shelf .grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+    .name { font-size: 12px; margin-top: 5px; }
+    .poster .small { font-size: 11.5px; }
+
+    /* Show view: back + title on one line, the actions on the next with
+       the primary button taking what is left. */
+    .showhead { flex-wrap: wrap; position: relative; }
+    .showhead .back { padding: 6px 10px; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+    .showhead h1 { flex: 1; min-width: 0; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .showhead .spacer { flex: 0 0 100%; height: 0; }
+    .showhead .menu { position: static; }
+    .showhead .pop { left: 0; right: 0; top: 100%; min-width: 0; }
+    .showhead .primary { flex: 1 1 auto; min-height: 40px; }
+    .showhead .sched { min-height: 40px; width: 40px; }
+    .showhead .schedtime { width: 72px; min-height: 40px; }
+    .seasons button { min-height: 36px; }
+
+    /* Stays put while the rows scroll under it. */
+    .selbar {
+      position: sticky; top: 0; z-index: 3; background: var(--bg);
+      margin: 0 -14px 2px; padding: 8px 14px; min-height: 44px;
+    }
+    .selbar input { width: 18px; height: 18px; }
+
+    .eps li { gap: 10px; padding: 6px 4px; min-height: 44px; }
+    .eps li > input { width: 18px; height: 18px; flex-shrink: 0; }
+    .rowlabel { gap: 10px; }
+    .still { width: 56px; height: 32px; border-radius: 4px; }
+    .stub { font-size: 12px; }
+    .act {
+      display: inline-grid; place-items: center; width: 36px; height: 36px; padding: 0; flex-shrink: 0;
+    }
+    .act .bi { display: block; }
+    .act .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+    /* Every dialog is a full-screen sheet. */
+    .overlay { padding: 0; }
+    .modal, .fixmodal {
+      position: fixed; inset: 0; width: 100%; max-width: none; max-height: 100vh; max-height: 100dvh;
+      border-radius: 0; border: none; overflow: auto; padding: 14px;
+      padding-top: calc(14px + env(safe-area-inset-top));
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    }
+    .sheetx {
+      display: grid; place-items: center; position: absolute; top: 6px; right: 6px;
+      width: 44px; height: 44px; padding: 0; border: none; border-radius: 999px;
+      background: transparent; color: var(--muted); font-size: 22px; line-height: 1;
+    }
+    .fixmodal h3 { padding-right: 44px; }
+    .fixgrid { max-height: none; }
+    .fixfoot { flex-wrap: wrap; }
+  }
+
+  @media (pointer: coarse) {
+    /* No hover on a touch screen: the corner actions are always there. */
+    .tileact { opacity: 1; }
+    .fixart { opacity: 1; }
+    .poster .art { transition: none; }
+    .eps li:hover { background: transparent; }
+    .eps li.sel, .eps li.sel:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  }
 </style>

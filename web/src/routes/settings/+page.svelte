@@ -2241,5 +2241,28 @@
   }
   .extrahead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
   .extra input { margin-top: 5px; }
+
+  @media (max-width: 720px) {
+    .wrap { max-width: none; }
+    .pagehead { gap: 10px; margin-bottom: 16px; }
+    .pagehead h1 { flex: 1 1 100%; }
+    .card { padding: 14px; }
+    section { margin-bottom: 12px; }
+    .subcard { margin-top: 16px; padding-top: 14px; }
+    /* Every segmented control fills the line, the view toggle included. */
+    .segc { display: flex; width: 100%; }
+    .segc button { flex: 1; padding: 8px 6px; min-height: 40px; }
+    .choices { grid-template-columns: 1fr; }
+    .g3 { grid-template-columns: 1fr; }
+    .actions > input { flex: 1 1 100%; }
+    .actions button { min-height: 40px; }
+    .srcfoot { gap: 8px; }
+    .extrahead { flex-wrap: wrap; }
+    input, select, textarea { min-height: 40px; }
+    input[type="checkbox"], input[type="radio"] { min-height: 0; width: 18px; height: 18px; }
+    input[type="range"] { min-height: 28px; }
+    .langs .chip, .srcbar .chip { min-height: 36px; }
+    .snapname { width: 110px; }
+  }
 </style>
 

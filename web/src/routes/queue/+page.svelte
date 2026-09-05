@@ -86,7 +86,21 @@
   // ── derived ───────────────────────────────────────────────────────────
   const live = $derived(status.status !== 'stopped');
   const card = $derived(Boolean(status.playing?.countdown));
-  const dnd = $derived(view.settings?.dnd !== false);
+  /**
+   * HTML5 drag-and-drop does not exist on a touch screen, so on a coarse
+   * pointer the switch is hidden (CSS) and the setting is ignored here:
+   * rows and blocks then move with the ↑ ↓ arrows, which are always shown.
+   * Followed live, so plugging a mouse into a tablet brings it back.
+   */
+  const coarseQuery = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : null;
+  let coarse = $state(coarseQuery?.matches ?? false);
+  $effect(() => {
+    if (!coarseQuery) return;
+    const h = (e) => { coarse = e.matches; };
+    coarseQuery.addEventListener('change', h);
+    return () => coarseQuery.removeEventListener('change', h);
+  });
+  const dnd = $derived(!coarse && view.settings?.dnd !== false);
   const segments = $derived(view.tonight?.segments ?? []);
   const upcomingCount = $derived(view.tonight?.entries?.length ?? 0);
   const playingSeg = $derived(segments.find((s) => s.items.some((i) => i.onAir)) ?? null);
@@ -915,6 +929,8 @@
             <strong>{seg.name}</strong>
           </button>
           <span class="bl"><span class="muted">{segRange(seg)}</span></span>
+          <!-- Phone only: forces the count and the actions onto a second line. -->
+          <i class="wrapbreak" aria-hidden="true"></i>
           <span class="bm">{c.up} to play{#if c.watched} · {c.watched} watched{/if}</span>
           {#if seg.items.some((i) => i.onAir)}<span class="chip ok">playing</span>{/if}
           {#if pinKey === `seg:${seg.key}`}
@@ -1195,7 +1211,7 @@
             <option value="new">a new schedule</option>
           </select>
         </label>
-        <button class="ic" onclick={() => (picker = null)} title="Close">×</button>
+        <button class="ic mx" onclick={() => (picker = null)} title="Close" aria-label="Close">×</button>
       </div>
       {#if picker.series}
         {@const ci = continueIndex()}
@@ -1436,4 +1452,96 @@
   .eps li.sel { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .eps label { flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; }
   .eps input { width: auto; }
+
+  /* Phone-only line break inside a wrapping flex row. */
+  .wrapbreak { display: none; }
+
+  @media (max-width: 720px) {
+    .ph { gap: 8px; margin-bottom: 10px; }
+    .ph h1 { flex: 1 1 100%; }
+    .ph .sp { display: none; }
+    .ph > .tin.wide { flex: 1 1 100%; width: 100%; min-height: 40px; }
+    .ph > button.sm { flex: 1 1 40%; min-height: 40px; }
+
+    .tl { padding: 10px 12px; border-radius: 10px; }
+    .legend { gap: 10px; margin-top: 20px; }
+    .legend .zoom .ic { width: 30px; height: 30px; }
+
+    .two { gap: 16px; margin-top: 14px; }
+
+    /* The on-air card: cover beside the text, the buttons below in halves. */
+    .onair { grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
+    .onair .acts { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; justify-content: stretch; }
+    .onair .acts button { justify-content: center; min-height: 44px; padding: 8px 10px; }
+    .cdbanner { grid-template-columns: 1fr; gap: 8px; padding: 12px 14px; }
+    .cdbanner .sm { width: 100%; min-height: 40px; }
+
+    /* Lineup header: title and count on their own lines, then the buttons
+       two to a row. */
+    .uphead { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 16px 0 8px; position: relative; }
+    .uphead h2 { grid-column: 1 / -1; }
+    .uphead > .muted { grid-column: 1 / -1; margin-top: -6px; }
+    .uphead .sp { display: none; }
+    .uphead > button, .uphead .menu > button, .uphead > .tin { width: 100%; min-height: 40px; }
+    .uphead .menu { position: static; }
+    .uphead .pop { top: 100%; left: 0; right: 0; min-width: 0; }
+
+    /* Segment header: name and range on one line, count and actions next. */
+    .bh { gap: 4px 8px; }
+    .bh .handle { display: none; }
+    .bh .fold { min-width: 0; max-width: 100%; }
+    .bh .fold strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bh .bl { flex: 1 1 0; }
+    .wrapbreak { display: block; flex-basis: 100%; height: 0; }
+    .bh .bm { flex: 1; }
+
+    /* Item rows: thumbnail, code + name, time on the right; the actions on
+       a second line with the duration. Break and start rows are untouched. */
+    .q li { font-size: 13.5px; }
+    .q li:not(.startbar):not(.brk) {
+      display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas: "cv qt t" "cv ctl ctl"; gap: 0 8px; padding: 6px 8px 4px;
+    }
+    .q li .handle { display: none; }
+    .q li .cv.xs { grid-area: cv; width: 40px; height: 40px; border-radius: 4px; align-self: center; }
+    .q li .qt { grid-area: qt; align-self: center; }
+    .q li .t, .q li .tcell { grid-area: t; justify-self: end; align-self: center; }
+    .q li .dur { grid-area: ctl; justify-self: start; align-self: center; }
+    .q li .qctl { grid-area: ctl; justify-self: end; }
+    .q .ic, .bh .ic, .tcell .ic { width: 36px; height: 36px; font-size: 15px; }
+    .bh .t, .q li .t { min-height: 36px; }
+
+    /* Rail */
+    .rail .card { padding: 14px; }
+    .sv .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .sv .acts button { min-height: 40px; font-size: 13px; }
+    .form input, .form select { min-height: 40px; }
+    .form .tin.wide { width: 100%; }
+    .days button { flex: 1 1 auto; min-height: 36px; }
+
+    /* The picker as a full-screen sheet. */
+    .backdrop { padding: 0; }
+    .modal {
+      position: fixed; inset: 0; width: 100%; max-height: 100vh; max-height: 100dvh;
+      border-radius: 0; border: none; padding: 14px;
+      padding-top: calc(14px + env(safe-area-inset-top));
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    }
+    .mh { padding-right: 44px; gap: 8px; }
+    .mh h3 { flex: 1 1 100%; }
+    .mh .find { flex: 1 1 140px; min-width: 0; min-height: 40px; }
+    .mh select { min-height: 40px; }
+    .mh .mx {
+      position: absolute; top: calc(6px + env(safe-area-inset-top)); right: 6px;
+      width: 44px; height: 44px; font-size: 22px;
+    }
+    .eps li, .results .line { min-height: 44px; }
+    .modal .row .sm { min-height: 40px; }
+  }
+
+  @media (pointer: coarse) {
+    .switch { display: none; }
+    .q li:hover { background: transparent; }
+    .q li.start, .q li.start:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  }
 </style>

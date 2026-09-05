@@ -111,6 +111,13 @@
   // docks itself relative to that bottom edge, so without counting the panel
   // it lands on top of the track list and swallows the clicks meant for it.
   let panelH = $state(0);
+  // Phone only: the bottom tab bar and the Tonight tray are measured so the
+  // things that float above them (the Audio & subs sheet, the toast, the
+  // preview window) can sit on top of whatever is stacked at the bottom.
+  // Both read 0 on desktop, where the tab bar is not displayed.
+  let tabH = $state(0);
+  let trayH = $state(0);
+  const stackH = $derived(tabH + (stream.playing ? footerH : trayH));
   function togglePreview() {
     previewOpen = !previewOpen;
     localStorage.setItem('jsr-preview-open', previewOpen ? '1' : '0');
@@ -467,67 +474,94 @@
   </div>
 
 {:else}
-  <div class="app">
-    <aside>
-      <div class="brand">
-        <span class="mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        </span>
-        <strong>Streamerr</strong>
-      </div>
-      <div class="status">
-        <!-- The destination list on hover. With a fan-out there is otherwise
-             nowhere in the UI that says where the broadcast is actually
-             going; the startup log is not somewhere an operator should have
-             to look mid-show. -->
-        <span class="onair" class:live class:prep={preparing} title={targetsHint}>
-          <span class="dot" class:live class:prep={preparing}></span>
-          {live ? 'On air' : preparing ? 'Preparing' : onBreak ? 'On break' : 'Offline'}
-        </span>
-        {#if speed && live}
-          <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
-        {/if}
-      </div>
-      <!-- One sample is enough to show the figure; the line fills in behind
-           it. Gating on two hid the row entirely whenever the axis had just
-           changed, because that clears the history back to a single point. -->
-      {#if live && !counting && !paused && bufPts.length > 0}
-        <!-- Encoded-but-unaired reserve: the slack the broadcast can spend
-             before a slow scene shows on air. -->
-        <div class="bufrow"
-             title="Encoded ahead of air — the stall the broadcast can absorb before it reaches viewers">
-          <svg class="buf" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
-            {#if bufPts.length > 1}<polyline points={bufLine} class:low={bufLow} />{/if}
-          </svg>
-          <span class="buflab" class:low={bufLow}>{fmtBuf(lastBuf)}</span>
-        </div>
+  {#snippet brand()}
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </span>
+      <strong>Streamerr</strong>
+    </div>
+  {/snippet}
+  {#snippet statusBlock()}
+    <div class="status">
+      <!-- The destination list on hover. With a fan-out there is otherwise
+           nowhere in the UI that says where the broadcast is actually
+           going; the startup log is not somewhere an operator should have
+           to look mid-show. -->
+      <span class="onair" class:live class:prep={preparing} title={targetsHint}>
+        <span class="dot" class:live class:prep={preparing}></span>
+        {live ? 'On air' : preparing ? 'Preparing' : onBreak ? 'On break' : 'Offline'}
+      </span>
+      {#if speed && live}
+        <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
       {/if}
+    </div>
+  {/snippet}
+  {#snippet bufBlock()}
+    <!-- One sample is enough to show the figure; the line fills in behind
+         it. Gating on two hid the row entirely whenever the axis had just
+         changed, because that clears the history back to a single point. -->
+    {#if live && !counting && !paused && bufPts.length > 0}
+      <!-- Encoded-but-unaired reserve: the slack the broadcast can spend
+           before a slow scene shows on air. -->
+      <div class="bufrow"
+           title="Encoded ahead of air — the stall the broadcast can absorb before it reaches viewers">
+        <svg class="buf" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+          {#if bufPts.length > 1}<polyline points={bufLine} class:low={bufLow} />{/if}
+        </svg>
+        <span class="buflab" class:low={bufLow}>{fmtBuf(lastBuf)}</span>
+      </div>
+    {/if}
+  {/snippet}
+  {#snippet navLinks()}
+    {#each nav as n}
+      <a href={n.href} class:active={page.url.pathname === n.href}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+             stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <path d={n.icon} />
+        </svg>
+        {n.label}
+        {#if n.href === '/queue' && stream.queue?.length}
+          <span class="badge">{stream.queue.length}</span>
+        {/if}
+      </a>
+    {/each}
+  {/snippet}
+
+  <div class="app" style:--stack="{stackH}px">
+    <!-- The same status block and navigation are rendered twice: in the
+         sidebar for desktop, and as a top bar plus bottom tab bar on a
+         phone. CSS decides which pair shows; nothing is ever visible
+         twice at once. -->
+    <aside>
+      {@render brand()}
+      {@render statusBlock()}
+      {@render bufBlock()}
       <nav>
-        {#each nav as n}
-          <a href={n.href} class:active={page.url.pathname === n.href}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
-                 stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-              <path d={n.icon} />
-            </svg>
-            {n.label}
-            {#if n.href === '/queue' && stream.queue?.length}
-              <span class="badge">{stream.queue.length}</span>
-            {/if}
-          </a>
-        {/each}
+        {@render navLinks()}
       </nav>
       <div class="spacer"></div>
     </aside>
+
+    <header class="topbar">
+      {@render brand()}
+      <span class="tspacer"></span>
+      {@render bufBlock()}
+      {@render statusBlock()}
+    </header>
 
     <main>
       {@render children()}
     </main>
 
     {#if !stream.playing && tonight.entries?.length}
-      <div class="tray">
-        <span><strong>Tonight</strong> · {tonight.entries.length} lined up{#if tonightNames} · {tonightNames}{/if}</span>
+      <div class="tray" bind:clientHeight={trayH}>
+        <span class="tdesk"><strong>Tonight</strong> · {tonight.entries.length} lined up{#if tonightNames} · {tonightNames}{/if}</span>
+        <!-- On a phone the whole line is the link; the desktop pair below
+             stays as it is. -->
+        <a class="tline" href="/queue"><strong>Tonight</strong> · {tonight.entries.length} lined up{#if tonightNames} · {tonightNames}{/if}</a>
         <span class="tsp"></span>
-        <a href="/queue">Open schedule</a>
+        <a class="tdesk" href="/queue">Open schedule</a>
         <button class="primary" onclick={goLiveTray} disabled={goingLive}>{goingLive ? 'Going live…' : 'Go live'}</button>
       </div>
     {/if}
@@ -641,8 +675,16 @@
                 </svg>
               </button>
             {/if}
-            <button onclick={openTracks} disabled={busyCtl || preparing}>Audio &amp; subs</button>
-            <button class="danger" onclick={stopStream} disabled={busyCtl}>Stop</button>
+            <!-- The icons only show on a phone, where the two buttons are
+                 icon-over-label to fit beside the transport controls. -->
+            <button class="fb" onclick={openTracks} disabled={busyCtl || preparing} title="Audio &amp; subtitles">
+              <svg class="bi" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h18v14H3zM7 15h4M14 15h3"/></svg>
+              <span>Audio &amp; subs</span>
+            </button>
+            <button class="danger fb" onclick={stopStream} disabled={busyCtl} title="Stop the broadcast">
+              <svg class="bi" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              <span>Stop</span>
+            </button>
           </div>
         </div>
       </footer>
@@ -692,13 +734,18 @@
         </div>
       {/if}
     {/if}
+
+    <!-- Phone only: the bottom tab bar, always the last thing on screen. -->
+    <nav class="tabbar" bind:clientHeight={tabH} aria-label="Main">
+      {@render navLinks()}
+    </nav>
   </div>
 {/if}
 
 {#if authed && previewAllowed && previewOpen}
   <!-- Keyed on nothing but presence: mounting connects, unmounting tears the
        player down, so going off air cleans up by itself. -->
-  <PreviewWindow bottomInset={footerH + (tracks ? panelH : 0) + 14} onclose={togglePreview} />
+  <PreviewWindow bottomInset={footerH + (tracks ? panelH : 0) + tabH + 14} onclose={togglePreview} />
 {/if}
 
 {#if stream.playing && (stream.status === 'starting'
@@ -785,6 +832,7 @@
     transition: background .15s, border-color .15s, color .15s,
                 box-shadow .15s, transform .06s;
   }
+  :global(button, a, [role="button"]) { -webkit-tap-highlight-color: transparent; }
   :global(button:hover:not(:disabled)) { border-color: var(--muted); }
   :global(button:active:not(:disabled)) { transform: scale(.97); }
   :global(button:disabled) { opacity: .5; cursor: not-allowed; }
@@ -848,15 +896,17 @@
     box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .mark svg { margin-left: 1px; }
-  nav { display: flex; flex-direction: column; gap: 2px; }
-  nav a {
+  aside nav { display: flex; flex-direction: column; gap: 2px; }
+  aside nav a {
     display: flex; align-items: center; gap: 9px;
     padding: 8px 10px; border-radius: var(--radius);
     color: var(--muted); text-decoration: none; font-size: 14px;
   }
-  nav a:hover { background: var(--surface-2); }
-  nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  aside nav a:hover { background: var(--surface-2); }
+  aside nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
   .badge { margin-left: auto; font-size: 11px; background: var(--surface-2); padding: 1px 7px; border-radius: 99px; }
+  /* Phone-only chrome, off until the phone rules below turn it on. */
+  .topbar, .tabbar, .tray .tline, .fb .bi { display: none; }
   .spacer { flex: 1; }
   .status {
     padding: 0 8px 14px;
@@ -1075,5 +1125,115 @@
   }
   @media (prefers-reduced-motion: reduce) {
     :global(*) { animation: none !important; transition: none !important; }
+  }
+
+  /* ── Phone ─────────────────────────────────────────────────────────────
+     The sidebar goes; a slim top bar carries the brand and the on-air
+     state, a bottom tab bar carries the navigation. The app is still one
+     fixed-height grid with <main> as the only scroller, so the rows stack
+     from the bottom up exactly as the design asks: tab bar, then the
+     transport bar (live) or the Tonight tray (not), then the page. */
+  @media (max-width: 720px) {
+    :global(:root) { --sidebar: 0px; }
+    :global(h1) { font-size: 20px; }
+    :global(.card) { padding: 14px; }
+    .app {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto 1fr auto auto;
+      height: 100vh; height: 100dvh;
+    }
+    aside { display: none; }
+
+    .topbar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px calc(8px - 1px);
+      padding-top: calc(8px + env(safe-area-inset-top));
+      border-bottom: 1px solid var(--border); background: var(--surface);
+      min-width: 0;
+    }
+    .topbar .brand { padding: 0; }
+    .topbar .tspacer { flex: 1; }
+    .topbar .status { padding: 0; flex-shrink: 0; }
+    .topbar .bufrow { padding: 0; margin: 0; width: 88px; flex-shrink: 0; }
+    .topbar .buf { width: 60px; height: 22px; flex: none; }
+
+    main { padding: 14px; }
+
+    .tabbar {
+      display: flex; align-items: stretch;
+      border-top: 1px solid var(--border); background: var(--surface);
+      padding-bottom: env(safe-area-inset-bottom);
+      grid-column: 1;
+    }
+    .tabbar a {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 3px; position: relative;
+      padding: 7px 4px 6px; min-height: 52px;
+      color: var(--muted); text-decoration: none; font-size: 11px;
+    }
+    .tabbar a svg { width: 22px; height: 22px; }
+    .tabbar a.active { color: var(--accent); }
+    .tabbar .badge {
+      position: absolute; top: 4px; left: calc(50% + 6px); margin: 0;
+      font-size: 10px; line-height: 1.4; padding: 0 5px;
+      background: var(--accent); color: #fff;
+    }
+
+    .tray, footer, .panel { grid-column: 1; }
+    .tray { gap: 10px; padding: 8px 14px; }
+    .tray .tdesk, .tray .tsp { display: none; }
+    .tray .tline {
+      display: block; flex: 1; min-width: 0; color: inherit;
+      text-decoration: none; font-size: 13px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tray button { flex-shrink: 0; padding: 7px 12px; font-size: 13px; }
+
+    footer { padding: 10px 12px 8px; }
+    .seek { height: 10px; }
+    .seek .fill { border-radius: 0 3px 3px 0; }
+    .frow {
+      grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px;
+      grid-template-areas: "left left" "ctl right";
+    }
+    .fleft { grid-area: left; gap: 10px; }
+    .cover { width: 36px; height: 50px; }
+    .np .title { font-size: 13.5px; }
+    .np p.small { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ctl { grid-area: ctl; justify-self: center; gap: 4px; }
+    .ctl .ic { width: 40px; height: 40px; }
+    .fright { grid-area: right; align-items: center; gap: 4px; }
+    .fright .fb {
+      display: inline-flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 2px; padding: 4px 6px; min-width: 44px;
+      min-height: 44px; font-size: 10px; line-height: 1.1;
+      background: transparent; border-color: transparent; color: var(--muted);
+    }
+    .fright .fb.danger { color: var(--danger); }
+    .fright .fb .bi { display: block; }
+    .fright .pvt { width: 36px; height: 36px; padding: 0; }
+
+    /* The Audio & subtitles panel becomes a sheet above the transport bar
+       (and the tab bar), instead of a row docked under it. */
+    .panel {
+      position: fixed; left: 0; right: 0; bottom: var(--stack, 0px);
+      z-index: 26; max-height: 55vh; max-height: 55dvh;
+      border-top: 1px solid var(--border); border-radius: 12px 12px 0 0;
+      box-shadow: 0 -8px 24px rgba(0,0,0,.25); padding: 12px 14px 16px;
+    }
+    .phead { flex-wrap: wrap; }
+    .phead strong { flex: 1 1 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .phead button { min-height: 40px; }
+    .cols { grid-template-columns: 1fr; gap: 10px; }
+    .tr { min-height: 40px; }
+
+    /* Toasts sit above whatever is stacked at the bottom, full width. */
+    .toast { left: 10px; right: 10px; width: auto; bottom: calc(var(--stack, 0px) + 10px); }
+    .toast.raised { bottom: calc(var(--stack, 0px) + 64px); }
+  }
+
+  @media (pointer: coarse) {
+    .seek.seekable:hover .fill::after { transform: translateY(-50%) scale(0); }
+    .tabbar a, .tray button, .fright button, .phead button { min-height: 44px; }
   }
 </style>

@@ -80,4 +80,15 @@
   .lv { flex-shrink: 0; width: 52px; color: var(--muted); }
   .line.warn .lv, .line.warn .tx { color: #c99a2e; }
   .line.error .lv, .line.error .tx { color: var(--danger); }
+
+  @media (max-width: 720px) {
+    .row { flex-wrap: wrap; gap: 8px; }
+    .row h1 { flex: 1 1 auto; }
+    .row .spacer { display: none; }
+    .row input:not([type]), .row input[type="text"] { width: 100%; flex: 1 1 100%; min-height: 40px; }
+    .row button { min-height: 40px; }
+    /* Long lines scroll sideways inside the box instead of wrapping. */
+    .log { height: calc(100vh - 340px); height: calc(100dvh - 340px); min-height: 240px; overflow: auto; }
+    .line { white-space: pre; word-break: normal; }
+  }
 </style>

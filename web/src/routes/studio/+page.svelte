@@ -1397,4 +1397,34 @@
     background: color-mix(in srgb, var(--danger) 10%, var(--surface-2));
   }
   .head button.warn { border-color: var(--accent); color: var(--accent); }
+
+  @media (max-width: 720px) {
+    /* Title and toolbar, stage, panels — and the experimental notice last,
+       as a muted footnote rather than the first thing on the screen. */
+    .wrap { display: flex; flex-direction: column; }
+    .softnote { order: 10; margin: 14px 0 0; max-width: none; }
+    .head { gap: 6px; margin-bottom: 10px; }
+    .head h1 { flex: 1 1 100%; }
+    .spacer { display: none; }
+    .group { flex: 1 1 auto; flex-wrap: wrap; }
+    .group button { flex: 1 1 auto; min-height: 40px; }
+    .cols { gap: 12px; }
+    .stagewrap { grid-column: 1; grid-row: 1; }
+    .side.left { grid-column: 1; grid-row: 2; }
+    .side.right { grid-column: 1; grid-row: 3; }
+    .stage { border-radius: 8px; }
+    .side .card { padding: 14px; }
+    .actions button { min-height: 40px; }
+    .row2 { grid-template-columns: 84px minmax(0, 1fr); }
+  }
+
+  @media (pointer: coarse) {
+    /* Fat handles for fingers. */
+    .handle { width: 24px; height: 24px; }
+    .handle.rot { top: -36px; }
+    .handle.size { right: -14px; bottom: -14px; border-radius: 5px; }
+    .tog { width: 40px; height: 24px; }
+    .knob { width: 18px; height: 18px; }
+    .tog[aria-checked="true"] .knob { transform: translateX(16px); }
+  }
 </style>

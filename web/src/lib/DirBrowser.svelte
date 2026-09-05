@@ -38,6 +38,9 @@
 <div class="overlay" onclick={(e) => { if (e.target === e.currentTarget) onclose?.(); }} role="presentation">
   <div class="card modal" role="dialog" aria-modal="true" tabindex="-1"
        aria-labelledby="dirbrowser-title" use:modal={{ onClose: onclose }}>
+    <!-- Phone only: the sheet fills the screen, so a close sits at the top
+         right. Desktop keeps the footer Cancel. -->
+    <button class="sheetx" onclick={onclose} title="Close" aria-label="Close">×</button>
     <h3 id="dirbrowser-title">Choose a folder</h3>
     <p class="path" title={path}>{path}</p>
     {#if error}<p class="err">{error}</p>{/if}
@@ -97,4 +100,25 @@
   .dir.up { color: var(--muted); }
   .foot { display: flex; gap: 8px; align-items: center; }
   .err { color: var(--danger); font-size: 13px; }
+  .sheetx { display: none; }
+
+  @media (max-width: 720px) {
+    .overlay { padding: 0; }
+    .modal {
+      width: 100%; max-height: 100vh; max-height: 100dvh; position: fixed; inset: 0;
+      border-radius: 0; border: none; padding: 14px;
+      padding-top: calc(14px + env(safe-area-inset-top));
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    }
+    .sheetx {
+      display: grid; place-items: center; position: absolute;
+      top: calc(6px + env(safe-area-inset-top)); right: 6px;
+      width: 44px; height: 44px; padding: 0; border: none; border-radius: 999px;
+      background: transparent; color: var(--muted); font-size: 22px; line-height: 1;
+    }
+    h3 { padding-right: 44px; }
+    .list { min-height: 0; }
+    .dir { min-height: 44px; }
+    .foot button { min-height: 44px; }
+  }
 </style>

@@ -872,4 +872,21 @@
     border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer;
   }
   .proto.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+
+  @media (max-width: 720px) {
+    .card { padding: 14px; }
+    .grid4 { grid-template-columns: 1fr; gap: 0; }
+    .row { flex-wrap: wrap; }
+    .protos { flex-wrap: wrap; }
+    .proto { flex: 1 1 40%; min-height: 40px; }
+    input, select, textarea { min-height: 40px; }
+    input[type="checkbox"], input[type="radio"] { min-height: 0; width: 18px; height: 18px; }
+    .row button { min-height: 40px; }
+    .langs .chip { min-height: 36px; }
+    /* Back and Skip share a line; Continue takes a full one. */
+    .nav { flex-wrap: wrap; }
+    .nav .spacer { display: none; }
+    .nav button { flex: 1 1 40%; min-height: 44px; }
+    .nav .primary { flex: 1 1 100%; }
+  }
 </style>
