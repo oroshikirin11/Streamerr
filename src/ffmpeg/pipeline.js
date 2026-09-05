@@ -4578,7 +4578,7 @@ export class PipelinePlayout extends EventEmitter {
       const kbps = isCopy ? Math.max(this._kbpsBase, srcKbps ?? 0) : this._kbpsBase;
       if (isCopy) {
         this.emit('log', `[passthrough] native HEVC, nothing to draw — source `
-          + `bytes ship untouched (~${srcKbps ?? kbps} kbps); encode cost zero. An Apply `
+          + `bytes ship untouched (${srcKbps != null ? `~${srcKbps} kbps` : 'rate not measured over this source'}); encode cost zero. An Apply `
           + `or subtitle switch arms a transcode via the usual respawn.\n`);
         if (!copyKeyframesFitLive(this.profile)) {
           // Kept on the copy path only because re-encoding it would be
