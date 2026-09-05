@@ -855,6 +855,20 @@
   }
 
   async function logout() { await api.logout(); location.reload(); }
+
+  // The login itself can be switched off for a panel on a private network.
+  // Either direction needs the current password, so the checkbox only
+  // works once that field is filled in.
+  async function setAskForPassword(ask) {
+    pwMsg = '';
+    if (!pwCurrent) { pwMsg = 'Type the current password first, then change this.'; return; }
+    try {
+      await api.setAuthLock(ask, pwCurrent);
+      cfg.auth = { ...(cfg.auth ?? {}), askForPassword: ask };
+      pwCurrent = '';
+      pwMsg = ask ? 'The panel asks for the password again.' : 'The panel opens without a password now.';
+    } catch (err) { pwMsg = err.message; }
+  }
 </script>
 
 
@@ -2145,8 +2159,18 @@
       <button class="primary" onclick={changePassword}
               disabled={!pwNext || pwNext.length < 8}>Change password</button>
       <div style="flex:1"></div>
-      <button onclick={logout}>Sign out</button>
+      {#if cfg.auth?.askForPassword !== false}<button onclick={logout}>Sign out</button>{/if}
     </div>
+    <label class="switch" style="display:flex; align-items:center; gap:8px; margin:14px 0 0;">
+      <input type="checkbox" checked={cfg.auth?.askForPassword !== false} style="width:auto"
+             onchange={(e) => { const ask = e.currentTarget.checked; e.currentTarget.checked = !ask; setAskForPassword(ask); }} />
+      Ask for the password when opening the panel
+    </label>
+    {#if cfg.auth?.askForPassword === false}
+      <p class="small" style="color: var(--danger)">Off: anyone who can reach this address can start and stop broadcasts and change settings. Only for a panel on a private network.</p>
+    {:else}
+      <p class="muted small">Turning this off needs the current password, and so does turning it back on. The password itself stays set.</p>
+    {/if}
     {#if pwMsg}<p class="small">{pwMsg}</p>{/if}
   </section>
   </section>

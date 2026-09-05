@@ -70,6 +70,7 @@ export const api = {
   logout: () => request('POST', '/api/auth/logout'),
   setupPassword: (password) => request('POST', '/api/auth/setup', { password }),
   changePassword: (current, next) => request('POST', '/api/auth/password', { current, next }),
+  setAuthLock: (askForPassword, current) => request('POST', '/api/auth/lock', { askForPassword, current }),
 
   config: () => request('GET', '/api/config'),
   saveConfig: (patch) => request('PUT', '/api/config', patch),

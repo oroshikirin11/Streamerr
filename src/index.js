@@ -1252,13 +1252,33 @@ app.post('/api/auth/password', async (req, res) => {
   }
 });
 
+/**
+ * Whether the panel asks for the password at all. Off is for a panel on
+ * a private network where the login is only in the way; it needs the
+ * current password either way, so a session alone cannot unlock the
+ * door for everyone. Turning it back on keeps THIS browser signed in.
+ */
+app.post('/api/auth/lock', async (req, res) => {
+  const ask = req.body?.askForPassword !== false;
+  if (!passwordHash()) return res.status(409).json({ error: 'Set a password first' });
+  if (!(await verifyPassword(req.body?.current ?? '', passwordHash()))) {
+    return res.status(403).json({ error: 'Current password is wrong' });
+  }
+  saveConfig({ auth: { disabled: !ask } });
+  if (ask) {
+    const token = createSession();
+    res.setHeader('Set-Cookie', sessionCookie(token, { secure: isSecure(req) }));
+  }
+  res.json({ ok: true, askForPassword: ask });
+});
+
 // ── config ─────────────────────────────────────────────────────────────
 
 /** Secrets never leave the server; the UI shows whether one is set, not what. */
 function redactedConfig() {
   return {
     ...config,
-    auth: { configured: Boolean(passwordHash()) },
+    auth: { configured: Boolean(passwordHash()), askForPassword: !authDisabled() },
     streamingestarr: {
       ...config.streamingestarr,
       accessToken: config.streamingestarr?.accessToken ? '__SET__' : '',
