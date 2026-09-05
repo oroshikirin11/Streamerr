@@ -67,6 +67,19 @@
   // Advanced edits; nothing here is a second copy.
   const simpleCodec = $derived(cfg?.encoder?.codec || 'h264');
   const primaryUrl = $derived(cfg?.publish?.[cfg?.publish?.protocol]?.url || '');
+  // How many destinations are on, and which one leads: the first one on,
+  // in the order primary then extras, skipping those that cannot carry
+  // the codec — the same rule the server's destinations() applies.
+  const onCount = $derived((cfg?.publish?.enabled !== false ? 1 : 0)
+    + (cfg?.publish?.extras ?? []).filter((e) => e.enabled !== false).length);
+  const leadIndex = $derived.by(() => {
+    if (!cfg?.publish) return -1;
+    const carries = (proto) => simpleCodec === 'h264' || MODERN_CARRIERS.includes(proto)
+      || (proto === 'rtmp' && Boolean(cfg.publish.srt?.url));
+    if (cfg.publish.enabled !== false && carries(cfg.publish.protocol)) return 0;
+    const i = (cfg.publish.extras ?? []).findIndex((e) => e.enabled !== false && carries(e.protocol));
+    return i >= 0 ? i + 1 : -1;
+  });
   const timingCurrent = $derived.by(() => (cfg
     && TIMING_LEVERS.some((t) => t.id === cfg.buffer?.seconds) ? cfg.buffer.seconds : null));
   /**
@@ -912,23 +925,28 @@
 
     <section class="card">
       <h3>Destinations</h3>
-      <p class="muted small">Where the next broadcast goes. Tick the extras that should receive it; the primary always does.</p>
+      <p class="muted small">Where the next broadcast goes. Tick the ones that should receive it; the first one that is on leads, the rest are copies of it.</p>
       <ul class="dests">
-        <li class="dest">
-          <span class="dcheck primary" aria-hidden="true">✓</span>
-          <span class="dname">{cfg.publish?.name || 'Primary'} <small class="proto">{(cfg.publish?.protocol || '').toUpperCase()}</small></span>
+        <li class="dest" class:off={cfg.publish?.enabled === false}>
+          <input type="checkbox" class="dcheck" checked={cfg.publish?.enabled !== false}
+                 disabled={cfg.publish?.enabled !== false && onCount <= 1}
+                 onchange={(e) => { cfg.publish.enabled = e.currentTarget.checked; save('publish'); }}
+                 aria-label={`Stream to ${cfg.publish?.name || 'the primary destination'}`} />
+          <span class="dname">{cfg.publish?.name || 'Primary'} <small class="proto">{(cfg.publish?.protocol || '').toUpperCase()}</small>{#if leadIndex === 0}<small class="lead">leads</small>{/if}</span>
           <span class="durl">{primaryUrl || 'not set — see Advanced › Broadcast'}</span>
         </li>
-        {#each cfg.publish?.extras ?? [] as ex (ex.id)}
+        {#each cfg.publish?.extras ?? [] as ex, i (ex.id)}
           {@const sitsOut = simpleCodec !== 'h264' && !MODERN_CARRIERS.includes(ex.protocol)}
           <li class="dest" class:off={ex.enabled === false}>
             <input type="checkbox" class="dcheck" bind:checked={ex.enabled} onchange={() => save('publish')}
+                   disabled={ex.enabled !== false && onCount <= 1}
                    aria-label={`Stream to ${ex.name || ex.url || ex.protocol}`} />
-            <span class="dname">{ex.name || 'Extra'} <small class="proto">{(ex.protocol || '').toUpperCase()}</small></span>
+            <span class="dname">{ex.name || 'Extra'} <small class="proto">{(ex.protocol || '').toUpperCase()}</small>{#if leadIndex === i + 1}<small class="lead">leads</small>{/if}</span>
             <span class="durl">{ex.url || 'no address yet'}{#if sitsOut} · sits out on {simpleCodec.toUpperCase()}{/if}</span>
           </li>
         {/each}
       </ul>
+      {#if onCount <= 1}<p class="muted small">One destination has to stay on, so the last one cannot be unticked.</p>{/if}
       {#if !(cfg.publish?.extras ?? []).length}
         <p class="muted small">Only the primary so far. Add more under Advanced › Broadcast › Also send to.</p>
       {/if}
@@ -993,6 +1011,13 @@
          can carry the stream — so it lives here and the protocol follows
          it. The server mirrors this: destinations() routes a non-H.264
          primary to the SRT slot on its own. -->
+    <label class="switch" style="display:flex; align-items:center; gap:8px; margin:0 0 10px;">
+      <input type="checkbox" checked={cfg.publish.enabled !== false}
+             disabled={cfg.publish.enabled !== false && onCount <= 1}
+             onchange={(e) => { cfg.publish.enabled = e.currentTarget.checked; }} style="width:auto" />
+      Send the broadcast here
+      <span class="muted small">{cfg.publish.enabled === false ? '— off: the first enabled extra leads' : onCount <= 1 ? '— the only destination on' : ''}</span>
+    </label>
     <label>Codec</label>
     <select bind:value={cfg.encoder.codec} onchange={syncVbr}>
       <option value="h264">H.264 — baseline bitrate; universal</option>
@@ -2180,7 +2205,7 @@
   .dest { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 2px 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
   .dest.off .dname, .dest.off .durl { color: var(--muted); }
   .dest .dcheck { width: 16px; height: 16px; margin: 0; grid-row: 1 / span 2; justify-self: center; }
-  .dest .dcheck.primary { width: auto; height: auto; color: var(--success); font-weight: 600; }
+  .dest .lead { color: var(--success); font-size: 11px; margin-left: 8px; letter-spacing: .04em; text-transform: uppercase; }
   .dest .dname { font-size: 14px; }
   .dest .proto { color: var(--muted); font-size: 11px; letter-spacing: .04em; margin-left: 6px; }
   .dest .durl { grid-column: 2; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -31,6 +31,9 @@ export const destName = (v) => String(v ?? '').trim().slice(0, 40);
 export function publishDefaults() {
   return {
     protocol: 'rtmp',
+    // The configured primary can be switched off like any extra; the
+    // first destination that is on leads the broadcast.
+    enabled: true,
     rtmp: { url: '', key: '' },
     rtmps: { url: '', key: '' },
     srt: { url: '', streamId: '', passphrase: '', latencyMs: 200 },
@@ -209,9 +212,12 @@ export function destinations(publish, codec = 'h264') {
   if (!protocolCarries(protocol, codec) && String(p.srt?.url ?? '').trim()) {
     protocol = 'srt';
   }
-  const out = [{ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name),
-    channel: String(p.channel ?? '').trim().slice(0, 64) }];
+  const out = [];
   const skipped = [];
+  if (p.enabled !== false) {
+    out.push({ protocol, creds: p[protocol] ?? {}, primary: true, name: destName(p.name),
+      channel: String(p.channel ?? '').trim().slice(0, 64) });
+  }
   for (const e of p.extras ?? []) {
     if (!e || e.enabled === false) continue;
     if (!PROTOCOLS.includes(e.protocol)) continue;
@@ -220,6 +226,15 @@ export function destinations(publish, codec = 'h264') {
     if (protocolCarries(e.protocol, codec)) out.push(d);
     else skipped.push(d);
   }
+  // Whoever is first leads: the encoder writes to it and the rest are
+  // fanned out from that stream. With the configured primary off, an
+  // enabled extra takes the anchor role for this broadcast.
+  if (!out.length) {
+    throw new Error(skipped.length
+      ? `No destination can carry ${codec.toUpperCase()} — switch one on that speaks SRT or TCP, or pick H.264`
+      : 'No destination is switched on — turn one on under Settings');
+  }
+  out.forEach((d, i) => { d.primary = i === 0; });
   out.skipped = skipped;
   return out;
 }
@@ -349,6 +364,7 @@ export function redactPublish(publish) {
   };
   return {
     protocol: pub.protocol,
+    enabled: pub.enabled !== false,
     name: destName(pub.name),
     // The Room override rides along so the settings page can show it.
     channel: String(pub.channel ?? '').trim().slice(0, 64),

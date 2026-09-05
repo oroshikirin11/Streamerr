@@ -2447,7 +2447,12 @@ const startStreamInner = async (req, res) => {
     // extras that cannot carry the codec sit out with a named warn and
     // rejoin when the codec allows. Refuse only the unfixable: a primary
     // with no compatible slot at all.
-    const sel = publishDestinations(config, codec);
+    let sel;
+    try {
+      sel = publishDestinations(config, codec);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
     const prim = sel[0];
     if (codec !== 'h264' && prim && prim.protocol.startsWith('rtmp')) {
       return res.status(400).json({

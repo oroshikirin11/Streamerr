@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { redactSecrets, publishSecrets, redactPublish, publishDefaults } from '../src/publish.js';
+import { redactSecrets, publishSecrets, redactPublish, publishDefaults, destinations } from '../src/publish.js';
 import { FilesystemLibrary } from '../src/library/filesystem.js';
 
 const publish = {
@@ -96,4 +96,26 @@ test('a film in its own folder carries the poster the grid shows, by the same im
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('a switched-off primary hands the anchor role to the first enabled extra', () => {
+  const pub = { ...publishDefaults(), protocol: 'tcp', enabled: false, tcp: { url: 'tcp://a:1', key: 'k' },
+    extras: [
+      { id: 'x1', enabled: false, protocol: 'srt', url: 'srt://b:2', streamId: '', passphrase: '', latencyMs: 200 },
+      { id: 'x2', enabled: true, protocol: 'rtmp', url: 'rtmp://c/live', key: 'k2' },
+      { id: 'x3', enabled: true, protocol: 'tcp', url: 'tcp://d:4', key: 'k3' },
+    ] };
+  const d = destinations(pub, 'h264');
+  assert.deepEqual(d.map((x) => [x.id ?? 'primary', x.primary]), [['x2', true], ['x3', false]]);
+  // Under HEVC the RTMP extra cannot lead: the TCP one does, RTMP sits out.
+  const h = destinations(pub, 'hevc');
+  assert.deepEqual(h.map((x) => [x.id, x.primary]), [['x3', true]]);
+  assert.deepEqual(h.skipped.map((x) => x.id), ['x2']);
+  // Nothing on at all is refused with a sentence, not an empty tee.
+  assert.throws(() => destinations({ ...pub, extras: [] }, 'h264'), /No destination is switched on/);
+  assert.throws(() => destinations({ ...pub, extras: [pub.extras[1]] }, 'hevc'), /can carry HEVC/);
+  // The default keeps today's behaviour: the primary leads.
+  const p = destinations({ ...pub, enabled: true }, 'h264');
+  assert.equal(p[0].primary, true); assert.equal(p[0].id, undefined);
+  assert.equal(redactPublish(pub).enabled, false);
 });
