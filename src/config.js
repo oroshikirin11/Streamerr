@@ -143,7 +143,6 @@ const DEFAULTS = {
     // and the source: it is a large win for 10-bit HEVC on a weak CPU, and a
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
     // costs more than the decode saved. Measure with `cli.js benchmark`.
-    hwDecode: false,
     /**
      * How the output frame is sized.
      *
@@ -328,6 +327,12 @@ export function normalizeStoredEncoder() {
   // Nothing has read this since subtitle extraction became unconditional
   // (a stale `false` once looped the engine at startup). Dropped rather
   // than carried forever.
+  // Decided automatically now (see buildSourceArgs): software encoder plus a
+  // render device decodes on the GPU, a GPU encoder never copies frames back.
+  if (enc.hwDecode !== undefined) {
+    fixed.push(`hwDecode=${JSON.stringify(enc.hwDecode)}→(decided automatically)`);
+    delete enc.hwDecode;
+  }
   if (enc.extractSubtitles !== undefined) {
     fixed.push(`extractSubtitles=${JSON.stringify(enc.extractSubtitles)}→(removed)`);
     delete enc.extractSubtitles;

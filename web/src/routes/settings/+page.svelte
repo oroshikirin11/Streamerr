@@ -736,7 +736,6 @@
           hdrOutput: Boolean(cfg.encoder.hdrOutput),
           deinterlace: cfg.encoder.deinterlace || 'auto',
           frameSize: frameSize,
-          hwDecode: Boolean(cfg.encoder.hwDecode),
           overlayPipe: cfg.encoder.overlayPipe === 'always'
             ? 'always' : cfg.encoder.overlayPipe !== false,
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
@@ -1928,14 +1927,6 @@
       after changing it there; hardware support varies.
     </p>
 
-    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
-      <input type="checkbox" bind:checked={cfg.encoder.hwDecode} style="width:auto" />
-      Decode on the GPU
-    </label>
-    <p class="muted small">
-      Depends on machine and file: a large win for 10-bit HEVC on a weak CPU, a
-      loss for 8-bit H.264 on a strong one. Measure it.
-    </p>
 
     <label>Live overlay compositor</label>
     <select value={cfg.encoder.overlayPipe === 'always' ? 'always'

@@ -7408,10 +7408,17 @@ export function buildSourceArgs({
   }
 
   // Hardware decode without -hwaccel_output_format, so frames land back in
-  // system memory ready for the software filters. libass cannot touch GPU
-  // frames, and a manual hwdownload round-trip would cost more than it saves.
-  // Worth most on weak CPUs with 10-bit HEVC, where software decode dominates.
-  const useHw = hwDecode ?? profile.hwDecode ?? false;
+  // system memory ready for the software filters. Measured (1080p HEVC
+  // 10-bit, burned subtitles): the copy-back costs more than the decode
+  // saves whenever the ENCODER is on the GPU too — 39% slower on a strong
+  // CPU, 30% slower on two cores — because the CPU then has little else to
+  // do. It only wins with a SOFTWARE encoder on a weak CPU (4.5x vs 3.6x
+  // realtime on two cores), where decode and encode fight for the same
+  // cores. So it is decided here, not by a setting: software encoder and a
+  // render device present. A file the driver cannot decode still falls
+  // back to CPU decode through the usual demotion.
+  const useHw = hwDecode ?? (profile.backend === 'x264' && !profile.swDecode
+    && Boolean(profile.device));
   const decodeArgs = useHw
     ? ['-hwaccel', 'vaapi', '-hwaccel_device', profile.device ?? '/dev/dri/renderD128']
     : [];
