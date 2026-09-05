@@ -40,6 +40,19 @@ node src/index.js
 
 Open `http://localhost:8099` and run setup.
 
+## Updating
+
+```bash
+./update.sh
+```
+
+Works for both setups: it pulls the latest code, rebuilds the container or
+the panel, and restarts. Your config, schedules, uploaded pictures and cache
+are never touched — they live outside the code and, under Docker, in
+volumes. It refuses to run over local edits or a live broadcast (`--yes`
+overrides the latter), keeps a small backup of config, schedules and
+pictures under `backups/`, and `--dry-run` shows the plan without doing it.
+
 ## Metadata
 
 Two good options, one fallback:

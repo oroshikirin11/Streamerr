@@ -22,3 +22,6 @@ overlays/
 
 # Local agent/session config
 .claude/
+
+# update.sh keeps a few small backups here
+backups/
