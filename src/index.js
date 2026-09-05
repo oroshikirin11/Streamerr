@@ -22,8 +22,7 @@ import {
   publishDestinations, publishTargetsRedacted, publishConfig,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary,
   normalizeStoredPublish, normalizeStoredLeftovers, ROOT, CONFIG_DIR,
-  pauseVoteConfig,
-} from './config.js';
+  pauseVoteConfig, tcpTlsConfig } from './config.js';
 import { ControlClient, pendingOf } from './control.js';
 import { createScheduleStore, buildQueue } from './schedules.js';
 import { inspectVerdict } from './inspect.js';
@@ -46,6 +45,7 @@ import { LANGUAGES } from './ffmpeg/tracks.js';
 import { StillSweeper } from './library/stillsweep.js';
 import { TmdbSweeper } from './library/tmdbsweep.js';
 import { testRtmpConnection, probeDuration } from './ffmpeg/playout.js';
+import { testTcpConnection } from './ffmpeg/tcp-bridge.js';
 import { PipelinePlayout, contentRect, effectiveFps, recommendedCacheBytes } from './ffmpeg/pipeline.js';
 import { probeTracks, listSubtitles, selectTracks, workKeyOf } from './ffmpeg/tracks.js';
 import { sweepCache } from './ffmpeg/subcache.js';
@@ -1896,10 +1896,13 @@ app.delete('/api/overlay/images/:name', (req, res) => {
 // ── setup checks ───────────────────────────────────────────────────────
 
 /**
- * "Test connection" / "Send 30s to watch". Tests the PRIMARY publish
- * destination: an optional `publish` block in the body (the settings form
- * or the wizard, secrets may be "__SET__" for "use the stored one"), else
- * what is configured.
+ * "Test connection" / "Send 30s to watch" for ONE destination: the primary
+ * (default) or an extra named by `target: <extra id>` — enabled or not, the
+ * operator is testing the row they are looking at. An optional `publish`
+ * block in the body (the settings form or the wizard, secrets may be
+ * "__SET__" for "use the stored one") stands in for what is configured.
+ * Every protocol is testable with its own transport: RTMP/RTMPS push flv,
+ * SRT pushes MPEG-TS, TCP dials the receiver with the preamble, TLS as set.
  */
 app.post('/api/check/destination', async (req, res) => {
   const b = req.body ?? {};
@@ -1909,33 +1912,47 @@ app.post('/api/check/destination', async (req, res) => {
     ? restorePublishSecrets({ ...publishDefaults(), ...b.publish }, publishConfig())
     : publishConfig();
   const tested = pub; // the block whose secrets the error text must never show
-  let target;
-  let primary;
+  const which = String(b.target ?? 'primary');
+  let dest;
   try {
-    // The protocol as chosen, not codec-shifted: the operator is testing
-    // the target they picked.
-    [primary] = destinations(pub, 'h264');
-    target = targetUrl(primary.protocol, primary.creds);
+    if (which === 'primary') {
+      // The protocol as chosen, not codec-shifted: the operator is testing
+      // the target they picked.
+      const protocol = pub.protocol;
+      dest = { protocol, creds: pub[protocol] ?? {}, name: 'primary' };
+    } else {
+      const ex = (pub.extras ?? []).find((e) => e?.id === which);
+      if (!ex) return res.status(404).json({ error: 'No such destination' });
+      dest = { protocol: ex.protocol, creds: ex, name: ex.name || ex.protocol };
+    }
+    if (dest.protocol === 'tcp') {
+      const tls = tcpTlsConfig(config);
+      dest.creds = { ...dest.creds, tls: { enabled: tls.enabled, caFile: tls.caFile } };
+    }
+    targetUrl(dest.protocol, dest.creds); // validates the address and key
   } catch (err) {
     return res.status(400).json({ error: err.message });
-  }
-  if (primary.protocol !== 'rtmp' && primary.protocol !== 'rtmps') {
-    return res.status(400).json({ error: 'Test is available for RTMP targets' });
   }
   // Two different questions. "Does it accept us" only needs a few seconds and
   // no pacing. "Can I watch it appear" needs realtime pacing AND enough
   // content for an HLS receiver to build a playable playlist — it buffers
   // several segments before a viewer sees anything.
-  const watch = Boolean(req.body?.watch);
+  const watch = Boolean(b.watch);
   const seconds = watch ? 30 : 3;
   const t0 = Date.now();
-  const result = await testRtmpConnection(target, {
-    seconds,
-    realtime: watch,
-    timeoutMs: (seconds + 20) * 1000,
-  });
+  let result;
+  if (dest.protocol === 'tcp') {
+    result = await testTcpConnection(dest.creds, { seconds, realtime: watch });
+  } else {
+    result = await testRtmpConnection(targetUrl(dest.protocol, dest.creds), {
+      seconds,
+      realtime: watch,
+      timeoutMs: (seconds + 20) * 1000,
+      format: dest.protocol === 'srt' ? 'mpegts' : 'flv',
+    });
+  }
   res.json(result.ok
-    ? { ok: true, ms: Date.now() - t0, seconds }
+    ? { ok: true, ms: Date.now() - t0, seconds, protocol: dest.protocol }
     : { ok: false, error: redactSecrets(redact(result.error), tested) });
 });
 

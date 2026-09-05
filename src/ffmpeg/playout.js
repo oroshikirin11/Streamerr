@@ -517,7 +517,7 @@ export function buildPlayoutArgs({
  * path, not the encoder.
  */
 export function testRtmpConnection(target, {
-  seconds = 3, timeoutMs = 45_000, realtime = false,
+  seconds = 3, timeoutMs = 45_000, realtime = false, format = 'flv',
 } = {}) {
   return new Promise((resolve) => {
     const child = spawn('ffmpeg', [
@@ -533,7 +533,8 @@ export function testRtmpConnection(target, {
       '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
       '-g', '60', '-keyint_min', '60', '-sc_threshold', '0', '-bf', '0',
       '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
-      '-f', 'flv', target,
+      // flv for RTMP; SRT carries MPEG-TS.
+      '-f', format, target,
     ], { stdio: ['ignore', 'ignore', 'pipe'] });
 
     let stderr = '';

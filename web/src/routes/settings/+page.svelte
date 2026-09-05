@@ -809,12 +809,18 @@
    * it — unsaved edits included, untouched secrets as the sentinel so the
    * server fills in what is stored.
    */
-  async function testDestination(watch = false) {
-    testing = watch ? 'destination-watch' : 'destination'; destResult = null;
+  // One result per destination: the primary's under the buttons, an
+  // extra's under its own row.
+  let extraResults = $state({});
+  async function testDestination(watch = false, target = 'primary') {
+    testing = (watch ? 'destination-watch' : 'destination') + (target === 'primary' ? '' : ':' + target);
+    if (target === 'primary') destResult = null; else extraResults = { ...extraResults, [target]: null };
+    let r;
     try {
-      destResult = await api.checkDestination({ publish: maskPublish(cfg.publish), watch });
-    } catch (err) { destResult = { ok: false, error: err.message }; }
+      r = await api.checkDestination({ publish: maskPublish(cfg.publish), watch, target });
+    } catch (err) { r = { ok: false, error: err.message }; }
     finally { testing = ''; }
+    if (target === 'primary') destResult = r; else extraResults = { ...extraResults, [target]: r };
   }
 
   async function testLibrary() {
@@ -1157,7 +1163,10 @@
               {#each PROTOCOL_INFO as pr}<option value={pr.id}>{pr.label}{pr.id === 'tcp' ? ' · Streamingestarr' : ''}</option>{/each}
             </select>
           </label>
-          <button type="button" class="danger" onclick={() => removeExtra(ex.id)}>Remove</button>
+          <span class="row" style="gap:6px">
+            <button type="button" onclick={() => testDestination(false, ex.id)} disabled={!!testing}>{testing === 'destination:' + ex.id ? 'Checking…' : 'Test'}</button>
+            <button type="button" class="danger" onclick={() => removeExtra(ex.id)}>Remove</button>
+          </span>
         </div>
         <input bind:value={ex.name} spellcheck="false" maxlength="40"
                placeholder="nickname (optional) — e.g. Cinema receiver" />
@@ -1178,6 +1187,11 @@
         {/if}
         <input bind:value={ex.channel} spellcheck="false" maxlength="40"
                placeholder="room override (optional, Streamingestarr only) — auto-detected from the stream key" />
+        {#if extraResults[ex.id]}
+          <div class="result" class:bad={!extraResults[ex.id].ok}>
+            {extraResults[ex.id].ok ? `${ex.name || ex.protocol} accepted the stream (${extraResults[ex.id].ms} ms)` : extraResults[ex.id].error}
+          </div>
+        {/if}
       </div>
     {/each}
     <button type="button" onclick={addExtra}>Add a destination</button>
@@ -1188,7 +1202,7 @@
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick={() => save('publish')}>Save</button>
       <button onclick={() => testDestination(false)} disabled={!!testing}>
-        {testing === 'destination' ? 'Checking…' : 'Test connection'}
+        {testing === 'destination' ? 'Checking…' : 'Test primary'}
       </button>
       <button onclick={() => testDestination(true)} disabled={!!testing}>
         {testing === 'destination-watch' ? 'Streaming… 30s' : 'Send 30s to watch'}

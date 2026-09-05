@@ -35,6 +35,7 @@
  * can write to it broadcasts as us.
  */
 
+import { spawn } from 'node:child_process';
 import { createConnection, createServer, isIP } from 'net';
 import { connect as tlsConnect } from 'tls';
 import { readFileSync } from 'fs';
@@ -276,4 +277,103 @@ export class TcpBridge {
     this._server = null;
     this.port = null;
   }
+}
+
+
+/**
+ * "Test connection" for a tcp destination: dial the receiver the way the
+ * bridge does (TLS as configured), send the preamble, then push a few
+ * seconds of test signal — or thirty, paced, to watch it appear. The
+ * receiver hangs up on a bad key right after the preamble, and on a TLS
+ * mismatch during the handshake; both come back as the sentence the
+ * bridge would have logged.
+ *
+ * @param {{url: string, key: string, tls?: {enabled: boolean, caFile: string}}} creds
+ * @param {{seconds?: number, realtime?: boolean}} [opts]
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+export function testTcpConnection(creds, { seconds = 3, realtime = false } = {}) {
+  return new Promise((resolve) => {
+    const target = parseTcpTarget(creds?.url);
+    if (!target) return resolve({ ok: false, error: 'The address must look like tcp://host:port' });
+    const key = String(creds?.key ?? '').trim();
+    if (!key) return resolve({ ok: false, error: 'A stream key is required' });
+    const { host, port } = target;
+    const where = `${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+    const useTls = Boolean(creds?.tls?.enabled);
+    let done = false;
+    let child = null;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      clearTimeout(guard);
+      try { child?.kill('SIGKILL'); } catch { /* gone */ }
+      try { remote.destroy(); } catch { /* gone */ }
+      resolve(r);
+    };
+    const guard = setTimeout(() => finish({ ok: false, error: `no answer from ${where} within ${CONNECT_TIMEOUT_MS / 1000}s — port filtered, receiver down, or firewall closed` }), (seconds + 20) * 1000);
+
+    let remote;
+    let tcpUp = false;
+    let preambleAt = 0;
+    if (useTls) {
+      let ca;
+      const caFile = String(creds.tls?.caFile ?? '').trim();
+      if (caFile) {
+        try { ca = readFileSync(caFile); } catch (err) {
+          return finish({ ok: false, error: `cannot read the trusted certificate file ${caFile} (${err.code ?? err.message}) — fix the path under ${TLS_SETTINGS}` });
+        }
+      }
+      remote = tlsConnect({ host, port, minVersion: 'TLSv1.2', rejectUnauthorized: true, ...(isIP(host) ? {} : { servername: host }), ...(ca ? { ca } : {}) });
+      remote.on('secureConnect', ready);
+    } else {
+      remote = createConnection({ host, port }, ready);
+    }
+    remote.setNoDelay(true);
+    remote.on('connect', () => { tcpUp = true; });
+    remote.on('error', (err) => {
+      if (useTls && isCertError(err)) {
+        finish({ ok: false, error: `${where} presented a certificate that does not verify (${err.code}) — the receiver must use one issued for its name, or set a trusted CA under ${TLS_SETTINGS}` });
+      } else if (useTls && tcpUp && !preambleAt && (isNotTlsError(err) || err.code === 'ECONNRESET')) {
+        finish({ ok: false, error: `${where} does not speak TLS on this port — turn off TLS under ${TLS_SETTINGS}, or turn it on at the receiver` });
+      } else if (preambleAt && /ECONNRESET|EPIPE/.test(String(err.code))) {
+        finish({ ok: false, error: `${where} closed the connection right after the preamble — it refused the stream key, or it requires TLS` });
+      } else {
+        finish({ ok: false, error: `${where}: ${err.message}` });
+      }
+    });
+    remote.on('close', () => {
+      if (done) return;
+      if (preambleAt && Date.now() - preambleAt < 1500) {
+        finish({ ok: false, error: `${where} closed the connection right after the preamble — it refused the stream key, or it requires TLS` });
+      } else if (!preambleAt) {
+        finish({ ok: false, error: `${where} closed the connection during the handshake` });
+      } else {
+        finish({ ok: false, error: `${where} ended the connection before the test finished` });
+      }
+    });
+
+    function ready() {
+      preambleAt = Date.now();
+      remote.write(TCP_PREAMBLE(key));
+      child = spawn('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        ...(realtime ? ['-re'] : []),
+        '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30',
+        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+        '-t', String(seconds),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+        '-g', '60', '-keyint_min', '60', '-sc_threshold', '0', '-bf', '0',
+        '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+        '-f', 'mpegts', 'pipe:1',
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      child.stdout.on('data', (chunk) => { if (!done && remote.writable) remote.write(chunk); });
+      child.on('error', (err) => finish({ ok: false, error: err.message }));
+      child.on('close', () => {
+        // Everything went out and the receiver kept the line: accepted.
+        if (done) return;
+        setTimeout(() => { if (!done) finish({ ok: true }); }, 400);
+      });
+    }
+  });
 }
