@@ -63,6 +63,10 @@
     if (c === 'h264') return 'compat';
     return null;
   });
+  // The Simple view's destination list reads the same publish block
+  // Advanced edits; nothing here is a second copy.
+  const simpleCodec = $derived(cfg?.encoder?.codec || 'h264');
+  const primaryUrl = $derived(cfg?.publish?.[cfg?.publish?.protocol]?.url || '');
   const timingCurrent = $derived.by(() => (cfg
     && TIMING_LEVERS.some((t) => t.id === cfg.buffer?.seconds) ? cfg.buffer.seconds : null));
   /**
@@ -904,6 +908,32 @@
             {pictureSnap ? 'overwrite' : 'save'}</button></p>
       {/if}
       {#if saved === 'encoder'}<p class="ok small">Saved</p>{/if}
+    </section>
+
+    <section class="card">
+      <h3>Destinations</h3>
+      <p class="muted small">Where the next broadcast goes. Tick the extras that should receive it; the primary always does.</p>
+      <ul class="dests">
+        <li class="dest">
+          <span class="dcheck primary" aria-hidden="true">✓</span>
+          <span class="dname">{cfg.publish?.name || 'Primary'} <small class="proto">{(cfg.publish?.protocol || '').toUpperCase()}</small></span>
+          <span class="durl">{primaryUrl || 'not set — see Advanced › Broadcast'}</span>
+        </li>
+        {#each cfg.publish?.extras ?? [] as ex (ex.id)}
+          {@const sitsOut = simpleCodec !== 'h264' && !MODERN_CARRIERS.includes(ex.protocol)}
+          <li class="dest" class:off={ex.enabled === false}>
+            <input type="checkbox" class="dcheck" bind:checked={ex.enabled} onchange={() => save('publish')}
+                   aria-label={`Stream to ${ex.name || ex.url || ex.protocol}`} />
+            <span class="dname">{ex.name || 'Extra'} <small class="proto">{(ex.protocol || '').toUpperCase()}</small></span>
+            <span class="durl">{ex.url || 'no address yet'}{#if sitsOut} · sits out on {simpleCodec.toUpperCase()}{/if}</span>
+          </li>
+        {/each}
+      </ul>
+      {#if !(cfg.publish?.extras ?? []).length}
+        <p class="muted small">Only the primary so far. Add more under Advanced › Broadcast › Also send to.</p>
+      {/if}
+      <p class="muted small">Changes apply from the next broadcast. Addresses and keys are edited in Advanced.</p>
+      {#if saved === 'publish'}<p class="ok small">Saved</p>{/if}
     </section>
 
     <section class="card">
@@ -2146,6 +2176,14 @@
   /* Simple mode levers. */
   .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
              gap: 10px; margin-top: 10px; }
+  .dests { list-style: none; margin: 8px 0 4px; padding: 0; display: grid; gap: 6px; }
+  .dest { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 2px 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+  .dest.off .dname, .dest.off .durl { color: var(--muted); }
+  .dest .dcheck { width: 16px; height: 16px; margin: 0; grid-row: 1 / span 2; justify-self: center; }
+  .dest .dcheck.primary { width: auto; height: auto; color: var(--success); font-weight: 600; }
+  .dest .dname { font-size: 14px; }
+  .dest .proto { color: var(--muted); font-size: 11px; letter-spacing: .04em; margin-left: 6px; }
+  .dest .durl { grid-column: 2; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .choice { text-align: left; padding: 12px 14px; display: flex; flex-direction: column;
             gap: 2px; background: var(--surface); width: auto; }
   .choice.on { border-color: var(--accent);
