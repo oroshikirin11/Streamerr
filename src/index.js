@@ -662,6 +662,12 @@ function sgDestKey(d) {
 // round trip (three seconds when the receiver is slow) on every go-live.
 const ROOM_CACHE_MS = 10 * 60_000;
 const roomCache = new Map();
+/**
+ * What the receiver said about each resolved room: its mode and whether
+ * it relays to external players. A relay room wants H.264 SDR, whatever
+ * the picture lever says — decided at go-live, per broadcast.
+ */
+const sgRoomInfo = new Map();
 async function sgResolveChannels(dests) {
   const receivers = sgReceivers();
   const resolved = await Promise.all((dests ?? []).map(async (d) => {
@@ -669,8 +675,10 @@ async function sgResolveChannels(dests) {
     if (manual) return manual;
     const key = sgDestKey(d);
     if (!key || !receivers.length) return '';
+    // The cache is only a fallback for a receiver that does not answer:
+    // a room's mode can change between broadcasts, so it is asked again
+    // every time and the cache answers when it will not.
     const cached = roomCache.get(key);
-    if (cached && Date.now() - cached.t < ROOM_CACHE_MS) return cached.room;
     let trouble = false;
     for (const rc of receivers) {
       try {
@@ -688,19 +696,29 @@ async function sgResolveChannels(dests) {
         );
         const data = await r.json().catch(() => null);
         if (data && data.success !== false && typeof data.channel === 'string') {
-          roomCache.set(key, { t: Date.now(), room: data.channel.trim() });
-          return data.channel.trim();
+          const room = data.channel.trim();
+          roomCache.set(key, { t: Date.now(), room });
+          sgRoomInfo.set(room, {
+            name: String(data.name ?? room),
+            mode: String(data.mode ?? 'theater'),
+            relay: Boolean(data.relay?.enabled),
+          });
+          return room;
         }
         // A definite "not mine" moves on to the next receiver; anything
         // unintelligible counts as trouble.
         if (!(data && data.success === false)) trouble = true;
       } catch { trouble = true; }
     }
+    if (trouble && cached && Date.now() - cached.t < ROOM_CACHE_MS) return cached.room;
     return trouble ? '' : null;
   }));
   const rooms = resolved.filter((v) => v !== null);
   return rooms.length ? [...new Set(rooms)] : [''];
 }
+
+/** The resolved rooms that relay to external players, by name. */
+const sgRelayRooms = () => sgChannels.filter((r) => sgRoomInfo.get(r)?.relay).map((r) => sgRoomInfo.get(r)?.name || r);
 /**
  * Transitions fan out through several engine events, and each used to
  * push — 11-14 POSTs per skip, counted live. Coalesce: pushes requested
@@ -845,6 +863,9 @@ function streamStatus() {
     pausedBy: s.pausedBy ?? '',
     pausedAt: s.pausedAt ?? 0,
     controls: controlsStatus(),
+    // Rooms on the receiver that relay to external players; they held this
+    // broadcast to H.264 SDR.
+    relayRooms: engine ? sgRelayRooms() : [],
     lastVote,
     // Where this broadcast is going, already redacted. Shown on hover of the
     // on-air badge: with a fan-out the operator otherwise has no way to see
@@ -2478,7 +2499,22 @@ const startStreamInner = async (req, res) => {
    * says SRT/matroska), and a vaapi box without the chosen codec's
    * encode entrypoint fails a 1-frame probe in ~300ms.
    */
-  const codec = config.encoder.codec ?? 'h264';
+  // Which rooms this broadcast feeds is asked FIRST: a room that relays to
+  // external players (VRChat) takes H.264 SDR only, so it decides the codec
+  // for the night before anything is probed or spawned. A settings edit
+  // mid-broadcast changes neither destinations nor rooms until the next
+  // start. Resolution is ~3 s worst case, in parallel, receiver only.
+  try {
+    sgChannels = await sgResolveChannels(publishDestinations(config, config.encoder.codec ?? 'h264'));
+  } catch { sgChannels = ['']; }
+  let codec = config.encoder.codec ?? 'h264';
+  const relayRooms = sgRelayRooms();
+  if (relayRooms.length && codec !== 'h264') {
+    dpush('info', `relay room ${relayRooms.join(', ')} on the receiver: sending H.264 SDR for this broadcast so external players can play it (the picture setting stays ${codec.toUpperCase()})`);
+    codec = 'h264';
+  } else if (relayRooms.length && config.encoder.hdrOutput) {
+    dpush('info', `relay room ${relayRooms.join(', ')} on the receiver: HDR output is off for this broadcast — external players take SDR`);
+  }
   {
     // Codec-aware selection (docs/codec-protocol-unification.md): the
     // primary auto-moves to its SRT slot for hevc/av1 when configured;
@@ -2565,12 +2601,14 @@ const startStreamInner = async (req, res) => {
   const profile = {
     // A codec the GPU cannot encode demotes THIS RUN to the software
     // backend — the stored setting is untouched, so H.264 comes back on
-    // hardware the moment it is selected again.
-    ...config.encoder, backend: softwareCodec ? 'x264' : sel.backend,
+    // hardware the moment it is selected again. A relay room likewise
+    // holds this run to H.264 SDR without touching the setting.
+    ...config.encoder, codec, backend: softwareCodec ? 'x264' : sel.backend,
+    ...(relayRooms.length ? { hdrOutput: false } : {}),
     overlay: visibleOverlay(),
     // The H.264 anchor bitrate never changes; other codecs derive their
     // cheaper rate from it (or an explicit hevcBitrate/av1Bitrate override).
-    videoBitrate: codecBitrate(config.encoder),
+    videoBitrate: codecBitrate({ ...config.encoder, codec }),
     lowPower,
   };
 
@@ -2651,15 +2689,6 @@ const startStreamInner = async (req, res) => {
   trackIntent = {};
   sgAnnounced = null;
   sgOnAirKey = null;
-  // Same capture moment as the destinations themselves: the rooms this
-  // broadcast pushes metadata to are the rooms it streams to, and a
-  // settings edit mid-broadcast changes neither until the next start.
-  // Resolution asks the receiver which room each stream key feeds; ~3s
-  // worst case, in parallel, and only when a receiver is configured.
-  try {
-    const dests = publishDestinations(config, config.encoder.codec ?? 'h264');
-    sgChannels = await sgResolveChannels(dests);
-  } catch { sgChannels = ['']; }
   engine = buildEngine({ profile, selection });
   pauseVoteLocked = false;
   lastVote = null;

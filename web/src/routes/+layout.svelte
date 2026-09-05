@@ -510,6 +510,12 @@
         <span class="speed" class:slow={parseFloat(speed) < 0.97}>{speed}×</span>
       {/if}
     </div>
+    {#if live && stream.relayRooms?.length}
+      <!-- A receiver room in relay mode: this broadcast is H.264 SDR for it. -->
+      <div class="relayrow">
+        <span class="relaychip" title={`${stream.relayRooms.join(', ')} relays to external players — this broadcast is H.264 SDR for them`}>relay · {stream.relayRooms.join(', ')}</span>
+      </div>
+    {/if}
   {/snippet}
   {#snippet bufBlock()}
     <!-- One sample is enough to show the figure; the line fills in behind
@@ -938,6 +944,21 @@
     display: flex; align-items: center; gap: 8px; font-size: 12px;
   }
   /* Green = broadcasting, red = not, amber = preparing subtitles. */
+  .relayrow { padding: 0 8px 12px; margin-top: -6px; }
+  .relaychip {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent, #6ba3f0) 55%, transparent);
+    color: var(--accent, #6ba3f0);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .onair {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 3px 10px 3px 8px; border-radius: 999px;

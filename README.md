@@ -96,6 +96,11 @@ pauses, and the same vote resumes it. The panel shows "Paused by viewers ·
 2 of 4", a lock next to the transport holds the votes off for the night,
 and a pause you make yourself is never overruled by a vote.
 
+A receiver room in relay mode hands the broadcast to VRChat's video players
+and the like. Streamerr notices at go-live and sends that broadcast as
+H.264 SDR, whatever the picture lever says, so the players can take it —
+the panel shows a "relay" chip while it lasts.
+
 ## Features
 
 - Continuous playout over one connection — episode changes, seeks, and track

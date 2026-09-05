@@ -42,7 +42,7 @@
   }
   const PICTURE_LEVERS = [
     { id: 'best', name: 'Best',
-      desc: 'H.265, HDR kept, originals ship untouched when they fit the link.' },
+      desc: 'H.265, HDR kept, originals ship untouched when they fit the link. A Streamingestarr room in relay mode holds a broadcast to H.264 SDR for the night.' },
     { id: 'compat', name: 'Compatible',
       desc: 'H.264 — plays on every device, ~1.5× the bandwidth.' },
   ];
