@@ -1,10 +1,3 @@
-# Standalone compose — run from inside the repo:  docker compose up -d
-#
-# If your compose file lives ALONGSIDE the checkout rather than inside it
-# (e.g. /srv/docker-compose.yml with the repo at /srv/Streamerr), see
-# "Existing compose stack" in the README: the build context and every
-# relative volume path change, because they resolve from the compose file's
-# directory, not the repo's.
 services:
   streamerr:
     build: .
@@ -15,65 +8,26 @@ services:
     ports:
       - "8099:8099"
 
-    # Run-ahead cache: encoded-ahead video lives in RAM (/dev/shm) so seeks
-    # are instant. Docker's default 64MB shm disables it — it never falls
-    # back to disk. The engine sizes its budget on its own; 2GB is safe.
     shm_size: "2gb"
 
     devices:
-      # Only the render node. card0 is for modesetting and would be an
-      # unnecessary privilege bump.
-      #
-      # renderD128 means "first render node the kernel probed", NOT "the
-      # integrated one". On a machine with both, the discrete card is often
-      # renderD128 and the iGPU renderD129 — check before assuming:
-      #   readlink -f /sys/class/drm/renderD128/device   # PCI address
-      #   lspci -nn | grep -i vga                        # what that address is
-      # Pass whichever node is the card you want to encode on, and set the
-      # same path as the render device in Settings.
       - /dev/dri/renderD128:/dev/dri/renderD128
 
+    # Only needed when Docker itself runs inside an LXC (Proxmox): the gid of
+    # the render group as the LXC sees it — `stat -c '%g' /dev/dri/renderD128`.
+    # Keep the quotes.
     group_add:
-      # Must be the NUMERIC gid of the render group as the LXC sees it:
-      #   stat -c '%g' /dev/dri/renderD128
-      # Quoted deliberately — an unquoted YAML integer gets mangled. The
-      # image's /etc/group comes from a different distro, so only the number
-      # is meaningful; the name will not match and does not need to.
-      #
-      # If `privileged: true` appears to fix a permission problem, this
-      # value is wrong. Fix the gid instead.
       - "989"
 
     environment:
       - STREAMERR_CONFIG=/config/config.json
-      # Uncomment when this sits behind a reverse proxy. It makes the panel
-      # trust X-Forwarded-For/-Proto/-Host, which it needs for a per-client
-      # login rate limit, the Secure cookie flag over HTTPS, and the
-      # WebSocket origin check. Only with a proxy in front — those headers
-      # are forgeable by anyone who can reach the port directly.
       # - STREAMERR_TRUST_PROXY=1
-      # Leave the VAAPI driver to autodetection. Only force it if `probe`
-      # reports vaapi failing on hardware you know works — iHD for Intel
-      # Broadwell+, i965 for older Intel, radeonsi for AMD.
       # - LIBVA_DRIVER_NAME=iHD
 
     volumes:
-      # Config holds the Owncast stream key and Jellyfin API key.
       - ./config:/config
-
-      # Normalized clip cache. Sized by normalizer.cacheLimitGB — put it on
-      # fast local storage, not the media array.
       - ./cache:/app/cache
-
-      # Pictures uploaded for studio overlays. Deliberately not inside the
-      # cache: the cache is disposable, and these are files the user put
-      # there. Without this volume they would live only in the container and
-      # disappear the next time it is recreated.
       - ./overlays:/app/overlays
-
-      # The media library, read-only: this service never writes to it.
-      #
-      # IMPORTANT: mount it at the SAME path the panel will resolve to, and
-      # set library.pathMap in config.json to translate whatever Jellyfin
-      # reports (typically /media/...) into this path.
-      - /extHdd:/extHdd:ro
+      # Your media, read-only. Left side: the folder on this machine.
+      # Right side: the path the panel sees — pick it in the setup wizard.
+      - /changeMe:/Media:ro

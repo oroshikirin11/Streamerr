@@ -13,19 +13,16 @@ buffer keeps the stream seamless across episodes, seeks, and track changes.
 
 ```bash
 git clone https://github.com/oroshikirin11/Streamerr streamerr && cd streamerr
-# edit docker-compose.yml: point the last volume at your media,
-# and check the GPU device/group notes in the file
 docker compose up -d
 ```
 
-Open `http://<host>:8099`. The setup wizard covers the rest — password, media
-location, metadata, encoder, and where to publish.
+Before the first start, set the media volume in `docker-compose.yml` to your
+media folder; inside an LXC, also the render group id. Open `http://<host>:8099`
+and let the setup wizard do the rest.
 
-- Run Streamerr on the machine that has **direct directory access to the
-  media** — that is the preferred setup. If the media lives elsewhere, SMB is
-  supported (experimental, slower).
-- GPU encoding needs the render node and group from the compose file's
-  comments. Without a GPU it encodes in software.
+- Run it on the machine that has the media on disk. SMB works too, slower.
+- GPU encoding uses the render node in the compose file; without a GPU it
+  encodes in software.
 
 ## Quick start — standalone
 
