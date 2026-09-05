@@ -15,6 +15,23 @@ A "Streamingestarr" entry on the services/settings page:
 receiver's admin, scope `CAN_SEND_SYSTEM_MESSAGES`). All calls are
 `Authorization: Bearer <token>`.
 
+## TCP mode over TLS
+
+The raw-TCP publish mode (`SGR-TS/1 <key>\n` preamble, then the container
+bytes) is the receiver's own protocol, so its TLS switch lives in this
+block — `streamingestarr.tcpTls: { enabled, caFile }` — and covers every
+TCP destination, primary and extras. The receiver listens on the same port
+for both and peeks the first byte (TLS ClientHello vs. plain preamble); it
+may require TLS, in which case a plain connection is closed right after
+the preamble. Over TLS the sender writes the preamble after the handshake,
+then the bytes. The certificate is always verified: hostname (SNI is sent
+for names, omitted for IP literals, which are checked against IP SANs) and
+chain against the system roots, or against `caFile` — a private CA or the
+receiver's self-signed PEM, re-read on every dial. There is no insecure
+switch. A rejected certificate, a receiver that does not speak TLS, and a
+receiver that requires it are each named in the log; the old TCP
+passphrase is retired in favour of this.
+
 ## On enable — discovery
 
 `GET <url>/api/integrations/capabilities` →

@@ -39,7 +39,12 @@
   let srtUrl = $state('');
   let srtStreamId = $state('');
   let srtPassphrase = $state('');
-  let tcpPassphrase = $state('');
+  /**
+   * TLS for the TCP mode. Not a destination field: the receiver's own
+   * protocol switch (streamingestarr.tcpTls), the same key the settings
+   * page writes, covering every TCP destination.
+   */
+  let tcpTls = $state(false);
 
   function publishPatch() {
     const slot = {};
@@ -48,15 +53,14 @@
       if (srtStreamId.trim()) slot.streamId = srtStreamId.trim();
       if (srtPassphrase.trim()) slot.passphrase = srtPassphrase.trim();
     } else {
-      // rtmp, rtmps and tcp all speak "address + stream key"; tcp adds an
-      // optional passphrase on top.
+      // rtmp, rtmps and tcp all speak "address + stream key".
       if (rtmpUrl.trim()) slot.url = rtmpUrl.trim();
       if (streamKey.trim()) slot.key = streamKey.trim();
-      if (protocol === 'tcp' && tcpPassphrase.trim()) slot.passphrase = tcpPassphrase.trim();
     }
+    const tls = protocol === 'tcp' ? { streamingestarr: { tcpTls: { enabled: tcpTls } } } : {};
     // Nothing typed: record the choice of protocol and touch no credentials.
-    if (!Object.keys(slot).length) return { publish: { protocol } };
-    return { publish: { protocol, [protocol]: slot } };
+    if (!Object.keys(slot).length) return { publish: { protocol }, ...tls };
+    return { publish: { protocol, [protocol]: slot }, ...tls };
   }
   let showKey = $state(false);
   /**
@@ -69,7 +73,7 @@
    */
   const stored = (field) => cfg?.publish?.[protocol]?.[field] === '__SET__';
   const keyStored = $derived(protocol !== 'srt' && stored('key'));
-  const passStored = $derived((protocol === 'srt' || protocol === 'tcp') && stored('passphrase'));
+  const passStored = $derived(protocol === 'srt' && stored('passphrase'));
   const streamIdStored = $derived(protocol === 'srt' && stored('streamId'));
   let destResult = $state(null);
   let testing = $state(false);
@@ -254,6 +258,7 @@
   onMount(async () => {
     try {
       cfg = await api.config();
+      tcpTls = cfg?.streamingestarr?.tcpTls?.enabled === true;
       // Prefilled from the publish block, so re-running setup shows what
       // is configured rather than an empty box that step one would then
       // write back as emptiness.
@@ -495,9 +500,15 @@
         <p class="muted small">A key is saved. It is never sent back to the browser.</p>
       {/if}
       {#if protocol === 'tcp'}
-        <label>Passphrase <span class="muted small">optional, 10–79 characters, no spaces</span></label>
-        <input type="password" bind:value={tcpPassphrase}
-               placeholder={passStored ? 'leave blank to keep the saved passphrase' : 'if the receiver demands one'} />
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" style="width:auto" bind:checked={tcpTls} />
+          Encrypt TCP destinations with TLS
+        </label>
+        <p class="muted small">
+          The receiver's setting, shared by every TCP destination; a private
+          or self-signed certificate can be trusted later under Settings &rsaquo;
+          Streamingestarr.
+        </p>
       {/if}
       {/if}
       {#if protocol !== 'srt' && protocol !== 'tcp'}

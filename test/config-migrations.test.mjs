@@ -25,7 +25,18 @@ writeFileSync(file, JSON.stringify({
     accessToken: 'tok',
     syncTitle: true,
   },
-  publish: { protocol: 'rtmp', rtmp: { url: '', key: '' } },
+  publish: {
+    protocol: 'rtmp', rtmp: { url: '', key: '' },
+    // A retired TCP passphrase, stored by an older build, and an SRT one
+    // that must survive — only the tcp field is dead.
+    tcp: { url: 'tcp://h:9711', key: 'k123456', passphrase: 'old-tcp-pass' },
+    srt: { url: 'srt://h:9000', streamId: '', passphrase: 'srt-pass-keep', latencyMs: 200 },
+    extras: [
+      { id: 'x1', enabled: true, protocol: 'tcp', url: 'tcp://h2:9711', key: 'k2', passphrase: 'old-x-pass' },
+      { id: 'x2', enabled: true, protocol: 'srt', url: 'srt://h3:1', streamId: 's', passphrase: 'srt-x-keep' },
+    ],
+  },
+  streamingestarr: { tcpTls: { enabled: 'true', caFile: '  /tmp/ca.pem ', extra: 1 } },
   encoder: { width: 1280, height: 720, extractSubtitles: false },
   normalizer: { lookahead: 2, cacheLimitGB: 50 },
   someUnknownBlock: { keep: 'me' },
@@ -34,7 +45,8 @@ process.env.STREAMERR_CONFIG = file;
 
 const {
   config, saveConfig, normalizeStoredPublish, normalizeStoredEncoder,
-  normalizeStoredLeftovers, publishConfig, redact,
+  normalizeStoredLeftovers, publishConfig, redact, sanitizeTcpTls, tcpTlsConfig,
+  publishDestinations, publishTargetsRedacted,
 } = await import('../src/config.js');
 
 test.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -50,6 +62,13 @@ test('a stored config with dead keys loads without complaint; unknown blocks are
 test('legacy owncast.rtmpUrl/streamKey move into publish.rtmp when that slot is empty', () => {
   const note = normalizeStoredPublish();
   assert.match(note, /publish\.rtmp/);
+  // The retired TCP passphrase leaves with the same pass — primary slot and
+  // tcp extras — while SRT's passphrase (it encrypts the link) stays put.
+  assert.match(note, /TCP passphrase/);
+  assert.equal('passphrase' in config.publish.tcp, false);
+  assert.equal('passphrase' in config.publish.extras[0], false);
+  assert.equal(config.publish.srt.passphrase, 'srt-pass-keep');
+  assert.equal(config.publish.extras[1].passphrase, 'srt-x-keep');
   assert.equal(config.publish.protocol, 'rtmp');
   assert.deepEqual(config.publish.rtmp, { url: 'rtmp://legacy.example:1935/live', key: 'legacy-key-123' });
   assert.equal('owncast' in config, false, 'the legacy block is gone from the live config');
@@ -90,4 +109,27 @@ test('dead encoder/normalizer keys are dropped and stay dropped after a save', (
   const stored = JSON.parse(readFileSync(file, 'utf8'));
   assert.equal('normalizer' in stored, false);
   assert.equal('extractSubtitles' in stored.encoder, false);
+});
+
+test('streamingestarr.tcpTls: defaulted, sanitized on read and on save, carried onto every tcp destination', () => {
+  // Stored as loose values: coerced, trimmed, unknown keys kept.
+  assert.deepEqual(tcpTlsConfig(), { enabled: true, caFile: '/tmp/ca.pem', extra: 1 });
+  assert.deepEqual(sanitizeTcpTls(undefined), { enabled: false, caFile: '' });
+  assert.deepEqual(sanitizeTcpTls({ enabled: 'yes', caFile: 42 }), { enabled: false, caFile: '42' });
+  // Every tcp destination gets the one switch (here the tcp extra; the
+  // primary is rtmp), srt never does; the redacted line says (TLS).
+  const dests = publishDestinations(config, 'h264');
+  const tcp = dests.filter((d) => d.protocol === 'tcp');
+  assert.equal(tcp.length, 1);
+  assert.deepEqual(tcp[0].creds.tls, { enabled: true, caFile: '/tmp/ca.pem' });
+  assert.equal(dests.find((d) => d.protocol === 'srt').creds.tls, undefined);
+  assert.equal(config.publish.extras[0].tls, undefined, 'the stored block is not mutated');
+  assert.match(publishTargetsRedacted().find((l) => l.startsWith('tcp:')), /tcp:\/\/h2:9711 \(TLS\) \(key=\*+/);
+  // Save path: a UI patch with a string/number pair comes out typed.
+  saveConfig({ streamingestarr: { tcpTls: { enabled: false, caFile: ' ' } } });
+  assert.deepEqual(tcpTlsConfig(), { enabled: false, caFile: '', extra: 1 });
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).streamingestarr.tcpTls.enabled, false);
+  assert.doesNotMatch(publishTargetsRedacted().find((l) => l.startsWith('tcp:')), /TLS/);
+  // Defaults for a config that never mentions it.
+  assert.deepEqual(sanitizeTcpTls({}), { enabled: false, caFile: '' });
 });

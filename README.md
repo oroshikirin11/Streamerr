@@ -67,6 +67,13 @@ chat. Streamerr was first built to publish to
 [Owncast](https://owncast.online), which remains fully supported, and any
 RTMP/SRT ingest works.
 
+The TCP destination mode is Streamingestarr's own protocol, and it can run
+over TLS: one switch under Settings › Streamingestarr encrypts every TCP
+destination, primary and extras, on the receiver's normal TCP port. The
+receiver's certificate is always verified against the system's trusted
+roots — a Let's Encrypt certificate needs nothing more; for a private or
+self-signed certificate, point "Trusted certificate" at its PEM file.
+
 ## Features
 
 - Continuous playout over one connection — episode changes, seeks, and track

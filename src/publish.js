@@ -43,7 +43,7 @@ export function publishDefaults() {
      * bridge: ffmpeg writes to 127.0.0.1, the bridge dials the real
      * target, sends `SGR-TS/1 <key>\n` and splices bytes from there.
      */
-    tcp: { url: '', key: '', passphrase: '' },
+    tcp: { url: '', key: '' },
     /**
      * Which Streamingestarr room ("channel") the primary feeds. Metadata
      * pushes carry it, so a fan-out where each destination is a different
@@ -145,17 +145,13 @@ export function targetUrl(protocol, creds = {}) {
   }
 
   if (protocol === 'tcp') {
-    if (!/^tcp:\/\/[^/\s:]+:\d+$/i.test(url)) {
+    // A hostname, an IPv4 literal, or a bracketed IPv6 literal.
+    if (!/^tcp:\/\/(\[[0-9a-f:.]+\]|[^/\s:[\]]+):\d+$/i.test(url)) {
       throw new Error('The server address must look like tcp://host:port');
     }
     const key = String(creds.key ?? '').trim();
     if (!key) throw new Error('The stream key is empty');
     if (/[\r\n ]/.test(key)) throw new Error('The stream key cannot contain spaces or line breaks');
-    // The optional passphrase rides the same preamble line as a second
-    // token, so it has the same character rules.
-    if (/[\r\n ]/.test(String(creds.passphrase ?? '').trim())) {
-      throw new Error('A TCP passphrase cannot contain spaces or line breaks');
-    }
     /**
      * The key is deliberately NOT in this URL: ffmpeg never sees the real
      * target. The engine's bridge (tcp-bridge.js) dials it, authenticates
@@ -179,7 +175,9 @@ export function redactUrl(protocol, creds = {}) {
     if (String(creds.passphrase ?? '').trim()) bits.push('passphrase=********');
     return `${url}?mode=caller&${bits.join('&')}`;
   }
-  if (protocol === 'tcp') return `${url} (key=********, via local bridge)`;
+  // TLS is the receiver protocol's own switch (streamingestarr.tcpTls),
+  // handed in on the creds by publishDestinations — so the line says so.
+  if (protocol === 'tcp') return `${url}${creds.tls?.enabled ? ' (TLS)' : ''} (key=********, via local bridge)`;
   return `${url}/${'*'.repeat(8)}`;
 }
 
@@ -339,7 +337,7 @@ export function publishOutputArgs(dests, { videoBitrate = null, codec = 'h264' }
 /** Secret fields on a destination, by protocol. */
 const PUBLISH_SECRETS = {
   rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'],
-  tcp: ['key', 'passphrase'],
+  tcp: ['key'],
 };
 
 export function redactPublish(publish) {

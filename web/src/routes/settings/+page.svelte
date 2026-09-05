@@ -198,7 +198,7 @@
    * anything the operator did not type into — which is exactly what the
    * server expects, and how the stream key field has always behaved.
    */
-  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key', 'passphrase'] };
+  const SECRET_OF = { rtmp: ['key'], rtmps: ['key'], srt: ['streamId', 'passphrase'], tcp: ['key'] };
   let publishSaved = $state({});
 
   /**
@@ -246,6 +246,13 @@
     } catch (err) {
       match = { ok: false, error: err.message };
     } finally { matching = false; }
+  }
+  /** One TLS block for every TCP destination — see the Streamingestarr card. */
+  function setTcpTls(part) {
+    cfg.streamingestarr = {
+      ...(cfg.streamingestarr ?? {}),
+      tcpTls: { enabled: false, caFile: '', ...(cfg.streamingestarr?.tcpTls ?? {}), ...part },
+    };
   }
   function unmaskPublish(pub) {
     const seen = {};
@@ -689,6 +696,10 @@
             ...r,
             accessToken: r.accessToken || (sgSaved[r.id] ? '__SET__' : ''),
           })),
+          tcpTls: {
+            enabled: cfg.streamingestarr?.tcpTls?.enabled === true,
+            caFile: String(cfg.streamingestarr?.tcpTls?.caFile ?? '').trim(),
+          },
         };
       }
       if (section === 'encoder') {
@@ -1040,15 +1051,12 @@
       <label>Stream key</label>
       <input type="password" bind:value={cfg.publish.tcp.key}
              placeholder={savedHint('tcp.key') ?? 'from your server'} />
-
-      <label>Passphrase <span class="muted small">optional, 10–79 characters, no spaces</span></label>
-      <input type="password" bind:value={cfg.publish.tcp.passphrase}
-             placeholder={savedHint('tcp.passphrase') ?? 'if the receiver demands one'} />
       <p class="muted small">
         Raw MPEG-TS over plain TCP: every codec, and reliable on an upload
         whose UDP loss SRT cannot ride out — lost packets retransmit instead
         of becoming picture artifacts, and the buffer absorbs the delay.
       </p>
+      <p class="muted small">TLS for TCP is set under Streamingestarr.</p>
     {:else}
       <label>Server address</label>
       <input bind:value={cfg.publish[cfg.publish.protocol].url} spellcheck="false"
@@ -1092,9 +1100,12 @@
           <input type="password" bind:value={ex.key}
                  placeholder={savedHint(`x.${ex.id}.key`) ?? 'stream key'} />
         {/if}
-        {#if ex.protocol === 'tcp' || ex.protocol === 'srt'}
+        {#if ex.protocol === 'srt'}
           <input type="password" bind:value={ex.passphrase}
-                 placeholder={savedHint(`x.${ex.id}.passphrase`) ?? (ex.protocol === 'srt' ? 'passphrase (optional) — encrypts the link' : 'passphrase (if the receiver demands one)')} />
+                 placeholder={savedHint(`x.${ex.id}.passphrase`) ?? 'passphrase (optional) — encrypts the link'} />
+        {/if}
+        {#if ex.protocol === 'tcp'}
+          <p class="muted small" style="margin:0">TLS for TCP is set under Streamingestarr.</p>
         {/if}
         <input bind:value={ex.channel} spellcheck="false" maxlength="40"
                placeholder="room override (optional) — auto-detected from the stream key" />
@@ -1190,6 +1201,25 @@
           name: '', url: '', accessToken: '', enabled: true,
         }];
       }}>Add a receiver</button>
+    {/if}
+
+    <!-- TLS for the raw-TCP publish mode: the receiver's protocol, so its
+         switch lives here and covers every TCP destination, extras too. -->
+    <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+      <input type="checkbox" style="width:auto"
+             checked={cfg.streamingestarr?.tcpTls?.enabled === true}
+             onchange={(e) => { setTcpTls({ enabled: e.target.checked }); }} />
+      Encrypt TCP destinations with TLS
+    </label>
+    {#if cfg.streamingestarr?.tcpTls?.enabled === true}
+      <label>Trusted certificate <span class="muted small">PEM path, optional</span></label>
+      <input value={cfg.streamingestarr?.tcpTls?.caFile ?? ''} spellcheck="false"
+             oninput={(e) => { setTcpTls({ caFile: e.target.value }); }}
+             placeholder="/etc/streamerr/receiver-ca.pem" />
+      <p class="muted small">
+        Uses the system's trusted roots &mdash; a Let's Encrypt certificate
+        needs nothing here. Only for a private or self-signed certificate.
+      </p>
     {/if}
 
     <div class="actions">

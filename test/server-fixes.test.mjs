@@ -20,7 +20,7 @@ const publish = {
   rtmp: { url: 'rtmp://h/live', key: 'SECRETKEY123' },
   rtmps: { url: 'rtmps://h2/app', key: 'tls-key-9' },
   srt: { url: 'srt://h3:9000', streamId: 'live/room#abc', passphrase: 'longpassphrase99', latencyMs: 200 },
-  tcp: { url: 'tcp://h4:19741', key: 'tcpkey-777', passphrase: 'tcp-pass-x' },
+  tcp: { url: 'tcp://h4:19741', key: 'tcpkey-777' },
   extras: [
     { id: 'e1', protocol: 'rtmp', url: 'rtmp://mirror/live', key: 'MIRRORKEY', enabled: true },
     { id: 'e2', protocol: 'srt', url: 'srt://x:1', streamId: 'sid-2', passphrase: 'extra-phrase-12', enabled: false },
@@ -31,9 +31,9 @@ test('redactSecrets masks every publish secret in ffmpeg output, not just the ch
   const stderr = '[flv @ 0x1] Cannot open connection tcp://h:1935\n'
     + 'rtmp://h/live/SECRETKEY123: Connection refused\n'
     + 'srt://h3:9000?mode=caller&streamid=live/room#abc&passphrase=longpassphrase99\n'
-    + 'mirror rtmp://mirror/live/MIRRORKEY, tcp key tcpkey-777 pass tcp-pass-x, disabled extra-phrase-12, tls-key-9';
+    + 'mirror rtmp://mirror/live/MIRRORKEY, tcp key tcpkey-777, disabled extra-phrase-12, tls-key-9';
   const out = redactSecrets(stderr, publish);
-  for (const s of ['SECRETKEY123', 'longpassphrase99', 'live/room#abc', 'MIRRORKEY', 'tcpkey-777', 'tcp-pass-x', 'extra-phrase-12', 'tls-key-9']) {
+  for (const s of ['SECRETKEY123', 'longpassphrase99', 'live/room#abc', 'MIRRORKEY', 'tcpkey-777', 'extra-phrase-12', 'tls-key-9']) {
     assert.equal(out.includes(s), false, `${s} leaked`);
   }
   assert.match(out, /rtmp:\/\/h\/live\/\*{8}: Connection refused/);

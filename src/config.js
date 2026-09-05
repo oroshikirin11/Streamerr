@@ -44,6 +44,15 @@ const DEFAULTS = {
     url: '',
     accessToken: '',
     enabled: true,
+    /**
+     * TLS for the raw-TCP publish mode. It lives HERE, not on a
+     * destination, because that mode is this receiver's own protocol: one
+     * switch covers every tcp destination, primary and extras. Verification
+     * is always on; `caFile` is an optional PEM to trust — a private CA or
+     * a self-signed receiver certificate for a LAN — and empty means the
+     * system roots (a Let's Encrypt certificate needs nothing here).
+     */
+    tcpTls: { enabled: false, caFile: '' },
   },
   library: {
     /**
@@ -349,19 +358,53 @@ export function normalizeStoredLeftovers() {
  * writes the file without it. Returns a note for the log, or null.
  */
 export function normalizeStoredPublish() {
-  const legacy = config.owncast;
-  if (!legacy || typeof legacy !== 'object') { delete config.owncast; return null; }
+  const notes = [];
   const pub = config.publish ?? (config.publish = publishDefaults());
-  let note = null;
-  if (legacy.rtmpUrl && !pub.rtmp?.url) {
-    pub.rtmp = { ...(pub.rtmp ?? {}), url: String(legacy.rtmpUrl), key: String(legacy.streamKey ?? '') };
-    if (!pub.protocol) pub.protocol = 'rtmp';
-    note = `moved the RTMP destination into publish.rtmp (${pub.rtmp.url})`;
-  } else if (legacy.rtmpUrl || legacy.streamKey || legacy.apiUrl || legacy.accessToken) {
-    note = 'dropped the unused legacy owncast block';
+  /**
+   * The TCP passphrase is gone — TLS replaced it (streamingestarr.tcpTls).
+   * A stored one would otherwise sit in the file forever, and the bridge no
+   * longer sends it. SRT keeps its passphrase: that one encrypts the link.
+   */
+  let dropped = 0;
+  if (pub.tcp && typeof pub.tcp === 'object' && 'passphrase' in pub.tcp) {
+    delete pub.tcp.passphrase; dropped += 1;
+  }
+  for (const e of Array.isArray(pub.extras) ? pub.extras : []) {
+    if (e && e.protocol === 'tcp' && 'passphrase' in e) { delete e.passphrase; dropped += 1; }
+  }
+  if (dropped) notes.push('dropped the retired TCP passphrase (TLS replaces it)');
+
+  const legacy = config.owncast;
+  if (legacy && typeof legacy === 'object') {
+    if (legacy.rtmpUrl && !pub.rtmp?.url) {
+      pub.rtmp = { ...(pub.rtmp ?? {}), url: String(legacy.rtmpUrl), key: String(legacy.streamKey ?? '') };
+      if (!pub.protocol) pub.protocol = 'rtmp';
+      notes.push(`moved the RTMP destination into publish.rtmp (${pub.rtmp.url})`);
+    } else if (legacy.rtmpUrl || legacy.streamKey || legacy.apiUrl || legacy.accessToken) {
+      notes.push('dropped the unused legacy owncast block');
+    }
   }
   delete config.owncast;
-  return note;
+  return notes.length ? notes.join('; ') : null;
+}
+
+/**
+ * The TLS setting for the raw-TCP publish mode, as stored: `enabled` a
+ * boolean, `caFile` a trimmed string. Unknown keys inside the block ride
+ * along untouched, like everywhere else in this config.
+ */
+export function sanitizeTcpTls(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    ...src,
+    enabled: src.enabled === true || src.enabled === 'true' || src.enabled === 1,
+    caFile: String(src.caFile ?? '').trim(),
+  };
+}
+
+/** The effective TLS setting, sanitized, for every tcp destination. */
+export function tcpTlsConfig(cfg = config) {
+  return sanitizeTcpTls(cfg.streamingestarr?.tcpTls);
 }
 
 /**
@@ -408,6 +451,9 @@ export function ensureDirs() {
  * leave every one of them on stale settings.
  */
 export function saveConfig(patch) {
+  if (patch?.streamingestarr?.tcpTls !== undefined) {
+    patch.streamingestarr.tcpTls = sanitizeTcpTls(patch.streamingestarr.tcpTls);
+  }
   const merged = merge(config, patch);
   // Write-then-rename: a kill mid-write must never leave a truncated
   // config.json — it holds every setting and the credential hashes, and a
@@ -464,6 +510,16 @@ export function publishDestinations(cfg = config, codec = null) {
   // Validate here rather than at spawn: a bad target should be an error on
   // the settings page, not a publisher that dies thirty seconds into a show.
   for (const d of dests) targetUrl(d.protocol, d.creds);
+  /**
+   * TLS for the tcp mode is the receiver's setting, not a destination's:
+   * the same switch rides on every tcp destination's creds, primary and
+   * extras alike, so the bridge that dials each one finds it where it
+   * finds the key. Copied, not shared — publishConfig() is never mutated.
+   */
+  const tls = tcpTlsConfig(cfg);
+  for (const d of dests) {
+    if (d.protocol === 'tcp') d.creds = { ...d.creds, tls: { enabled: tls.enabled, caFile: tls.caFile } };
+  }
   return dests;
 }
 
