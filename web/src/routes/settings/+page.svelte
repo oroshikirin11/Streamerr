@@ -1017,7 +1017,8 @@
   <!-- ===== Broadcast: connection, receivers, metadata ===== -->
   <section class="card group">
     <h3>Broadcast</h3>
-    <p class="lead muted small">Where the stream goes and what carries it.</p>
+    <p class="lead muted small">Where the stream goes and what carries it. RTMP, RTMPS and SRT work with any server;
+      anything marked <span class="sgr">Streamingestarr</span> only applies when our own receiver is the destination.</p>
   <!-- Broadcast destination -->
   <section class="subcard">
 
@@ -1081,6 +1082,7 @@
                     || MODERN_CARRIERS.includes(pr.id)) cfg.publish.protocol = pr.id;
                 }}>
           <strong>{pr.label}</strong>
+          {#if pr.id === 'tcp'}<span class="sgr">Streamingestarr</span>{/if}
           {#if cfg.publish[pr.id]?.url}
             <span class="tag">{effProto() === pr.id ? 'in use' : 'saved'}</span>
           {/if}
@@ -1141,7 +1143,7 @@
     <input bind:value={cfg.publish.name} spellcheck="false" maxlength="40"
            placeholder="e.g. Cinema VPS" />
 
-    <label>Room <span class="muted small">optional override — Streamingestarr detects the room from the stream key; set this only to force one</span></label>
+    <label>Room <span class="sgr">Streamingestarr</span> <span class="muted small">optional override — the receiver detects the room from the stream key; set this only to force one. Other servers ignore it.</span></label>
     <input bind:value={cfg.publish.channel} spellcheck="false" maxlength="40"
            placeholder="auto-detected from the stream key" />
 
@@ -1154,7 +1156,7 @@
           <label style="display:flex; align-items:center; gap:8px; margin:0;">
             <input type="checkbox" bind:checked={ex.enabled} style="width:auto" />
             <select bind:value={ex.protocol} style="width:auto">
-              {#each PROTOCOL_INFO as pr}<option value={pr.id}>{pr.label}</option>{/each}
+              {#each PROTOCOL_INFO as pr}<option value={pr.id}>{pr.label}{pr.id === 'tcp' ? ' · Streamingestarr' : ''}</option>{/each}
             </select>
           </label>
           <button type="button" class="danger" onclick={() => removeExtra(ex.id)}>Remove</button>
@@ -1177,7 +1179,7 @@
           <p class="muted small" style="margin:0">TLS for TCP is set under Streamingestarr.</p>
         {/if}
         <input bind:value={ex.channel} spellcheck="false" maxlength="40"
-               placeholder="room override (optional) — auto-detected from the stream key" />
+               placeholder="room override (optional, Streamingestarr only) — auto-detected from the stream key" />
       </div>
     {/each}
     <button type="button" onclick={addExtra}>Add a destination</button>
@@ -1206,9 +1208,10 @@
 
   <!-- Streamingestarr -->
   <section class="subcard">
-    <h3>Now-playing &amp; artwork push</h3>
+    <h3>Streamingestarr <span class="sgr">receiver only</span></h3>
     <p class="muted small">
-      Our own receiver. Beyond the video, it takes structured
+      Everything in this card is for our own receiver and has no effect on other servers.
+      Beyond the video, it takes structured
       now&#8209;playing, up&#8209;next and schedule metadata &mdash; the
       theater page shows real titles with a live progress ring instead of a
       stream title. Independent of where the video goes.
@@ -2347,6 +2350,8 @@
     font-size: 12.5px; margin: 6px 0 0;
     color: #c98a2e;
   }
+  .sgr { display: inline-block; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); margin-left: 6px; vertical-align: middle; white-space: nowrap; font-weight: 500; }
   .segc .tag {
     font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
     margin-left: 5px; opacity: .75;

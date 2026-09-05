@@ -43,6 +43,7 @@ Open `http://localhost:8099` and run setup.
 ## Updating
 
 ```bash
+chmod +x update.sh   # once, if you downloaded a zip rather than cloning
 ./update.sh
 ```
 
