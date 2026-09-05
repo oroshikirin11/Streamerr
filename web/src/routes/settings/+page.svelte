@@ -1716,12 +1716,12 @@
           <input class="exact" type="number" min="1" max="60" aria-label="Exact keyframe interval"
                  bind:value={cfg.encoder.gopSeconds} />
         {/if}
-        <p class="muted small">
-          HLS receivers cut segments on keyframes; 2 s is the common default.
-          A longer interval makes segments longer and start-up slower.
-        </p>
       </div>
     </div>
+    <p class="muted small">
+      Keyframes: HLS receivers cut segments on them; 2 s is the common default.
+      A longer interval makes segments longer and start-up slower.
+    </p>
     <label>Scaling</label>
     <select bind:value={cfg.encoder.frameSize}>
       <option value="fixed">Always {cfg.encoder.width}&times;{cfg.encoder.height}</option>
