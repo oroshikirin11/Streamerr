@@ -681,7 +681,7 @@
           <div class="fright">
             {#if voteOn}
               <button class="pvt lock" class:on={voteLocked} onclick={toggleLock} disabled={busyCtl}
-                      title={voteLocked ? 'Viewer controls are locked for this broadcast — click to let the room vote again' : 'Lock viewer controls — the room cannot vote to pause or resume until unlocked'}
+                      title={voteLocked ? 'Viewer votes are locked — click to allow them again' : 'Lock viewer votes for this broadcast'}
                       aria-label="Lock viewer controls" aria-pressed={voteLocked}>
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
                      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
