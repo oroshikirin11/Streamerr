@@ -60,11 +60,11 @@ pictures under `backups/`, and `--dry-run` shows the plan without doing it.
 
 Two good options, one fallback:
 
-- **Jellyfin** (preferred) — point a library at your Jellyfin server with an
-  API key; it already knows your posters and episode order.
 - **TMDB** — drop in a free API key and Streamerr matches titles, episode
   names, and posters itself, in the background. Wrong match? Fix it from the
   poster's hover menu.
+- **Jellyfin** — point a library at your Jellyfin server with an API key; it
+  already knows your posters and episode order.
 - Plain filenames work with no key at all; episode stills are generated
   automatically either way.
 
