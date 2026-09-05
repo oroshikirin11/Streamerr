@@ -1459,10 +1459,10 @@
       <div class="segc" role="radiogroup" aria-label="Metadata source">
         <button class:on={metaProvider === 'none'}
                 onclick={() => setMeta('none')}>Filenames</button>
-        <button class:on={metaProvider === 'jellyfin'}
-                onclick={() => setMeta('jellyfin')}>Jellyfin</button>
         <button class:on={metaProvider === 'tmdb'}
                 onclick={() => setMeta('tmdb')}>TMDB</button>
+        <button class:on={metaProvider === 'jellyfin'}
+                onclick={() => setMeta('jellyfin')}>Jellyfin</button>
       </div>
 
       {#if metaProvider === 'tmdb'}
