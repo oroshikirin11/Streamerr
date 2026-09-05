@@ -467,16 +467,6 @@ export function buildPlayoutArgs({
     // wallclock at startup, consuming that much chain immediately, so it must
     // stay well under one clip.
     '-re', '-readrate_initial_burst', String(initialBurst),
-    // -re's default catchup is 1.05x, and because the source pipes straight
-    // into this process (64KB of decoupling, no queue), that throttled the
-    // WHOLE pipeline: the source can never encode faster than the publisher
-    // drains, so the bank grew at +0.05s/s at best and a slow patch took
-    // minutes to recover from. 2x lets the pipeline run at the hardware's
-    // actual speed when it has surplus; pacing to 1x still governs steady
-    // state, and the server side absorbs bursts the way it absorbs the
-    // initial one. LIVE MODE ONLY — legacy mode ships the exact f7909cd
-    // publisher behaviour, by operator decree.
-    ...(profile?.overlayPipe ? ['-readrate_catchup', '2.0'] : []),
     '-f', 'concat', '-safe', '0',
     // Default is 10, and depth accumulates down a chain — without this the
     // channel dies on the 11th clip with "Too deep recursion". Not present on

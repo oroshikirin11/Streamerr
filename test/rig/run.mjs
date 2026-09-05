@@ -65,7 +65,7 @@ const profile = {
   device: '/dev/dri/renderD128',
   width: 1280, height: 720, fps: 30,
   fpsMode: 'auto', videoBitrate: PASS ? '16000k' : '3000k', audioBitrate: '128k',
-  gopSeconds: 2, overlayPipe: false,
+  gopSeconds: 2,
   // CENSOR=1 puts one censor box mid-frame: a drawn thing with no canvas,
   // so passthrough must refuse and the transcode graphs must carry it.
   overlay: [

@@ -7,6 +7,10 @@ plan — added where they seemed to belong; move or drop them freely.
 
 ## Phase 1 — Overlay changes without restarting the source
 
+**Removed 2026-09-05.** The live overlay compositor (renderer process feeding
+RGBA over a pipe) was too slow in practice and has been deleted; the classic
+respawn path with the cushion kept is how overlays apply. History below.
+
 The foundation. Ships value immediately, and the renderer it builds IS the
 compositor Phase 6 needs.
 

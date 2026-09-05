@@ -48,8 +48,6 @@ import {
 } from './overlay-image.js';
 import { publishOutputArgs, targetUrl, SECRET_FIELDS } from '../publish.js';
 import { TcpBridge } from './tcp-bridge.js';
-import { OverlayFeed } from './overlay-feed.js';
-import { rendererArgs, pipeInputArgs } from './overlay-renderer.js';
 
 /**
  * Where the video content lands inside the output frame after aspect-
@@ -1190,10 +1188,6 @@ export class PipelinePlayout extends EventEmitter {
   stop({ graceful = false } = {}) {
     this._stopping = true;
     this._abort.abort();     // take background extractions down too
-    // The overlay feed dies with the broadcast: its renderer would only
-    // stall on a fifo nobody reads.
-    try { this._ovFeed?.stopSync(); } catch { /* already down */ }
-    this._ovFeed = null;
     this._tcpBridges?.forEach((b) => { try { b.close(); } catch { /* down */ } });
     this._tcpBridges = null;
     // Stopping during an off-air break: no publisher exists, so the close
@@ -1290,8 +1284,6 @@ export class PipelinePlayout extends EventEmitter {
   hardStop() {
     this._stopping = true;
     this._abort.abort();
-    try { this._ovFeed?.stopSync(); } catch { /* already down */ }
-    this._ovFeed = null;
     if (this._break?.timer) clearTimeout(this._break.timer);
     this._break = null;
     this._bank = [];
@@ -1610,119 +1602,6 @@ export class PipelinePlayout extends EventEmitter {
    * profile from the box, and an overlay that lived only on the profile
    * would vanish the next time an episode of a different shape came up.
    */
-  /**
-   * Whether the studio holds anything the operator might show, visible or
-   * not. Arming rides on this so a hidden studio still spawns WITH the
-   * pipe and the first "show" is a renderer swap, not a source respawn.
-   * No restart here: it only steers the next planOverlayPipe decision.
-   */
-  setOverlayConfigured(configured) {
-    const v = Boolean(configured);
-    this._box.overlayConfigured = v;
-    if (this.profile) this.profile.overlayConfigured = v;
-  }
-
-  /**
-   * The piped apply: replace only the renderer, through the same extract →
-   * spec → swap flow every live Apply runs. Shared with the crash handler
-   * below, so a renderer that dies mid-clip is rebuilt by exactly the code
-   * path that is already proven at every show/hide.
-   */
-  _pipedOverlayApply(item, dur) {
-    const tok = (this._selToken = (this._selToken ?? 0) + 1);
-    this._detached(this._extract(item).finally(() => {
-      if (this._stopping || this._selToken !== tok) return undefined;
-      if (this.current?.item !== item || this.status !== 'running') return undefined;
-      if (!this._pipedClip || !this._ovFeed?.active) return undefined;
-      /**
-       * The continuation point is simply where the encode head IS. The
-       * new renderer stamps clip-relative timestamps from here; anything
-       * already queued in framesync pairs first, a frame stamped slightly
-       * behind is dropped benignly, and the heartbeat covers any gap
-       * within half a second. The old byte-counting clock died with the
-       * rawvideo pipe.
-       */
-      // headPts is SOURCE-LOCAL (the canvas clock is 0-based per source);
-      // shift is clip-absolute, so the offset goes back on before the max.
-      const shift = Math.max(this._pipeClipOffset ?? 0, this.position ?? 0,
-        (this._ovFeed?.headPts?.() ?? 0) + (this._pipeClipOffset ?? 0));
-      const cached = this._cachedSubs(item.srcPath);
-      const overlayFile = this._overlayFile(item, 0);
-      /**
-       * Timed windows are diffed against the canvas clock, which is
-       * clip-relative — NOT this swap's continuation point. Subtracting
-       * `shift` here moved every intro/outro window by the swap position,
-       * so a timed picture could reappear or vanish after a mid-clip
-       * apply. The initial spawn passes the clip offset; so must swaps.
-       */
-      const overlayImages = this._overlayImages(item, this._pipeClipOffset ?? 0);
-      const spec = buildRendererSpec({
-        profile: this.profile,
-        selection: this.selection,
-        srcPath: item.srcPath,
-        shift,
-        clipOffset: this._pipeClipOffset ?? 0,
-        duration: dur,
-        extractedPath: cached?.path ?? null,
-        fontsDir: cached?.fontsDir ?? null,
-        overlayPath: overlayFile,
-        overlayImages,
-        subBand: this._subtitleBand(
-          this.selection?.subtitle?.external
-            ? this.selection.subtitle.path ?? null
-            : cached?.path ?? null,
-          { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
-        ),
-        pin: this._pipePin ?? null,
-        srcKbps: this._srcKbps ?? null,
-      });
-      if (!spec) {
-        // Eligibility changed underneath (a demotion mid-clip). The
-        // classic restart still works; use it rather than not applying.
-        const { resume } = this._bankCutForApply();
-        this._play(item, resume, { duration: dur });
-        return undefined;
-      }
-      const swapArgs = rendererArgs(spec.spec);
-      this.emit('log', `[swap:overlay] ffmpeg ${this._redact(swapArgs.join(' '))}\n`);
-      return this._ovFeed.swap(swapArgs).then(() => {
-        this._rendererCrashes = 0;
-        const ahead = Math.max(0, (this.position ?? 0) - (this.aired ?? 0));
-        this.emit('log', '[overlay] applied live — no restart, reaches air '
-          + `in ~${ahead.toFixed(1)}s as the buffer plays out\n`);
-      });
-    }), 'applying overlays');
-  }
-
-  /**
-   * An unexpected renderer death used to strand the broadcast: nothing
-   * respawned the canvas, the source starved at the NUT join and the bank
-   * drained to zero (measured — an ENOSPC crash froze position with every
-   * process at 0% CPU). The feed has already cut any torn tail; respawn
-   * through the normal apply flow. Three deaths in a row means the pipe
-   * itself is sick — fall back to the classic restart, which rebuilds
-   * everything the way a track change does.
-   */
-  _rendererCrashed() {
-    if (this._stopping || this.status !== 'running' || !this.current) return;
-    if (!this._pipedClip || !this._ovFeed?.active) return;
-    const item = this.current.item;
-    const n = (this._rendererCrashes = (this._rendererCrashes ?? 0) + 1);
-    if (n > 2) {
-      this.emit('warn', 'overlay renderer keeps dying — restarting the source');
-      const gop = this._bankTrimToAccessPoint();
-      this._play(item, Math.max(this.aired ?? 0, (this.position ?? 0) - gop),
-        { duration: this.current.duration });
-      return;
-    }
-    this.emit('log', `[overlay-pipe] renderer died — respawning (attempt ${n})\n`);
-    setTimeout(() => {
-      if (this._stopping || this.status !== 'running') return;
-      if (this.current?.item !== item || !this._pipedClip || !this._ovFeed?.active) return;
-      this._pipedOverlayApply(item, this.current.duration);
-    }, 500);
-  }
-
   setOverlay(items) {
     const next = Array.isArray(items) ? items : [];
     // Applying is a restart, so it must be worth one. The panel saves the
@@ -1767,24 +1646,6 @@ export class PipelinePlayout extends EventEmitter {
     // change up from the profile anyway, a second later.
     if (dur && this.position >= dur - 1) return true;
 
-    /**
-     * The piped apply: nothing restarts.
-     *
-     * The source, its bank and the publisher never hear about this — only
-     * the renderer feeding the overlay fifo is replaced. The new one must
-     * continue at exactly the frame the old one stopped at: rawvideo has no
-     * timestamps, so the feed's frame count is the shared clock, and the
-     * continuation point is clipOffset + frames/rate. Off by one frame and
-     * every subtitle drifts by that much for the rest of the clip.
-     *
-     * The change reaches air when the encoded cushion drains past it —
-     * same arrival time as the classic path's "cushion kept" mode, minus
-     * the splice, the DTS discontinuities and the re-encode.
-     */
-    if (this._pipedClip && this._ovFeed?.active) {
-      this._pipedOverlayApply(item, dur);
-      return true;
-    }
     // Same ordering as a track change, and for the same reason: extract
     // while the old source still feeds the pipe, or the new source's
     // subtitle filter re-reads the container and starves the publisher
@@ -4280,10 +4141,6 @@ export class PipelinePlayout extends EventEmitter {
     this._flushed = false;
     const workers = this._chunkWorkers();
     if (workers > 1 && this.selection?.subtitle) {
-      // Chunked clips are many parallel encoders; one fifo cannot feed
-      // them. They keep the classic apply-by-restart behaviour.
-      this._pipedClip = false;
-      if (this._ovFeed?.active) this._ovFeed.stopSync();
       /**
        * The splice lock is consumed HERE. A cushion-kept seek/apply on
        * this path runs _bankCutForApply like any other, which locks the
@@ -4311,108 +4168,14 @@ export class PipelinePlayout extends EventEmitter {
 
     const overlayImages = this._overlayImages(item, offset);
     const overlayFile = this._overlayFile(item, 0);
-    /**
-     * The overlay pipe — the compositor path, and the default.
-     *
-     * When this clip is eligible, the overlay canvas is not part of the
-     * source's command at all: a renderer process feeds it through a fifo,
-     * and an overlay change replaces the renderer while THIS process, its
-     * bank and the publisher run on untouched. buildRendererSpec and
-     * buildSourceArgs both derive geometry from planOverlayPipe, so the
-     * two ends of the pipe cannot disagree.
-     *
-     * Any failure here falls back to the classic restart path for this
-     * clip rather than blocking playback — the pipe is an upgrade, never
-     * a new way to not broadcast.
-     */
-    this._pipedClip = false;
-    let pipePath = null;
-    // Computed once and passed to BOTH the renderer and buildSourceArgs, so
-    // the band analysis and the rate decision cannot diverge between them.
-    const pipeAnimated = (this.profile?.overlay ?? []).some(
-      (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
-    );
-
-    const pipeBand = this.profile?.overlayPipe && this.cacheDir
-      ? this._subtitleBand(
-        this.selection?.subtitle?.external
-          ? this.selection.subtitle.path ?? null
-          : cached?.path ?? null,
-        { overlayPath: overlayFile, fontsDir: cached?.fontsDir ?? null },
-      )
-      : null;
     // The file's average rate, for the passthrough ceiling and the bank's
     // re-size below. Null when unstatable (SMB hiccup) or duration-less.
-    // Read BEFORE the renderer decision: planOverlayPipe declines to arm
-    // idle on a clip that passes through, and the rate is part of that
-    // verdict — both ends must see the same number.
     let srcKbps = null;
     try {
       if (clipDuration > 0) {
         srcKbps = Math.round((statSync(item.srcPath).size * 8) / clipDuration / 1000);
       }
     } catch { /* keep null */ }
-    this._srcKbps = srcKbps;
-    if (this.profile?.overlayPipe && this.cacheDir) {
-      const rSpec = buildRendererSpec({
-        profile: this.profile,
-        selection: this.selection,
-        srcPath: item.srcPath,
-        shift: offset,
-        clipOffset: offset,
-        duration: clipDuration,
-        extractedPath: cached?.path ?? null,
-        fontsDir: cached?.fontsDir ?? null,
-        overlayPath: overlayFile,
-        overlayImages,
-        subBand: pipeBand,
-        overlayAnimated: pipeAnimated,
-        srcKbps,
-      });
-      if (rSpec) {
-        try {
-          this._ovFeed ??= new OverlayFeed({
-            // The canvas lives on the ramdisk: appends are page-cache
-            // memcpys and the reaper's punched holes cost nothing.
-            path: join(existsSync('/dev/shm') ? '/dev/shm' : this.cacheDir,
-              `overlay-${process.pid}.fifo`),
-            log: (m) => this.emit('log', m),
-          });
-          this._ovFeed.onCrash = () => this._rendererCrashed();
-          this._ovFeed.resetSync();
-          this._rendererCrashes = 0;
-          const rArgs = rendererArgs(rSpec.spec);
-          // The renderer spawns as visibly as the source: an entire hunt ran
-          // blind on which files and filters production actually used.
-          this.emit('log', `[spawn:overlay] ffmpeg ${this._redact(rArgs.join(' '))}\n`);
-          this._ovFeed.spawnRenderer(rArgs);
-          pipePath = this._ovFeed.path;
-          this._pipedClip = true;
-          this._pipeClipOffset = offset;
-          /**
-           * The pipe format, frozen for this source's life. Swaps rebuild
-           * the renderer's interior against it — geometry and rate can
-           * never follow an Apply, only the content can.
-           */
-          this._pipePin = {
-            rect: rSpec.rect, eff: rSpec.eff, wide: rSpec.wide,
-            width: rSpec.width, height: rSpec.height,
-            rate: rSpec.rate, fps: rSpec.fps,
-          };
-
-        } catch (err) {
-          this.emit('warn', 'overlay pipe unavailable — applying overlays '
-            + `will restart the source: ${err.message}`);
-          try { this._ovFeed?.stopSync(); } catch { /* fine */ }
-          pipePath = null;
-          this._pipedClip = false;
-        }
-      } else if (this._ovFeed?.active) {
-        this._ovFeed.stopSync();
-      }
-    } else if (this._ovFeed?.active) {
-      this._ovFeed.stopSync();
-    }
     const args = buildSourceArgs({
       srcPath: item.srcPath,
       srcKbps,
@@ -4427,7 +4190,6 @@ export class PipelinePlayout extends EventEmitter {
       // `enable` on the overlay filter, which is read after the restore.
       overlayPath: overlayFile,
       overlayImages,
-      subBand: pipeBand,
       // A bouncing CAPTION is drawn by libass onto the same canvas, so it
       // needs every frame exactly as a moving picture does. Without this it
       // was animated at half rate and visibly stepped.
@@ -4456,9 +4218,7 @@ export class PipelinePlayout extends EventEmitter {
        * still lands in cacheDir, so nothing downstream can tell the
        * difference between this and an extracted one.
        */
-      // The same analysis the renderer plan used — running it twice printed
-      // two [band] lines and could in principle disagree with itself.
-      subBand: pipeBand ?? this._subtitleBand(
+      subBand: this._subtitleBand(
         this.selection?.subtitle?.external
           ? this.selection.subtitle.path ?? null
           : cached?.path ?? null,
@@ -4471,7 +4231,6 @@ export class PipelinePlayout extends EventEmitter {
       extractedPath: cached?.path ?? null,
       fontsDir: cached?.fontsDir ?? null,
       duration: clipDuration,
-      overlayPipe: pipePath,
     });
 
     /**
@@ -4834,32 +4593,15 @@ export class PipelinePlayout extends EventEmitter {
 
     // The surface libass actually rasterises, which is the number the band
     // exists to shrink — stated so it is obvious whether there is anything
-    // left to win there. In pipe mode the truth comes from the PIN: an
-    // earlier version of this report described the inline decision while
-    // the pipe ran a full-height full-rate canvas, and the lie sent the
-    // reader hunting in the wrong place.
+    // left to win there.
     try {
       const rect = contentRect(v, this.profile);
-      if (this._pipedClip && this._pipePin) {
-        const pin = this._pipePin;
-        out.push(`overlay pipe ${pin.width}x${pin.height} RGBA, `
-          + 'change-driven — frames cross the pipe and upload only when the '
-          + 'canvas changes; the composite itself runs every video frame');
-        // A deliberate trade, chosen with the numbers on the table: the
-        // always-on composite is what makes overlay changes free, and on a
-        // small iGPU it costs real headroom. Say so, with the lever, so an
-        // operator reading this at 0.7x knows it is policy rather than a bug.
-        out.push('  the always-on overlay pipe trades GPU headroom for '
-          + 'restart-free overlay changes; "overlayPipe": false in '
-          + 'config.json trades it back');
-      } else {
       const h = this._bandInfo?.applied ? this._bandInfo.height : rect.h;
       const halfRate = !all.some((i) => i?.motion === 'bounce'
         || /\.gif$/i.test(i?.file ?? ''));
       if (sub && !sub.bitmap) {
         out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
           + `, uploaded and blended every frame`);
-      }
       }
       if (rect.bars) out.push('output is pillarboxed — bars cost encode time too');
     } catch { /* diagnosis must never throw on the warning path */ }
@@ -5647,18 +5389,6 @@ export class PipelinePlayout extends EventEmitter {
         if (this.current?.duration) {
           this.position = Math.min(this.position, this.current.duration);
         }
-        // Consumption-paced canvas: hold the renderer's lead near the
-        // encode head so an Apply's continuation point is always close.
-        //
-        // SOURCE-LOCAL time, not clip-absolute: the canvas clock restarts
-        // with each source (-ss makes the video 0-based, NUT carries those
-        // pts). Feeding clip-absolute position here after a SEEK made the
-        // reaper believe every canvas byte was ~600s consumed — it punched
-        // the whole file to zeros under the reader and the broadcast froze
-        // at the seek point (measured live on the N100, pos pinned for 98s
-        // while the source idled). clipOffset 0 hid this on every unseeked
-        // clip.
-        this._ovFeed?.pace?.(this.position - (this._pipeClipOffset ?? 0));
       }
 
       const wall = Date.now();
@@ -5719,36 +5449,6 @@ export class PipelinePlayout extends EventEmitter {
               this._slowNoticed = true;
               this.emit('warn', 'Playback keeps falling behind. Details are in '
                 + 'the console — enable Developer mode in Settings to see it.');
-            }
-            /**
-             * A sustained-slow clip whose pipe is compositing NOTHING is
-             * paying the idle arming pass for a studio that is hidden —
-             * headroom a marginal title (4K HDR: 1.02x -> 0.78x from the
-             * pass alone) cannot spare. Shed it: demote the idle arming
-             * for the rest of the broadcast and respawn cushion-kept at a
-             * GOP boundary, the same move an overlay apply makes. The
-             * next "show" on this broadcast pays the classic respawn —
-             * the old behaviour, on exactly the titles that always had it.
-             * Visible overlays are the operator's explicit choice and are
-             * never shed here.
-             */
-            const idleArmed = this._pipedClip && this.profile?.overlayConfigured
-              && !this.profile?.noIdleArm
-              && !(this.profile?.overlay ?? []).some((i) => i?.enabled !== false);
-            if (idleArmed && this.current && this.status === 'running') {
-              this._demote({ noIdleArm: true });
-              this.emit('log', '[overlay] idle pipe shed — this title cannot '
-                + 'afford the armed composite pass; show/hide costs a respawn '
-                + 'for the rest of the broadcast\n');
-              const item = this.current.item;
-              const dur = this.current.duration;
-              const tok = (this._selToken = (this._selToken ?? 0) + 1);
-              this._detached(this._extract(item).finally(() => {
-                if (this._stopping || this._selToken !== tok) return;
-                if (this.current?.item !== item || this.status !== 'running') return;
-                const { resume } = this._bankCutForApply();
-                this._play(item, resume, { duration: dur });
-              }), 'shedding the idle overlay pipe');
             }
           }
         } else {
@@ -5956,31 +5656,6 @@ export class PipelinePlayout extends EventEmitter {
             { duration: this.current.duration });
           return;
         }
-        /**
-         * The overlay pipe is demoted LAST, after every more specific
-         * demotion has had its claim: a piped HDR clip dying at the tone
-         * map should lose the tone map, not the pipe. What lands here is a
-         * driver refusing the piped composite itself — a graph shape no
-         * probe has vouched for on hardware nobody tested.
-         *
-         * Matched on the argv that actually ran, not on intended state:
-         * profile flags are rebuilt from a copy per clip and have drifted
-         * from the running command before (see the tonemap demotion).
-         */
-        if (!this._sawBlock && this.current && !this._pipeDemoted
-            && /overlay-\d+\.fifo/.test(this._lastArgs ?? '')) {
-          this._pipeDemoted = true;
-          this._demote({ overlayPipe: false });
-          try { this._ovFeed?.stopSync(); } catch { /* already down */ }
-          this._pipedClip = false;
-          this.emit('warn', 'This driver would not run the overlay pipe — '
-            + 'falling back to classic overlay applies (with restarts) for '
-            + `this broadcast. (${tail})`);
-          this._play(this.current.item, this.position,
-            { duration: this.current.duration });
-          return;
-        }
-
         // A clip that exits with an error before producing a single frame
         // did not "finish" — it failed. Advancing here turns one broken
         // filtergraph into a silent march through the whole queue, each
@@ -6066,17 +5741,9 @@ export class PipelinePlayout extends EventEmitter {
     // take the decoder's surfaces is a property of the driver, not of the
     // clip, so re-arming buys one dead spawn per episode to relearn it.
     const keep = this._demoted.noGpuImages || this._demoted.noIdentitySkip
-      || this._demoted.overlayPipe === false || this._demoted.noIdleArm
       ? {
         ...(this._demoted.noGpuImages ? { noGpuImages: true } : null),
         ...(this._demoted.noIdentitySkip ? { noIdentitySkip: true } : null),
-        // A driver that refused the piped composite once will refuse it on
-        // the next clip too; re-arming would buy a dead spawn per episode.
-        ...(this._demoted.overlayPipe === false ? { overlayPipe: false } : null),
-        // Shed once, shed for the broadcast: re-arming the idle pass per
-        // clip would relearn the same 30s slow verdict at every episode
-        // boundary of a heavy queue.
-        ...(this._demoted.noIdleArm ? { noIdleArm: true } : null),
       }
       : null;
     this._demoted = keep;
@@ -6270,29 +5937,9 @@ export class PipelinePlayout extends EventEmitter {
 const item = (self) => self.current?.item?.title ?? 'clip';
 
 /**
- * Whether — and at what geometry — this clip can take the overlay pipe.
- *
- * The pipe keeps the main graph's SHAPE fixed for the life of the source, so
- * nothing an Apply can change is allowed to influence the answer: no band
- * (its height depends on what the overlays currently are), no half-rate
- * canvas (a bouncing picture added later needs every frame), no baked still
- * layer. The canvas is always the full content rectangle at the full
- * effective rate. That costs some of the optimisations the inline path has,
- * which is the honest price of never restarting for an overlay.
- *
- * Null means "use the ordinary paths": the guards mirror the inline canvas
- * path exactly, plus two of the pipe's own —
- *  - a pillarboxed clip WITHOUT subtitles has no probed barsGraph (the
- *    probe only runs when subtitles exist), and an unprobed composite shape
- *    is how this project earned its -22 scars; and
- *  - bitmap subtitles need the video frames themselves and cannot move into
- *    a renderer that has no access to them.
- */
-/**
  * PASSTHROUGH eligibility — the ONE authority. buildSourceArgs uses it to
- * decide `-c:v copy`, and planOverlayPipe consults it so the pipe is never
- * armed idle on a clip that would otherwise ship untouched. Both ends read
- * the same answer, so the engine and the arg builder cannot disagree.
+ * decide `-c:v copy`, and the engine reads the same answer, so the two
+ * cannot disagree. Passthrough is eligible whenever nothing needs drawing.
  *
  * An HEVC-native file under codec=hevc with nothing to draw — no subtitle
  * burn, no pictures, no censor boxes, nothing animated — HDR only when
@@ -6316,332 +5963,6 @@ export function passthroughEligible({
   return copyKeyframesFitLive(profile) || (hdr && Boolean(profile.hdrWanted));
 }
 
-export function planOverlayPipe({
-  profile, selection, sub, duration = null,
-  overlayImages = [], overlayAnimated = false, censors = null, srcKbps = null,
-}) {
-  if (!profile?.overlayPipe || profile.backend !== 'vaapi' || !profile.gpuFull) return null;
-  if (sub?.needsComplex) return null;
-
-  // The pipe input must be BOUNDED or the main process cannot exit — see
-  // pipeInputArgs. No known duration, no bound, no pipe.
-  if (!(duration > 0)) return null;
-  /**
-   * Nothing to draw, no pipe — the composite pass is never free.
-   *
-   * Measured on the N100: Backrooms (4K HDR, no subtitles, no overlays)
-   * ran 1.02x on the plain fast path and 0.78x with the pipe attached,
-   * with the canvas at two heartbeat frames a second. The whole gap is
-   * ONE extra full-frame VPP pass on an iGPU already saturated by decode,
-   * scale, tonemap and encode, and no fixed graph can skip a pass
-   * conditionally. A clip with nothing to composite therefore takes the
-   * EXACT pre-pipe graph — for bare playback this is not "as fast as the
-   * old setup", it IS the old setup.
-   *
-   * The first overlay on such a clip goes out through the classic
-   * cushion-kept respawn — invisible to viewers, the bank covers it — and
-   * from then on the pipe is armed and every apply is a free swap.
-   * Configured-but-hidden overlays count as something to draw (the
-   * overlayConfigured clause below — for a long time this sentence was
-   * an aspiration the code did not honour, and every first "show" of a
-   * broadcast paid the respawn), so the show/hide toggle stays free.
-   */
-  /**
-   * STUDIO content only — subtitles alone never arm the pipe. Operator
-   * decree after Jujutsu Kaisen regressed: the proven inline graphs are
-   * the default for plain playback, subtitled or not, and the compositor
-   * machinery exists exactly when the operator is compositing. A clip
-   * with subtitles and no studio overlays runs the same graph it ran
-   * before Phase 1; the first studio apply arms the pipe through the
-   * cushion-kept respawn, and from then on applies are live swaps.
-   */
-  const visible = (overlayImages ?? []).length > 0
-    || Boolean(overlayAnimated)
-    || (profile.overlay ?? []).some((i) => i?.enabled !== false);
-  const anythingToDraw = visible
-    // Configured-but-hidden arms the pipe too — measured armed-idle at
-    // ~20% source CPU on a 1080p title, against a full source respawn
-    // (splice + re-encode) for the first "show" without it. overlayAlways
-    // goes further — OBS semantics, the compositor rides every eligible
-    // clip so even a first add from an EMPTY studio is a swap. noIdleArm
-    // is the escape hatch for both: a title that cannot afford the idle
-    // composite pass (4K HDR measured 1.02x -> 0.78x from the pass
-    // alone) sheds it via the slow handler and falls back to the old
-    // first-show respawn.
-    || ((Boolean(profile.overlayConfigured) || Boolean(profile.overlayAlways))
-      && !profile.noIdleArm);
-  if (!anythingToDraw) return null;
-  /**
-   * ...but never at the price of passthrough. With NOTHING visible, the
-   * idle arm exists only to make the first "show" a swap instead of a
-   * respawn — and the pipe forces a transcode (buildSourceArgs refuses
-   * copy under a pipe plan). An HEVC file that could ship untouched was
-   * re-encoded for a studio the viewer cannot see, while the inspector
-   * promised "Passthrough". The clip passes through instead; the first
-   * show pays the classic cushion-kept respawn, which is the cheaper of
-   * the two prices. Same helper as the copy gate, so the two ends agree.
-   */
-  if (!visible && passthroughEligible({
-    profile, selection, sub, overlayImages, overlayAnimated, censors, srcKbps,
-  })) return null;
-  const rect = contentRect(selection?.video, profile);
-
-  if (sub?.filter) {
-    // Same conditions the inline GPU canvas demands, for the same reasons.
-    if (!profile.gpuSubs) return null;
-    if (!gpuDecodable(selection?.video) || profile.swDecode) return null;
-    if (profile.barsFailed && rect.bars) return null;
-    if (rect.bars && !profile.barsGraph) return null;
-  } else if (rect.bars) {
-    return null;
-  }
-  const eff = effectiveFps(selection?.video, profile);
-  // wide-canvas is the one probed shape where the CANVAS carries the
-  // pillarbox padding, so the pipe has to carry the full output frame.
-  const wide = rect.bars && profile.barsGraph === 'wide-canvas';
-  const width = wide ? profile.width : rect.w;
-  const height = wide ? profile.height : rect.h;
-  /**
-   * Rate is NOT part of the pipe's format any more. The canvas travels as
-   * VFR NUT: the renderer's chain runs at the full effective rate and
-   * mpdecimate forwards a frame only when the picture CHANGED, so a static
-   * canvas costs ~2 small uploads a second (the heartbeat) and a moving one
-   * costs exactly its real new pixels. Half-rate pinning — and the stepped
-   * motion it forced on mid-clip applies — is gone with it.
-   */
-  return { rect, eff, wide, width, height, rate: eff.rate, fps: eff.fps };
-}
-
-/**
- * The renderer's own command spec: the overlay canvas as a standalone
- * process emitting RGBA to a pipe.
- *
- * `shift` is the media time of the FIRST frame this renderer will produce.
- * At clip start that is the clip offset; at an Apply it is the continuation
- * point, computed by the caller from the feed's frame count — rawvideo has
- * no timestamps, so the frame count is the only clock both sides share.
- * Subtitle events and picture motion both key off it, exactly as the inline
- * canvas keys off the spawn offset.
- */
-export function buildRendererSpec({
-  profile, selection, srcPath, shift = 0, clipOffset = null, duration = null,
-  extractedPath = null, fontsDir = null, overlayPath = null,
-  overlayImages = [], subBand = null, overlayAnimated = false, pin = null,
-  srcKbps = null, censors = null,
-}) {
-  const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
-    { extractedPath, fontsDir, overlayPath });
-  /**
-   * `pin` is the pipe format fixed when the SOURCE spawned. A swap must
-   * reproduce it exactly whatever the overlays now are — the reader's
-   * format cannot change — so geometry and rate come from the pin, and only
-   * the renderer's INTERIOR follows the new overlay state. That interior
-   * freedom is what keeps applies cheap: the band can come and go per swap,
-   * pictures can appear, and the pipe never notices.
-   */
-  const plan = pin ?? planOverlayPipe({
-    profile, selection, sub, duration, overlayImages, overlayAnimated, censors, srcKbps,
-  });
-  if (!plan) return null;
-  const { rect, wide } = plan;
-  /**
-   * The canvas draws EVERYTHING again — stills after the thin (one blend
-   * per heartbeat), moving and animated pictures at full chain rate.
-   * The shm transport made full-rate affordable: appends are page-cache
-   * memcpys with no lockstep, the renderer is consumption-paced by
-   * SIGSTOP, and swaps stamp from the written head. Zero restarts in
-   * live mode is the contract; this is where it is honoured.
-   */
-  const imgList = (overlayImages ?? []).filter((i) => i?.path);
-  const stillImgs = imgList.filter((i) => !(i?.animated || isMoving(i)));
-  const movingImgs = imgList.filter((i) => i?.animated || isMoving(i));
-  // Bound the generated base or the renderer never exits on its own; +5 so
-  // it always outlives the clip rather than starving the composite's tail.
-  const cap = duration != null && duration > 0
-    ? ['-t', (Math.max(1, duration - shift) + 5).toFixed(3)]
-    : [];
-  const sh = Number(shift).toFixed(3);
-  /**
-   * The band, restored — inside the renderer.
-   *
-   * Rasterising a 1080-row canvas where a 420-row band carries every
-   * subtitle is what took Mr. Robot on the N100 from 1.03x to 0.62x. The
-   * pipe's FORMAT stays full-rect (a later picture must be placeable
-   * anywhere without a restart), but the expensive part — libass and the
-   * canvas filters — runs at band height and a pad lifts the result into
-   * the full frame. Same conditions as the inline band, minus the
-   * picture clause: pictures always put the canvas back to full height.
-   */
-  const band = subBand && sub.filter && !wide && !plan.rect.bars
-    && subBand.rect.w === rect.w && subBand.rect.h === rect.h
-    && !overlayAnimated
-    && !(overlayImages ?? []).some((i) => i?.path && (i?.animated || isMoving(i)))
-    ? subBand : null;
-  const baseH = band ? band.height : rect.h;
-  /**
-   * Two renderer-side economies, reapplied on the clean base after the
-   * operator's bisection isolated the green-ghost regression to the batch
-   * of commits that first carried them. Both are innocent by construction —
-   * they change WHICH frames the chain renders, never their pixels — but
-   * each returns as its own commit so a live test can convict or acquit it
-   * individually.
-   *
-   * -readrate 2.0: unpaced, the renderer strip-mined a full E-core
-   * rendering canvas hours ahead of air (measured on the N100: 98.7% CPU,
-   * node at 64% ferrying frames nobody needed, encoder starving at 0.69x)
-   * — during static stretches mpdecimate emits no bytes, so backpressure
-   * never binds and only the readrate holds the rasteriser back. But the
-   * cap is also a lid on the SOURCE: framesync cannot advance video past
-   * the canvas timestamps it has received, so the whole encoder is capped
-   * at the renderer's pace. At 1.1 that pinned every cushion rebuild to
-   * ~1.05x observed. 1.3 clears the measured recovery ceiling (~1.2x) while letting the
-   * encoder run at the hardware's real speed when it has surplus.
-   *
-   * Half cadence when nothing moves: a static canvas rendered 36 frames a
-   * second at 1.5x pacing to keep about two. Half rate is the same 83ms
-   * cue-boundary slop the inline band always accepted. Anything moving
-   * renders at the full effective rate, decided fresh at every swap — the
-   * cadence is renderer-internal, never pipe format.
-   */
-  /**
-   * encoder.pipeTuning — measurement knobs, PUT-able through the config
-   * API so pipe internals can be A/B'd against the legacy graph live on
-   * the deployment without a rebuild per trial. Absent keys = shipped
-   * behaviour. {readrate, beat, fullRate, hwFrames}.
-   */
-  const tune = profile.pipeTuning ?? {};
-  const perFrame = Boolean(overlayAnimated) || movingImgs.length > 0;
-  const chainRate = (tune.fullRate || perFrame ? plan.rate : halfRate(plan.rate)) || plan.rate;
-  const beat = Number(tune.beat) > 0 ? Number(tune.beat) : 6;
-  const readrate = Number(tune.readrate) > 0 ? String(tune.readrate) : '2.5';
-  /**
-   * -readrate_catchup bounds the burst after a SIGSTOP. ffmpeg's readrate
-   * budget is wall-clock — stopped time counts as elapsed — so a paced
-   * renderer that sat frozen for 15s wakes up "behind" and, uncapped,
-   * sprints at machine speed to make it up. Measured on a 7800X3D: a
-   * full-rate 1080p RGBA canvas (~8.3MB/frame) flooded a 2GB /dev/shm in
-   * seconds, the writer died on ENOSPC mid-frame, and the torn tail hung
-   * the reader at the join. Capped, each CONT cycle writes at most a
-   * couple of seconds of canvas before pace() STOPs it again.
-   */
-  const catchup = Number(tune.catchup) > 0 ? String(tune.catchup)
-    : String(Math.max(Number(readrate), 3));
-  const inputs = ['-f', 'lavfi', '-readrate', readrate,
-    '-readrate_catchup', catchup, ...cap, '-i',
-    `color=c=black@0.0:s=${rect.w}x${baseH}:r=${chainRate},format=rgba`];
-  /**
-   * Timestamps are the continuation clock now, and they are CLIP-relative:
-   * the main graph's video starts at zero after its -ss, and NUT carries
-   * these pts across, so a replacement renderer that starts stamping at
-   * (shift - clipOffset) continues the stream exactly where the last one
-   * stopped. No byte counting, no padding, no drift — the timestamps ARE
-   * the alignment.
-   */
-  const rebase = Number(shift - (clipOffset ?? shift)).toFixed(3);
-  // The same head the inline canvas builds, with the base at input 0
-  // instead of 1 — the renderer is its own process and numbers from zero.
-  const head = sub.filter
-    ? `[0:v]setpts=PTS+${sh}/TB,${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
-      + `setpts=PTS-STARTPTS+${rebase}/TB,format=rgba`
-    : `[0:v]setpts=PTS+${rebase}/TB`;
-  /**
-   * phase must complete the canvas clock back to CLIP time, and the canvas
-   * clock is rebase-based: t = clipTime - (clipOffset ?? shift). Passing
-   * `shift` here double-counted the continuation point — right at the
-   * initial spawn (where shift == clipOffset) and wrong by (shift -
-   * clipOffset) at every swap, so each show/hide teleported a bouncing
-   * picture along its path by exactly the swap position.
-   */
-  const movers = canvasImageChain(movingImgs, {
-    width: rect.w, firstInput: 1, inLabel: 'sub0', outLabel: 'mv',
-    phase: clipOffset ?? shift,
-  });
-  const stillsRaw = canvasImageChain(stillImgs, {
-    width: rect.w, firstInput: 1 + movingImgs.length,
-    inLabel: 'sub', outLabel: 'cv', phase: clipOffset ?? shift,
-  });
-  // Two chains mint img0/ov0 labels independently; keep the stills' unique.
-  const imgs = {
-    ...stillsRaw,
-    filters: stillsRaw.filters.map((f) => f
-      .replace(/\[img(\d+)\]/g, '[simg$1]')
-      .replace(/\[ov(\d+)\]/g, '[sov$1]')),
-  };
-  const pad = wide
-    ? `,pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black@0.0`
-    : band
-      ? `,pad=${rect.w}:${rect.h}:0:${band.y}:color=black@0.0`
-      : '';
-  // No trailing format=rgba: the subtitle head ends on one, the image
-  // chain guarantees one, and the bare-transparent base IS one. pad of an
-  // rgba frame stays rgba.
-  /**
-   * mpdecimate is the whole economy: it forwards a frame only when the
-   * canvas actually changed, and max=12 forces one through every half
-   * second so framesync's pairing never waits long (the wait is pipeline
-   * latency, absorbed by the bank — never throughput). A static canvas
-   * therefore costs ~2 uploads a second; a bouncing logo passes every
-   * frame, full rate, because its pixels genuinely differ. Its own compare
-   * cost lives in the renderer process where there is headroom, not in the
-   * encode loop where there is none — the old in-graph measurement that
-   * rejected mpdecimate does not apply here.
-   */
-  // The heartbeat tracks the cadence so framesync's pairing queue stays at
-  // half a second of media either way. mpdecimate stays on the moving chain
-  // too, and this is EMPIRICAL, not caution: removing it is now 3-for-3.
-  // Twice (63d5fe9 and again after the swap-time guard landed) the live
-  // bounce showed green corruption on the N100; the third trial — a
-  // pipeTuning knob on the append-file transport, dropped into a live
-  // swap — hung the encoder DEAD at the renderer join: position frozen at
-  // the continuation point, source and renderer both alive at 0% CPU, and
-  // a swap back to the thinned chain could not unstick it. All three
-  // failures sit at the NUT stream JOIN, not in the pixels: the reader
-  // only resyncs onto a successor stream whose framing matches what the
-  // thinned chain produces (fifo era: misread frames — the green; append
-  // era: a demuxer that never accepts the join at all). The SAD cost is
-  // real (~130% renderer CPU at full rate where nothing is ever dropped),
-  // but this filter is load-bearing for the transport. Do not remove it.
-  const thin = `,mpdecimate=max=${beat}`;
-  /**
-   * Thin BEFORE pad — worth ~85MB/s of renderer memcpy on a banded title:
-   * SAD compares the 420px band instead of the padded 1080p frame, and the
-   * full-frame pad runs only for the ~2 frames a second that survive.
-   * Bisection suspect three of four, returning alone.
-   */
-  /**
-   * Stills AFTER the thin and the pad: the SAD compares only the subtitle
-   * band, and the picture blend runs on the ~2 frames a second that
-   * survive — effectively free — instead of forcing the canvas back to
-   * full height and full compare. A timed picture (intro/outro window)
-   * pops on the next heartbeat, at most half a second late, the same slop
-   * the band always accepted for cue boundaries.
-   */
-  /**
-   * Chain order: subtitles -> MOVING pictures (per frame, before the
-   * thin: their motion makes every frame differ, so mpdecimate passes
-   * the full rate through exactly when motion is live and the trickle
-   * economy returns by itself the moment it is not) -> thin -> pad ->
-   * stills (one blend per surviving frame).
-   */
-  const headOut = movers.filters.length ? '[sub0]' : '[sub]';
-  const preThin = movers.filters.length ? '[mv]' : '[sub]';
-  const filters = imgs.filters.length || movers.filters.length
-    ? [`${head}${headOut}`,
-      ...movers.filters,
-      `${preThin}null${thin}${pad}${imgs.filters.length ? '[sub]' : '[out]'}`,
-      ...(imgs.filters.length ? [...imgs.filters, '[cv]null[out]'] : [])]
-    : [`${head}${thin}${pad}[out]`];
-  inputs.push(...movers.inputs, ...imgs.inputs);
-  return {
-    ...plan,
-    band: Boolean(band),
-    spec: {
-      inputs, filters, out: 'out',
-      width: plan.width, height: plan.height, rate: plan.rate,
-    },
-  };
-}
-
 /**
  * Source: decode → software filters → hardware encode → MPEG-TS on stdout.
  *
@@ -6652,7 +5973,7 @@ export function buildSourceArgs({
   srcPath, offset = 0, profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
   hwDecode = null, extractedPath = null, fontsDir = null, duration = null,
   overlayPath = null, overlayImages = [], overlayLayer = null, subBand = null,
-  overlayAnimated = false, overlayPipe = null, srcKbps = null, copyAlign = null,
+  overlayAnimated = false, srcKbps = null, copyAlign = null,
 }) {
   const be = BACKENDS[profile.backend];
   if (!be) throw new Error(`Unknown encoder backend: ${profile.backend}`);
@@ -6705,18 +6026,6 @@ export function buildSourceArgs({
 
   const sub = buildSubtitleFilter(selection?.subtitle ?? null, srcPath,
     { extractedPath, fontsDir, overlayPath });
-  // The overlay pipe: when a fifo path arrives AND this clip is eligible,
-  // the canvas is not built here at all — a renderer process feeds it in as
-  // input 1, and the graph's shape stops depending on what the overlays
-  // are. planOverlayPipe is the single authority on eligibility and
-  // geometry; the engine calls the same function to size the pipe, so the
-  // two ends cannot disagree.
-  const pipePlan = overlayPipe
-    ? planOverlayPipe({
-      profile, selection, sub, duration,
-      overlayImages: imgList, overlayAnimated, censors, srcKbps,
-    })
-    : null;
   const audioIdx = selection?.audio?.typeIndex ?? 0;
   /**
    * HEVC seams announce themselves. Every respawn starts fresh continuity
@@ -6732,7 +6041,7 @@ export function buildSourceArgs({
 
   /**
    * PASSTHROUGH: an HEVC-native file under codec=hevc with nothing to draw
-   * — no subtitle burn, empty studio, no pipe — needs no transcode at all.
+   * — no subtitle burn, empty studio — needs no transcode at all.
    * The video stream ships untouched (-c:v copy): zero encode cost, source
    * quality bit-exact, HDR included. Audio still conforms to AAC/48k so
    * clip seams keep the seam discipline the encode path established.
@@ -6744,9 +6053,8 @@ export function buildSourceArgs({
    * exactly like any other source restart. Gated to HEVC on purpose:
    * H.264 is the tuned, working default path and stays untouched.
    */
-  // The conditions live in passthroughEligible (planOverlayPipe reads the
-  // same helper, so a hidden studio can no longer arm a pipe that would
-  // block copy). Kept here as prose, because each one was earned:
+  // The conditions live in passthroughEligible. Kept here as prose,
+  // because each one was earned:
   //  - An HDR file may only ship untouched when the operator asked for
   //    HDR output — with it off the promise is SDR, so the clip goes to
   //    the tone-mapped transcode instead of quietly leaking PQ on air.
@@ -6757,7 +6065,7 @@ export function buildSourceArgs({
   //    and must not fall off passthrough because the operator lowered
   //    the 1080p encode anchor. 30000k default; encoder.copyLimitKbps
   //    overrides for a different line.
-  if (!pipePlan && passthroughEligible({
+  if (passthroughEligible({
     profile, selection, sub, overlayImages: imgList, overlayAnimated, censors, srcKbps,
   })
       // Keyframes decide segment length, everywhere. A copied stream is
@@ -6868,10 +6176,7 @@ export function buildSourceArgs({
    */
   const hdrPass = Boolean(profile.hdrOut) && Boolean(selection?.video?.hdr)
     && imgList.length === 0 && censors.length === 0;
-  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame
-      // Piped clips always carry the overlay input, so the first overlay of
-      // a broadcast lands without a restart. That is the feature.
-      && !pipePlan) {
+  if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
     // null, not the scale: a full-frame VPP pass that changes nothing is
@@ -6945,7 +6250,7 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (pipePlan || (profile.gpuSubs && sub.filter && !sub.needsComplex
+  if (profile.gpuSubs && sub.filter && !sub.needsComplex
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -6953,7 +6258,7 @@ export function buildSourceArgs({
       && gpuDecodable(selection?.video) && !profile.swDecode
       // barsFailed: the pillarboxed composite died live on this driver, so
       // only clips that need bars take the CPU path; 16:9 stays on the GPU.
-      && !(profile.barsFailed && contentRect(selection?.video, profile).bars))) {
+      && !(profile.barsFailed && contentRect(selection?.video, profile).bars)) {
     // The canvas is an infinite generated input. Without bounding it, the
     // process NEVER exits when the episode ends — it idles on the canvas
     // forever, _advance() never fires, and the next episode never starts.
@@ -7039,60 +6344,6 @@ export function buildSourceArgs({
     // before the scale in whichever shape the driver probe picked.
     videoChain = gpuDeint + videoChain;
     const hwDec = gpuDecodable(selection?.video) && !profile.swDecode;
-    if (pipePlan) {
-      /**
-       * The piped graph. Identical to the inline one downstream of the
-       * upload — same videoChain, same probed composite shape — but input 1
-       * is a rawvideo fifo a renderer process fills, so nothing about the
-       * overlays is baked into this command. Changing them means replacing
-       * the renderer; this process never hears about it.
-       */
-      // Boxes sit on the base picture, under the canvas. A chain that pads
-      // has already placed the picture in the frame; one that has not is
-      // still the bare content rect, so the boxes shift by its origin and
-      // clip to it.
-      const censorGraph = censors.length
-        ? censorStage(censors, {
-          width: profile.width, height: profile.height,
-          stage: /pad_vaapi/.test(videoChain) ? null : rect,
-          inLabel: 'b0', outLabel: 'b', gpu: true,
-        })
-        : '';
-      const graph = '[1:v]format=rgba,hwupload[ov];'
-        + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[${censorGraph ? 'b0' : 'b'}];`
-        + (censorGraph ? `${censorGraph};` : '')
-        + composite;
-      return [
-        '-hide_banner', '-loglevel', 'error', '-nostdin',
-        '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
-        ...(hwDec
-          ? ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va']
-          : []),
-        // Deeper than the classic path's 8, for the piped graph only: frames
-        // wait in framesync while the VFR canvas is between heartbeats, and
-        // each queued frame pins a decoder surface. Tunable for live A/B —
-        // GTT pressure from the deeper pool is a candidate for the
-        // pipe-vs-legacy gap on iHD.
-        '-extra_hw_frames',
-        String(Number(profile.pipeTuning?.hwFrames) > 0
-          ? profile.pipeTuning.hwFrames : 8),
-        ...(offset > 0 ? ['-ss', shift] : []),
-        '-i', srcPath,
-        ...pipeInputArgs(pipePlan, overlayPipe,
-          { capSecs: Math.max(1, duration - offset) + 2 }),
-        ...bgInput,
-        '-filter_complex', graph,
-        '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
-        ...be.encoderArgs({ ...profile, fps: eff.fps }),
-        '-async_depth', '4',
-        ...audioArgs(profile),
-        '-r', eff.rate, '-fps_mode', 'cfr',
-        '-output_ts_offset', Number(tsOffset).toFixed(3),
-        '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', tsFlags,
-        '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
-        '-f', 'mpegts', 'pipe:1',
-      ];
-    }
     // Input 0 is the clip, 1 the subtitle canvas, and 2 the black background
     // when the driver's pillarbox shape needs one — so pictures start after
     // whichever of those exist, or they would read the wrong stream.

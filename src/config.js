@@ -129,16 +129,6 @@ const DEFAULTS = {
      * and says so, because dead air is worse than a substitution.
      */
     tonemap: 'auto',   // auto | vaapi | cpu | none
-    /**
-     * Overlay changes without restarting the source: the canvas comes from
-     * a renderer process over a pipe, and Apply replaces the renderer while
-     * the encoder runs on. This IS the compositor — still experimental, so
-     * OFF by default: the classic engine applies every change behind the
-     * buffer, which is seamless for viewers. Opt in for live studio
-     * applies; a driver that refuses the piped graph demotes to the
-     * classic restart path on its own, loudly.
-     */
-    overlayPipe: false,
     // Decode on the GPU. Whether this helps depends entirely on the machine
     // and the source: it is a large win for 10-bit HEVC on a weak CPU, and a
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer
@@ -336,6 +326,13 @@ export function normalizeStoredEncoder() {
   if (enc.extractSubtitles !== undefined) {
     fixed.push(`extractSubtitles=${JSON.stringify(enc.extractSubtitles)}→(removed)`);
     delete enc.extractSubtitles;
+  }
+  // The live overlay compositor (a renderer process feeding the graph over
+  // a pipe) was removed on 2026-09-05 as too slow; overlays apply through
+  // the classic respawn with the cushion kept.
+  if (enc.overlayPipe !== undefined) {
+    fixed.push(`overlayPipe=${JSON.stringify(enc.overlayPipe)}→(removed)`);
+    delete enc.overlayPipe;
   }
   return fixed.length ? fixed : null;
 }

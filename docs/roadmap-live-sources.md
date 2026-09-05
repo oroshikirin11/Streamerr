@@ -171,6 +171,9 @@ replacement" is the point of the product.
 
 ## Phase 1 feasibility — settled by experiment, 2026-08-29
 
+**Removed 2026-09-05.** The compositor built from this was too slow and has
+been deleted; overlays apply through the classic respawn with the cushion kept.
+
 **It works, but NOT by sending commands to a running filter graph.** That
 approach is dead:
 

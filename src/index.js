@@ -250,33 +250,6 @@ async function tuneProfile(profile, selection, srcPath = null) {
   profile.gpuSubs = false;
   profile.barsGraph = undefined;
 
-  /**
-   * The overlay pipe needs the same driver honesty subtitles do — an
-   * overlay_vaapi that blends alpha correctly — whether or not this clip
-   * HAS subtitles, because in pipe mode every clip carries the composite.
-   * So the probe runs for every clip when the pipe is enabled, not only
-   * for subtitled ones. The answer is cached for the process.
-   */
-  profile.overlayPipe = false;
-  if (config.encoder.overlayPipe !== false) {
-    if (globalThis.__alphaOk === undefined) {
-      globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,
-        { width: profile.width, height: profile.height });
-    }
-    profile.overlayPipe = globalThis.__alphaOk;
-    /**
-     * "always" is OBS semantics: the compositor is part of the output
-     * graph on every eligible clip, empty studio included, so even the
-     * FIRST add of a broadcast is a renderer swap rather than a splice.
-     * The cost is the always-on composite pass, which is why it is an
-     * opt-in for boxes with headroom — the default arms on studio
-     * content only, and the slow handler's noIdleArm shed still guards
-     * a title that cannot afford the pass either way.
-     */
-    profile.overlayAlways = config.encoder.overlayPipe === 'always'
-      && profile.overlayPipe;
-  }
-
   if (!selection?.subtitle) return;
 
   if (globalThis.__alphaOk === undefined) {
@@ -327,8 +300,6 @@ function tunedFields(p) {
     gpuFull: p.gpuFull,
     gpuSubs: p.gpuSubs,
     barsGraph: p.barsGraph,
-    overlayPipe: p.overlayPipe,
-    overlayAlways: p.overlayAlways,
   };
 }
 
@@ -821,15 +792,6 @@ const overlayDir = () => config.paths.overlays
 const visibleOverlay = () => (config.overlay?.hidden
   ? []
   : (config.overlay?.items ?? []).filter((i) => i?.enabled !== false));
-
-/**
- * Whether the studio has anything the operator might SHOW — hidden or not.
- * The overlay pipe arms on this, not on visibility: a broadcast that spawns
- * with the studio hidden must still carry the pipe, or the first "show"
- * needs a source respawn — a splice, and at sub-1x titles a visible stall.
- */
-const overlayConfigured = () => (config.overlay?.items ?? [])
-  .some((i) => i?.enabled !== false);
 
 function streamStatus() {
   if (!engine) {
@@ -1608,12 +1570,6 @@ app.put('/api/config', (req, res) => {
   if (patch.encoder?.fps !== undefined) {
     patch.encoder.fps = clamp(patch.encoder.fps, 1, 240, config.encoder.fps);
   }
-  if (patch.encoder?.overlayPipe !== undefined) {
-    // Tri-state: false (off), true (arm on studio content), 'always'
-    // (OBS semantics — the compositor rides every eligible clip).
-    patch.encoder.overlayPipe = patch.encoder.overlayPipe === 'always'
-      ? 'always' : Boolean(patch.encoder.overlayPipe);
-  }
   if (patch.encoder?.tonemap !== undefined) {
     // An unknown value must not silently become a filter graph.
     patch.encoder.tonemap = ['auto', 'vaapi', 'cpu', 'none']
@@ -1738,9 +1694,6 @@ app.put('/api/config', (req, res) => {
     // air until the next broadcast. The engine decides whether the change is
     // worth restarting the source for.
     if (patch.overlay !== undefined && engine) {
-      // Arming state first: setOverlay may respawn, and the spawn must
-      // already know whether the pipe stays armed for later toggles.
-      engine.setOverlayConfigured(overlayConfigured());
       engine.setOverlay(visibleOverlay());
     }
     // Turning the preview off mid-broadcast takes effect immediately: every
@@ -2550,7 +2503,6 @@ const startStreamInner = async (req, res) => {
     // hardware the moment it is selected again.
     ...config.encoder, backend: softwareCodec ? 'x264' : sel.backend,
     overlay: visibleOverlay(),
-    overlayConfigured: overlayConfigured(),
     // The H.264 anchor bitrate never changes; other codecs derive their
     // cheaper rate from it (or an explicit hevcBitrate/av1Bitrate override).
     videoBitrate: codecBitrate(config.encoder),

@@ -19,7 +19,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import {
   PipelinePlayout, buildSourceArgs, buildHoldArgs, buildCountdownArgs,
-  planOverlayPipe, passthroughEligible,
+  passthroughEligible,
 } from '../src/ffmpeg/pipeline.js';
 import { findSidecarSubtitles, selectTracks } from '../src/ffmpeg/tracks.js';
 
@@ -207,61 +207,58 @@ test('an HDR clip copied despite sparse keyframes says so', () => {
   assert.ok(!quiet.some((w) => /copied anyway/.test(w)));
 });
 
-// ── a hidden studio must not block HEVC passthrough ──────────────────────
+// ── passthrough is eligible whenever nothing needs drawing ───────────────
 
-const hevcProfile = {
-  ...gpuProfile, codec: 'hevc', hdrWanted: false, overlayPipe: true, overlayConfigured: true,
-};
+const hevcProfile = { ...gpuProfile, codec: 'hevc', hdrWanted: false };
 const hevcVideo = { ...sdrVideo, codec: 'hevc' };
 const hevcSel = { video: hevcVideo, audio: { typeIndex: 0 }, subtitle: null };
 const copyOf = (args) => args[args.indexOf('-c:v') + 1] === 'copy';
-const PIPE = '/dev/shm/overlay-test.fifo';
 
-test('hidden studio + pipe + eligible HEVC passes through with no pipe attached', () => {
+test('hidden studio (no enabled items) + eligible HEVC passes through', () => {
+  // A hidden studio hands the engine disabled items only: nothing to draw.
+  const profile = { ...hevcProfile, overlay: [{ type: 'text', text: 'hi', enabled: false }] };
   const args = buildSourceArgs({
-    srcPath: '/m.mkv', profile: hevcProfile, selection: hevcSel, duration: 1000,
-    overlayPipe: PIPE, srcKbps: 5000,
+    srcPath: '/m.mkv', profile, selection: hevcSel, duration: 1000, srcKbps: 5000,
   });
   assert.ok(copyOf(args), 'copied');
-  assert.ok(!args.includes(PIPE), 'no pipe input');
-  assert.equal(planOverlayPipe({
-    profile: hevcProfile, selection: hevcSel, sub: {}, duration: 1000, srcKbps: 5000,
-  }), null, 'the plan agrees: nothing armed');
-  assert.equal(passthroughEligible({ profile: hevcProfile, selection: hevcSel, srcKbps: 5000 }), true);
+  assert.equal(passthroughEligible({ profile, selection: hevcSel, srcKbps: 5000 }), true);
 });
 
-test('one ENABLED text item: no copy, pipe input present', () => {
-  const profile = { ...hevcProfile, overlay: [{ type: 'text', text: 'hi', enabled: true }] };
-  const args = buildSourceArgs({
-    srcPath: '/m.mkv', profile, selection: hevcSel, duration: 1000, overlayPipe: PIPE, srcKbps: 5000,
+test('something to draw — an ASS overlay layer or a censor box — refuses copy', () => {
+  // An enabled text item reaches the builder as the ASS file the engine
+  // writes for it (overlayPath); a censor box needs no canvas at all.
+  const text = buildSourceArgs({
+    srcPath: '/m.mkv', profile: hevcProfile, selection: hevcSel, duration: 1000, srcKbps: 5000,
+    overlayPath: '/tmp/overlay.ass',
   });
-  assert.ok(!copyOf(args), 'encoded');
-  assert.ok(args.includes(PIPE), 'pipe input attached');
+  assert.ok(!copyOf(text), 'encoded (text layer)');
+  const profile = {
+    ...hevcProfile,
+    overlay: [{ id: 'c', type: 'censor', x: 0.5, y: 0.5, w: 0.2, h: 0.2, strength: 5, enabled: true }],
+  };
+  const boxed = buildSourceArgs({
+    srcPath: '/m.mkv', profile, selection: hevcSel, duration: 1000, srcKbps: 5000,
+  });
+  assert.ok(!copyOf(boxed), 'encoded (censor box)');
 });
 
-test('an ineligible clip (H.264 source) with a hidden studio still arms the pipe idle', () => {
+test('an ineligible clip (H.264 source, or over the copy ceiling) is encoded', () => {
   const sel = { ...hevcSel, video: { ...hevcVideo, codec: 'h264' } };
   const args = buildSourceArgs({
-    srcPath: '/m.mkv', profile: hevcProfile, selection: sel, duration: 1000, overlayPipe: PIPE, srcKbps: 5000,
+    srcPath: '/m.mkv', profile: hevcProfile, selection: sel, duration: 1000, srcKbps: 5000,
   });
   assert.ok(!copyOf(args));
-  assert.ok(args.includes(PIPE), 'idle arm preserved');
-  // Over the copy ceiling the HEVC clip is ineligible too — pipe armed.
   const heavy = buildSourceArgs({
-    srcPath: '/m.mkv', profile: hevcProfile, selection: hevcSel, duration: 1000, overlayPipe: PIPE, srcKbps: 50000,
+    srcPath: '/m.mkv', profile: hevcProfile, selection: hevcSel, duration: 1000, srcKbps: 50000,
   });
-  assert.ok(!copyOf(heavy) && heavy.includes(PIPE));
+  assert.ok(!copyOf(heavy));
 });
 
-test('the engine spawns a hidden-studio HEVC clip as passthrough without a renderer', () => {
+test('the engine spawns a hidden-studio HEVC clip as passthrough', () => {
   const e = rig(hevcProfile, hevcSel);
   e.cacheDir = mkdtempSync(join(tmpdir(), 'jsr-pt-'));
-  let rendered = 0;
-  e._ovFeed = { active: false, spawnRenderer() { rendered++; }, stopSync() {}, resetSync() {}, path: PIPE };
   e._play({ id: 'a', title: 'A', srcPath: '/nonexistent.mkv', duration: 1000 }, 0, { duration: 1000 });
   assert.ok(copyOf(e.spawned[0].args), 'copied');
-  assert.equal(rendered, 0, 'no renderer spawned');
-  assert.equal(e._pipedClip, false);
   rmSync(e.cacheDir, { recursive: true, force: true });
 });
 

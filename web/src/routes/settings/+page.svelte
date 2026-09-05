@@ -736,8 +736,6 @@
           hdrOutput: Boolean(cfg.encoder.hdrOutput),
           deinterlace: cfg.encoder.deinterlace || 'auto',
           frameSize: frameSize,
-          overlayPipe: cfg.encoder.overlayPipe === 'always'
-            ? 'always' : cfg.encoder.overlayPipe !== false,
           chunkSeconds: +cfg.encoder.chunkSeconds || 20,
         };
       }
@@ -1928,35 +1926,12 @@
     </p>
 
 
-    <label>Live overlay compositor</label>
-    <select value={cfg.encoder.overlayPipe === 'always' ? 'always'
-        : cfg.encoder.overlayPipe !== false ? 'auto' : 'off'}
-      onchange={(e) => {
-        cfg.encoder.overlayPipe = e.currentTarget.value === 'always' ? 'always'
-          : e.currentTarget.value === 'auto';
-      }}>
-      <option value="off">Off — the classic engine; every change lands behind the buffer</option>
-      <option value="auto">When studio items exist — experimental; otherwise the classic engine runs</option>
-      <option value="always">Always on — experimental; the compositor arms on every broadcast</option>
-    </select>
     <p class="muted small">
-      {#if cfg.encoder.overlayPipe === 'always'}
-        Experimental. The compositor runs even with nothing to draw, so studio
-        applies are live from the first show. A title that cannot afford the
-        pass sheds it on its own.
-      {:else if cfg.encoder.overlayPipe !== false}
-        Experimental. Studio changes apply live while items exist; without
-        any, the classic engine runs. Subtitle and audio switches land behind
-        the buffer in every mode.
-      {:else}
-        The proven engine. Subtitle, audio and studio changes apply behind
-        the buffer — viewers never see a seam; the change surfaces as the
-        cushion drains.
-      {/if}
+      Subtitle, audio and studio changes apply behind the buffer — viewers
+      never see a seam; the change surfaces as the cushion drains.
     </p>
 
     <div class="g3" style="margin-top:6px">
-      <div></div>
       <div>
         <label>Chunk length</label>
         <select bind:value={chunkSel} onchange={() => {
