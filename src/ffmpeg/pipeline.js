@@ -1237,6 +1237,26 @@ export class PipelinePlayout extends EventEmitter {
       return;
     }
     this._killSource();
+    /**
+     * Between a publisher's death and its replacement — the receiver
+     * dropped mid-broadcast and the reconnect knock is waiting on its
+     * timer — there is no publisher to close, so the close handler that
+     * normally finishes a broadcast would never run and the timer's
+     * callback backs off on _stopping: nothing would ever say "ended".
+     * Operator-hit: Stop did nothing while the VPS was down. End it here.
+     */
+    if (!this.publisher) {
+      this._reshaping = null;
+      this._reconnectUntil = 0;
+      if (this._watch) { clearInterval(this._watch); this._watch = null; }
+      this._bank = [];
+      this._bankBytes = 0;
+      this.status = 'stopped';
+      this.current = null;
+      this.emit('status', this.status);
+      this.emit('ended', { code: 0 });
+      return;
+    }
     if (this.publisher) {
       const p = this.publisher;
       try {

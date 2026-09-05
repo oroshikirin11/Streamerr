@@ -119,6 +119,28 @@ test('stop() while start() is stuck preparing ends the broadcast at once', async
   assert.equal(endedAt, 1, 'a late start() checkpoint does not end it twice');
 });
 
+test('stop() between a dead publisher and its reconnect knock ends the broadcast', () => {
+  // The receiver dropped mid-broadcast: the publisher is gone, the knock
+  // timer is waiting, the engine still says running. Stop must end it
+  // here — nothing else ever would.
+  const e = rig(cpuProfile, { video: null, audio: { typeIndex: 0 }, subtitle: null });
+  e.publisher = null;
+  e.current = { item: { id: 'a', title: 'A' }, duration: 100 };
+  e._reshaping = { item: e.current.item, offset: 10, duration: 100 };
+  e._reconnectUntil = Date.now() + 120_000;
+  let ended = 0;
+  e.on('ended', () => { ended++; });
+  e.stop();
+  assert.equal(e.status, 'stopped');
+  assert.equal(ended, 1);
+  assert.equal(e.current, null);
+  assert.equal(e._reshaping, null, 'the pending knock is cancelled');
+  // The knock timer firing late finds nothing to do.
+  e._finishReshape();
+  assert.equal(ended, 1);
+  assert.equal(e.status, 'stopped');
+});
+
 test('resuming from an offline break re-arms the watchdog', async () => {
   const e = new PipelinePlayout({ target: 'rtmp://x/y/key123456', profile: cpuProfile, selection: null });
   e._spawnPublisher = () => { e.publisher = {}; };
