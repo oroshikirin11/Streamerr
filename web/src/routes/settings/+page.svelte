@@ -1475,7 +1475,8 @@
         <input type="password" bind:value={metaKey}
                placeholder={src.metadata.apiKey === '__SET__'
                  ? 'saved — type to replace' : 'themoviedb.org → Settings → API'} />
-        <p class="muted small">A free account's key is enough. Both the short
+        <p class="muted small">A <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">free account</a>'s
+          key is enough — find it under Settings → API once signed in. Both the short
           v3 key and the long v4 token work.</p>
       {/if}
 
