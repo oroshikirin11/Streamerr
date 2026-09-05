@@ -1018,7 +1018,7 @@
   <section class="card group">
     <h3>Broadcast</h3>
     <p class="lead muted small">Where the stream goes and what carries it. RTMP, RTMPS and SRT work with any server;
-      anything marked <span class="sgr">Streamingestarr</span> only applies when our own receiver is the destination.</p>
+      anything marked <em>Streamingestarr</em> only applies when our own receiver is the destination.</p>
   <!-- Broadcast destination -->
   <section class="subcard">
 
@@ -1208,7 +1208,7 @@
 
   <!-- Streamingestarr -->
   <section class="subcard">
-    <h3>Streamingestarr <span class="sgr">receiver only</span></h3>
+    <h3>Streamingestarr <span class="muted small" style="font-weight:400">— receiver only</span></h3>
     <p class="muted small">
       Everything in this card is for our own receiver and has no effect on other servers.
       Beyond the video, it takes structured
@@ -2350,8 +2350,9 @@
     font-size: 12.5px; margin: 6px 0 0;
     color: #c98a2e;
   }
-  .sgr { display: inline-block; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 10px;
-    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); margin-left: 6px; vertical-align: middle; white-space: nowrap; font-weight: 500; }
+  /* A quiet mark, not a badge: the same muted text as the hints around it. */
+  .sgr { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 4px; white-space: nowrap; }
+  .sgr::before { content: "· "; }
   .segc .tag {
     font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
     margin-left: 5px; opacity: .75;
