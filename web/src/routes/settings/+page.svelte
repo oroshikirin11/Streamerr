@@ -717,6 +717,7 @@
             enabled: cfg.streamingestarr?.tcpTls?.enabled === true,
             caFile: String(cfg.streamingestarr?.tcpTls?.caFile ?? '').trim(),
           },
+          pauseVote: { enabled: cfg.streamingestarr?.pauseVote?.enabled === true },
         };
       }
       if (section === 'encoder') {
@@ -1290,6 +1291,20 @@
         needs nothing here. Only for a private or self-signed certificate.
       </p>
     {/if}
+
+    <!-- The viewer pause vote: the receiver counts the room, this end
+         takes the command over a control channel while a broadcast runs. -->
+    <label style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+      <input type="checkbox" style="width:auto"
+             checked={cfg.streamingestarr?.pauseVote?.enabled === true}
+             onchange={(e) => {
+               cfg.streamingestarr = { ...(cfg.streamingestarr ?? {}), pauseVote: { ...(cfg.streamingestarr?.pauseVote ?? {}), enabled: e.target.checked } };
+             }} />
+      Viewers can vote to pause and resume
+    </label>
+    <p class="muted small" style="margin:2px 0 0 26px">
+      Half of the room's viewers decide; you can lock it during a broadcast.
+    </p>
 
     <div class="actions">
       <button class="primary" onclick={() => save('streamingestarr')}>Save</button>

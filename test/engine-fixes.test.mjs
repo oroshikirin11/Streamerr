@@ -446,3 +446,67 @@ test('the bank readout refuses stamps from two clocks', () => {
   e.airedTimeline = 1640;               // head past the tail
   assert.equal(e._bankSeconds(), null);
 });
+
+test('a pause announces itself and lands once the hold card is what viewers see', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const item = { id: 'a', title: 'A', srcPath: '/x.mkv', duration: 1000, seg: { item: 'k1' } };
+  e.current = { item, offset: 0, duration: 1000 }; e.position = 100;
+  e.airedItem = item; e.aired = 90;
+  const events = [];
+  e.on('pending', (p) => events.push(p ? p.kind : null));
+  e.pause({ by: 'viewers' });
+  assert.equal(e.status, 'paused');
+  assert.equal(e.pending?.kind, 'pause');
+  assert.equal(e.pending.fromKey, 'k1');
+  const snap = e.snapshot();
+  assert.equal(snap.pausedBy, 'viewers');
+  assert.ok(snap.pausedAt > 0 && snap.pausedAt <= Math.floor(Date.now() / 1000));
+  e._checkPending();
+  assert.ok(e.pending, 'the clip is still on the wire');
+  // The first card chunk drains: what viewers see is the card.
+  e.airedHold = true; e._checkPending();
+  assert.equal(e.pending, null);
+  assert.deepEqual(events, ['pause', null]);
+});
+
+test('a resume announces itself and lands once the clip is back on the wire; a host pause says so', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const item = { id: 'a', title: 'A', srcPath: '/x.mkv', duration: 1000 };
+  e.current = { item, offset: 0, duration: 1000 }; e.position = 100;
+  e.airedItem = item; e.aired = 90;
+  e.pause();
+  assert.equal(e.snapshot().pausedBy, 'host', 'the default caller is the host');
+  e.airedHold = true; e._checkPending();
+  assert.equal(e.pending, null);
+  const events = [];
+  e.on('pending', (p) => events.push(p ? p.kind : null));
+  e.resume();
+  assert.equal(e.status, 'running');
+  assert.equal(e.pending?.kind, 'resume');
+  const snap = e.snapshot();
+  assert.equal(snap.pausedBy, '', 'not paused: nobody holds it');
+  assert.equal(snap.pausedAt, 0);
+  e._checkPending();
+  assert.ok(e.pending, 'the card is still what viewers see');
+  e.airedHold = false; e._checkPending();
+  assert.equal(e.pending, null);
+  assert.deepEqual(events, ['resume', null]);
+});
+
+test('the bank drain flips airedHold on the card edge and settles the pending', () => {
+  const e = rig(gpuProfile, { video: sdrVideo, audio: { typeIndex: 0 }, subtitle: null });
+  const item = { id: 'a', title: 'A', srcPath: '/x.mkv', duration: 1000 };
+  e.current = { item, offset: 0, duration: 1000 }; e.position = 100;
+  e.airedItem = item; e.aired = 90;
+  e.pause();
+  assert.equal(e.pending?.kind, 'pause');
+  // Two chunks: clip bytes already banked, then the card's first bytes.
+  e._bank = [
+    { data: Buffer.alloc(188), pos: 100, tl: 100, item, gen: 1, hold: false },
+    { data: Buffer.alloc(188), pos: 100, tl: 101, item, gen: 1, hold: true },
+  ];
+  e._bankBytes = 376;
+  e._bankDrain();
+  assert.equal(e.airedHold, true);
+  assert.equal(e.pending, null, 'landed when the card reached the wire');
+});

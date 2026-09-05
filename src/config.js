@@ -53,6 +53,13 @@ const DEFAULTS = {
      * system roots (a Let's Encrypt certificate needs nothing here).
      */
     tcpTls: { enabled: false, caFile: '' },
+    /**
+     * Viewers in a Streamingestarr room vote to pause and resume the
+     * broadcast; the receiver counts, and at half the room it sends the
+     * command over a control channel. Off by default — the host can also
+     * lock it for one broadcast without touching this setting.
+     */
+    pauseVote: { enabled: false },
   },
   library: {
     /**
@@ -409,6 +416,20 @@ export function tcpTlsConfig(cfg = config) {
   return sanitizeTcpTls(cfg.streamingestarr?.tcpTls);
 }
 
+/** The viewer pause-vote setting as stored: `enabled` a boolean. */
+export function sanitizePauseVote(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    ...src,
+    enabled: src.enabled === true || src.enabled === 'true' || src.enabled === 1,
+  };
+}
+
+/** The effective pause-vote setting, sanitized. */
+export function pauseVoteConfig(cfg = config) {
+  return sanitizePauseVote(cfg.streamingestarr?.pauseVote);
+}
+
 /**
  * Convert a single-provider config into the sources list.
  *
@@ -455,6 +476,9 @@ export function ensureDirs() {
 export function saveConfig(patch) {
   if (patch?.streamingestarr?.tcpTls !== undefined) {
     patch.streamingestarr.tcpTls = sanitizeTcpTls(patch.streamingestarr.tcpTls);
+  }
+  if (patch?.streamingestarr?.pauseVote !== undefined) {
+    patch.streamingestarr.pauseVote = sanitizePauseVote(patch.streamingestarr.pauseVote);
   }
   const merged = merge(config, patch);
   // Write-then-rename: a kill mid-write must never leave a truncated

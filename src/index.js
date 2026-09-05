@@ -22,7 +22,9 @@ import {
   publishDestinations, publishTargetsRedacted, publishConfig,
   normalizeStoredBitrates, normalizeStoredEncoder, normalizeStoredLibrary,
   normalizeStoredPublish, normalizeStoredLeftovers, ROOT, CONFIG_DIR,
+  pauseVoteConfig,
 } from './config.js';
+import { ControlClient, pendingOf } from './control.js';
 import { createScheduleStore, buildQueue } from './schedules.js';
 import { inspectVerdict } from './inspect.js';
 import {
@@ -126,6 +128,14 @@ app.use(express.json({ limit: '1mb' }));
 
 /** The single active broadcast. One publisher is all most receivers accept. */
 let engine = null;
+/**
+ * The viewer pause vote, per broadcast: the host can lock it for the one
+ * on air without touching the setting (reset when the broadcast ends),
+ * and the last command the room sent is what "Paused by viewers" shows.
+ */
+let pauseVoteLocked = false;
+let lastVote = null;
+const pauseVoteState = () => ({ enabled: pauseVoteConfig().enabled, locked: pauseVoteLocked });
 /**
  * The last engine built, alive or not. A finished broadcast keeps its
  * publisher for a few seconds to air what it had buffered, but the engine
@@ -608,6 +618,23 @@ let sgOnAirKey = null;
  */
 let sgChannels = [''];
 
+/**
+ * The control channel to every receiver and room the broadcast feeds —
+ * viewer pause/resume votes come in, engine state goes out. Opened at
+ * go-live, closed at the end; logs as [control] lines like the pushes.
+ */
+const control = new ControlClient({
+  receivers: sgReceivers,
+  channels: () => sgChannels,
+  ctx: () => ({ engine, pauseVote: pauseVoteState() }),
+  log: (m) => dpush('info', m),
+  onCommand: (cmd) => {
+    lastVote = { type: cmd.type, votes: cmd.votes, viewers: cmd.viewers, by: cmd.by, ok: cmd.ok, at: Date.now() };
+    broadcast('stream', streamStatus());
+    sgNowPlaying();
+  },
+});
+
 /** The stream key a destination authenticates with, for room resolution.
  *  SRT smuggles it in the stream id, conventionally publish-prefixed. */
 function sgDestKey(d) {
@@ -737,6 +764,15 @@ async function sgNowPlaying({ announce = false } = {}) {
     position: snap.position ?? undefined,
     duration: it.duration ?? undefined,
     paused: snap.status === 'paused',
+    // The viewer pause vote: whether the room may vote right now, who
+    // holds the pause and since when, and a pause/resume on its way (a
+    // skip stays out of this field — it is not the room's to see). With
+    // the setting off the block is absent and the theater shows no pill
+    // at all; locked, it is present and false — "Pause votes off".
+    controls: pauseVoteState().enabled ? { pauseVote: !pauseVoteState().locked } : undefined,
+    pausedBy: snap.status === 'paused' ? (snap.pausedBy || 'host') : '',
+    pausedAt: snap.status === 'paused' ? (snap.pausedAt || 0) : 0,
+    pending: pendingOf(snap),
     // Declared per clip so the receiver can badge HDR honestly — and
     // 'sdr' is sent explicitly, because a tone-mapped clip after an HDR
     // one must RESET the receiver's range, not inherit it.
@@ -793,13 +829,23 @@ const visibleOverlay = () => (config.overlay?.hidden
   ? []
   : (config.overlay?.items ?? []).filter((i) => i?.enabled !== false));
 
+/** The pause-vote controls as the panel shows them. */
+const controlsStatus = () => {
+  const pv = pauseVoteState();
+  return { pauseVote: Boolean(pv.enabled && !pv.locked), pauseVoteEnabled: pv.enabled, pauseVoteLocked: pv.locked };
+};
+
 function streamStatus() {
   if (!engine) {
-    return { status: 'stopped', playing: null, queue: [], preview: previewEnabled() };
+    return { status: 'stopped', playing: null, queue: [], preview: previewEnabled(), controls: controlsStatus() };
   }
   const s = engine.snapshot();
   return {
     status: s.status,
+    pausedBy: s.pausedBy ?? '',
+    pausedAt: s.pausedAt ?? 0,
+    controls: controlsStatus(),
+    lastVote,
     // Where this broadcast is going, already redacted. Shown on hover of the
     // on-air badge: with a fan-out the operator otherwise has no way to see
     // which destinations are live without reading the startup log.
@@ -1020,6 +1066,7 @@ function buildEngine({ profile, selection }) {
 
   e.on('status', () => {
     broadcast('stream', streamStatus());
+    control.pushState();
     sgSync(); sgQueue({ now: true, schedule: true });
   });
   e.on('nowplaying', () => {
@@ -1032,7 +1079,7 @@ function buildEngine({ profile, selection }) {
   e.on('queue', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true, schedule: true }); });
   e.on('seeked', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
   // A skip or seek announced, or landed: every open page repaints from it.
-  e.on('pending', () => broadcast('stream', streamStatus()));
+  e.on('pending', () => { broadcast('stream', streamStatus()); control.pushState(); sgQueue({ now: true }); });
   e.on('selection', () => { broadcast('stream', streamStatus()); sgSync(); sgQueue({ now: true }); });
   e.on('progress', (b) => {
     sgSync();
@@ -1071,14 +1118,24 @@ function buildEngine({ profile, selection }) {
     message: `Cannot encode fast enough (${d.speed}x). The stream will stall — `
       + 'try turning subtitles off or lowering the resolution.',
   }));
+  // The pause vote is per broadcast: the lock and the last tally go with it.
+  const releaseVote = () => {
+    if (engine === e || engine === null) {
+      control.stop();
+      pauseVoteLocked = false;
+      lastVote = null;
+    }
+  };
   e.on('fatal', (err) => {
     dpush('error', err.message);
     broadcast('error', { message: redact(err.message) });
     if (engine === e) engine = null;
+    releaseVote();
     broadcast('stream', streamStatus());
   });
   e.on('ended', () => {
     if (engine === e) engine = null;
+    releaseVote();
     broadcast('stream', streamStatus());
   });
   // A publisher that dies mid-broadcast (the receiver hung up, network dropped)
@@ -1090,6 +1147,7 @@ function buildEngine({ profile, selection }) {
     dpush('error', msg);
     broadcast('error', { message: redact(msg) });
     if (engine === e) engine = null;
+    releaseVote();
     broadcast('stream', streamStatus());
   });
 
@@ -1706,6 +1764,13 @@ app.put('/api/config', (req, res) => {
         }
       }
       broadcast('stream', streamStatus());
+    }
+    // The pause vote switched mid-broadcast: open or close the control
+    // channel now, and tell every panel and receiver.
+    if (patch.streamingestarr !== undefined) {
+      control.refresh();
+      broadcast('stream', streamStatus());
+      sgNowPlaying();
     }
     res.json(redactedConfig());
   } catch (err) {
@@ -2596,6 +2661,9 @@ const startStreamInner = async (req, res) => {
     sgChannels = await sgResolveChannels(dests);
   } catch { sgChannels = ['']; }
   engine = buildEngine({ profile, selection });
+  pauseVoteLocked = false;
+  lastVote = null;
+  control.start();
   // Not awaited: going live can legitimately take minutes when the first
   // clip's subtitles must be extracted (one full read of the file), and an
   // HTTP request cannot sit open that long. The engine reports 'preparing'
@@ -2621,6 +2689,21 @@ app.post('/api/stream/resume', wrap(async (req, res) => {
   if (!engine) return res.status(409).json({ error: 'Not streaming' });
   engine.resume();
   res.json({ ok: true, position: engine.position });
+}));
+
+/**
+ * Lock or unlock the viewer pause vote for the broadcast on air. Host
+ * only (every /api route is), per broadcast: it resets when the broadcast
+ * ends. Reflected at once in the status feed and on the receivers.
+ */
+app.post('/api/stream/pausevote/lock', wrap(async (req, res) => {
+  const locked = req.body?.locked === true || req.body?.locked === 'true';
+  pauseVoteLocked = locked;
+  dpush('info', `[control] viewer controls ${locked ? 'locked' : 'unlocked'} by the host`);
+  control.pushState();
+  broadcast('stream', streamStatus());
+  sgNowPlaying();
+  res.json(streamStatus());
 }));
 
 /** Abandon the clip on air and start the next queued one. */

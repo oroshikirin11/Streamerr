@@ -90,6 +90,12 @@ receiver's certificate is always verified against the system's trusted
 roots — a Let's Encrypt certificate needs nothing more; for a private or
 self-signed certificate, point "Trusted certificate" at its PEM file.
 
+With "Viewers can vote to pause and resume" on (Settings › Streamingestarr),
+the room gets a Pause pill: at half the viewers watching, the broadcast
+pauses, and the same vote resumes it. The panel shows "Paused by viewers ·
+2 of 4", a lock next to the transport holds the votes off for the night,
+and a pause you make yourself is never overruled by a vote.
+
 ## Features
 
 - Continuous playout over one connection — episode changes, seeks, and track

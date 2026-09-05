@@ -668,6 +668,15 @@
   // The engine's announced skip or seek, until it reaches the picture.
   const pending = $derived(status.pending ?? null);
   const pendChip = $derived(pending?.kind === 'skip' ? 'skipping to…' : '');
+  // A pause or resume on its way to the picture; no countdown, by design.
+  const pauseLine = $derived(pending?.kind === 'pause' ? 'Pausing · reaches viewers in a moment'
+    : pending?.kind === 'resume' ? 'Resuming…' : '');
+  const byViewers = $derived(status.status === 'paused' && status.pausedBy === 'viewers');
+  const voteTally = $derived.by(() => {
+    const v = status.lastVote;
+    if (!v || !v.ok || v.type !== 'pause') return '';
+    return v.viewers ? ` · ${v.votes} of ${v.viewers}` : '';
+  });
   async function loadTracks() {
     if (tracks) { tracks = null; return; }
     try { tracks = await api.liveTracks(); } catch (err) { error = err.message; }
@@ -801,7 +810,10 @@
         {#if status.playing?.image}<img class="cover" src={status.playing.image} alt="" />{/if}
         <div class="np">
           <p class="muted small" style="margin:0">On air</p>
-          <p style="margin:0"><strong>{status.playing?.title ?? '—'}</strong></p>
+          <p style="margin:0"><strong>{status.playing?.title ?? '—'}</strong>
+            {#if status.status === 'paused'}<span class="chip amber" title={byViewers && status.lastVote?.by?.length ? `Voted by ${status.lastVote.by.join(', ')}` : undefined}>{byViewers ? `Paused by viewers${voteTally}` : 'Paused'}</span>{/if}
+          </p>
+          {#if pauseLine}<p class="muted small" style="margin:0" role="status">{pauseLine}</p>{/if}
           <p class="muted small num" style="margin:0">
             {#if card}live in {fmtTime(Math.max(0, (status.playing.duration ?? 0) - (status.position ?? 0)))}{:else}{airTime()}{/if}
           </p>

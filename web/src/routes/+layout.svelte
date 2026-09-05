@@ -329,9 +329,23 @@
   const pendText = $derived.by(() => {
     if (!pending) return '';
     if (pending.kind === 'seek') return `Seeking to ${fmtTime(pending.to ?? 0)}…`;
+    // No countdown for these: the card reaches viewers when it does.
+    if (pending.kind === 'pause') return 'Pausing · reaches viewers in a moment';
+    if (pending.kind === 'resume') return 'Resuming…';
     const to = pending.toTitle ? epShort(pending.toTitle) : 'the next clip';
     return `Skipping to ${to}…`;
   });
+  // The viewer pause vote (Streamingestarr rooms). The lock is per
+  // broadcast and only offered while the setting is on.
+  const voteOn = $derived(Boolean(stream.controls?.pauseVoteEnabled));
+  const voteLocked = $derived(Boolean(stream.controls?.pauseVoteLocked));
+  const byViewers = $derived(paused && stream.pausedBy === 'viewers');
+  const voteTally = $derived.by(() => {
+    const v = stream.lastVote;
+    if (!v || !v.ok || v.type !== 'pause') return '';
+    return v.viewers ? `${v.votes} of ${v.viewers}` : `${v.votes ?? 0} votes`;
+  });
+  const toggleLock = () => ctl(() => api.pauseVoteLock(!voteLocked));
   const epShort = (t) => { const i = String(t ?? '').lastIndexOf(' — '); return i > 0 ? t.slice(i + 3) : t; };
   const flashPending = () => { pendFlash = true; setTimeout(() => { pendFlash = false; }, 700); };
   const nextClip = () => pending ? flashPending() : ctl(async () => {
@@ -623,7 +637,7 @@
             <div class="np">
               <p class="title">
                 {stream.playing.title}
-                {#if paused}<span class="pill">Paused</span>
+                {#if paused}<span class="pill" title={byViewers && stream.lastVote?.by?.length ? `Voted by ${stream.lastVote.by.join(', ')}` : undefined}>{byViewers ? `Paused by viewers${voteTally ? ` · ${voteTally}` : ''}` : 'Paused'}</span>
                 {:else if preparing}<span class="pill">Preparing subtitles…</span>{/if}
               </p>
               <p class="muted small">
@@ -665,6 +679,17 @@
           </div>
 
           <div class="fright">
+            {#if voteOn}
+              <button class="pvt lock" class:on={voteLocked} onclick={toggleLock} disabled={busyCtl}
+                      title={voteLocked ? 'Viewer controls are locked for this broadcast — click to let the room vote again' : 'Lock viewer controls — the room cannot vote to pause or resume until unlocked'}
+                      aria-label="Lock viewer controls" aria-pressed={voteLocked}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                     stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  {#if voteLocked}<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+                  {:else}<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>{/if}
+                </svg>
+              </button>
+            {/if}
             {#if previewAllowed}
               <button class="pvt" class:on={previewOpen} onclick={togglePreview}
                       title={previewOpen ? 'Hide the live preview' : 'Watch the outgoing stream'}
@@ -1067,6 +1092,7 @@
   }
   .fright .pvt:hover { color: var(--text); }
   .fright .pvt.on { color: var(--accent); border-color: var(--accent); }
+  .fright .pvt.lock.on { color: var(--warn, #e0a33a); border-color: var(--warn, #e0a33a); }
   .panel {
     grid-column: 2; border-top: 1px solid var(--border);
     background: var(--surface); padding: 12px 20px 16px;

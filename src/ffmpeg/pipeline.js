@@ -772,6 +772,16 @@ export class PipelinePlayout extends EventEmitter {
     this.publisher = null;
     this.source = null;
     this.holding = false;
+    /**
+     * Who asked for the pause on air: 'host' (the panel's buttons) or
+     * 'viewers' (a room's vote relayed over the control channel). Set by
+     * the caller through pause({ by }); meaningful only while paused.
+     */
+    this.pausedBy = 'host';
+    /** When the current pause began, unix seconds; 0 while not paused. */
+    this._pausedAt = 0;
+    /** Whether the bytes viewers are watching right now are a hold card. */
+    this.airedHold = false;
 
     /** Upcoming items: { id, title, srcPath, duration }. */
     this.queue = [];
@@ -950,6 +960,11 @@ export class PipelinePlayout extends EventEmitter {
    * the engine expects it, for the panel to show one honest state from the
    * click until it lands. Cleared by _checkPending when the on-air item or
    * position gets there, or by a timer if it never does.
+   *
+   * A pause and a resume are the same kind of promise: the hold card (or
+   * the clip after it) reaches viewers a runway later. Their pending is
+   * cleared when the aired bytes become the card (pause) or stop being it
+   * (resume) — tracked per bank chunk as `airedHold`.
    */
   _setPending(kind, { from = null, to = null } = {}) {
     clearTimeout(this._pendingTimer);
@@ -966,7 +981,8 @@ export class PipelinePlayout extends EventEmitter {
     };
     this._pendingTimer = setTimeout(() => {
       if (!this.pending) return;
-      this.emit('warn', `${kind === 'skip' ? 'Skip' : 'Seek'} took longer than expected — the panel stopped waiting for it`);
+      const label = { skip: 'Skip', seek: 'Seek', pause: 'Pause', resume: 'Resume' }[kind] ?? 'The change';
+      this.emit('warn', `${label} took longer than expected — the panel stopped waiting for it`);
       this._clearPending();
     }, 30_000);
     this._pendingTimer.unref?.();
@@ -990,6 +1006,16 @@ export class PipelinePlayout extends EventEmitter {
     const refs = this._pendingRefs ?? {};
     if (p.kind === 'skip') {
       if (air.item && air.item !== refs.from) this._clearPending();
+      return;
+    }
+    // A pause has landed once the card is what viewers see; a resume once
+    // it no longer is. Either also lands when the clip itself has left.
+    if (p.kind === 'pause') {
+      if (this.airedHold || (air.item && air.item !== refs.from)) this._clearPending();
+      return;
+    }
+    if (p.kind === 'resume') {
+      if (!this.airedHold || (air.item && air.item !== refs.from)) this._clearPending();
       return;
     }
     if (air.item !== refs.from) { this._clearPending(); return; }
@@ -1229,6 +1255,7 @@ export class PipelinePlayout extends EventEmitter {
           this.aired = c.pos;
           this.airedTimeline = c.tl;
           this.airedItem = c.item;
+          this.airedHold = c.hold === true;
           p.stdin.write(c.data);
           this._published = (this._published ?? 0) + c.data.length;
           this._emitData(c.data);
@@ -1305,6 +1332,9 @@ export class PipelinePlayout extends EventEmitter {
     return {
       status: this.status,
       pending: this.pending ?? null,
+      // Who paused, and since when (unix seconds) — both empty off-pause.
+      pausedBy: this.status === 'paused' ? this.pausedBy : '',
+      pausedAt: this.status === 'paused' ? this._pausedAt : 0,
       breakUntil: this._break?.until ?? null,
       playing: air.item ? { ...air.item, duration: air.duration } : null,
       queue: this.queue.map((q, i) => ({ ...q, at: sched[i] ?? null })),
@@ -1462,9 +1492,15 @@ export class PipelinePlayout extends EventEmitter {
     return next;
   }
 
-  pause() {
+  /**
+   * @param {{by?: 'host'|'viewers'}} [opts] who asked — the panel's button
+   *   (default) or a room's vote — so status can say "Paused by viewers".
+   */
+  pause({ by = 'host' } = {}) {
     if (this.status === 'paused' || !this.current) return;
     this.status = 'paused';
+    this.pausedBy = by === 'viewers' ? 'viewers' : 'host';
+    this._pausedAt = Math.floor(Date.now() / 1000);
     // INSTANT pause: flush the cushion rather than airing it out. Keeping
     // the cushion made every pause take up to applySeconds to reach the
     // wire — a pause button that keeps playing for fifteen seconds. The
@@ -1486,6 +1522,9 @@ export class PipelinePlayout extends EventEmitter {
     // Hold the pipe with a card so the publisher keeps writing and Owncast
     // never sees the ten seconds of silence that would end the broadcast.
     this._spawnHold('Paused', { keepScheduler: true });
+    // Announced like a skip: the card reaches viewers a runway later, and
+    // the panel shows "Pausing…" until the aired bytes are the card.
+    this._setPending('pause', { from: this._onAir().item ?? this.current.item });
     this.emit('status', this.status);
   }
 
@@ -1496,6 +1535,9 @@ export class PipelinePlayout extends EventEmitter {
     // and a seek while paused clears it so the seek wins.
     const at = this._pauseResume ?? this.position ?? 0;
     this._pauseResume = null;
+    this._pausedAt = 0;
+    // Pending until the clip's own bytes are back on the wire.
+    this._setPending('resume', { from: this._onAir().item ?? this.current.item });
     // Chunked path: the paused position lives in the retained window, so
     // resuming is a cache jump — kill the card, flush its unaired trickle,
     // and deliver from the retained chunk. Instant, no re-encode.
@@ -2233,6 +2275,11 @@ export class PipelinePlayout extends EventEmitter {
       this._bankBytes -= c.data.length;
       this.aired = c.pos;
       this.airedTimeline = c.tl;
+      // Card or clip on the wire: a pending pause/resume lands on this edge.
+      if ((c.hold === true) !== this.airedHold) {
+        this.airedHold = c.hold === true;
+        this._checkPending();
+      }
       // The clip viewers are watching just changed. Nothing else announces
       // this: status/queue/seek events all fire at the moment the ENCODER
       // moves on, which is a buffer earlier, so without this the panel kept
@@ -3510,6 +3557,7 @@ export class PipelinePlayout extends EventEmitter {
     this.aired = null;
     this.airedTimeline = null;
     this.airedItem = null;
+    this.airedHold = false;
     const p = this.publisher;
     if (!p) { this._breakWait(); return; }
     try {

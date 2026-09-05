@@ -106,6 +106,7 @@ export const api = {
   resume: () => request('POST', '/api/stream/resume'),
   seek: (body) => request('POST', '/api/stream/seek', body),
   next: () => request('POST', '/api/stream/next'),
+  pauseVoteLock: (locked) => request('POST', '/api/stream/pausevote/lock', { locked }),
   setTracks: (body) => request('POST', '/api/stream/tracks', body),
 
   // Schedules: saved lineups, tonight, history. Every mutation answers with
