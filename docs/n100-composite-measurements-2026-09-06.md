@@ -85,3 +85,26 @@ cues are top-aligned, so the band does not apply and the canvas is
 full-height). Backrooms with four bouncers on this driver: unchanged at
 ~0.77x — the full-rate canvas is the floor of this graph on this box until
 the window pass is accepted, and even then only for one or two pictures.
+
+## H.264 (the relay hold), same night
+
+Relay rooms hold a broadcast to H.264. On this box h264_vaapi had never
+been given `-low_power`, so it encoded on the execution units; VDENC is
+now probed for H.264 exactly as for HEVC (commit 4936edf).
+
+| case, H.264 VDENC 16 Mbps CBR | speed |
+|---|---|
+| 720p25 mp4, no drawing | above 2x (bank filled before sampling; 0.70x on the EU encoder) |
+| Mr. Robot S1E1 (1080p 10-bit HEVC source), no subtitles | above 2x (EU encoder: 0.65x) |
+| Mr. Robot S1E1 with subtitles (band canvas) | 1.83x; VBR, bufsize 16000k/64000k and level 4.2 all 1.8-2.1x |
+| Backrooms 4K HDR + four bouncers | 0.83x (the canvas floor, as under HEVC) |
+| Backrooms 4K HDR bare / one still / SRT canvas | 1.46x / 1.30x / 1.09x |
+
+A caution learned the hard way: between about 23:05 and 23:25 the same
+subtitled episode measured 0.72x with the source ffmpeg at 7% of a core
+and nothing else in the process list. That was load from another
+container on the host; `/api/debug/cpu` now reports `/proc/loadavg` so a
+number taken under such load can be recognised. Back-to-back A/Bs from
+that window still hold (VDENC about twice the EU encoder); the absolute
+figures from it do not.
+
