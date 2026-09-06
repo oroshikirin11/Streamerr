@@ -35,14 +35,34 @@
    * position and are adopted wholesale; progress ticks arrive twice a
    * second and only correct a clock that has drifted.
    */
+  /**
+   * The server's aired position moves in steps, not seconds: each banked
+   * chunk carries the encoder's last progress stamp, and a source running
+   * at 3x (passthrough) covers 1.5 s of media per half-second report, so
+   * the value the server hands out advances 1.5 s at a time (measured at
+   * 5 Hz on the deployment: 252 of 294 samples unchanged, steps 0.4-1.7 s).
+   * Adopting it wholesale on every status push snapped this clock back by
+   * up to a step several times a minute — the rubber band. So the clock
+   * yields only to a disagreement wider than a step, which is what a seek,
+   * a skip or a clip change looks like; anything smaller is the server's
+   * granularity, not news.
+   */
   const syncPosition = (server) => {
     if (server == null) return;
-    if (status.position == null || Math.abs(server - status.position) > 1.5) status.position = server;
+    if (status.position == null || Math.abs(server - status.position) > 2) status.position = server;
   };
   onMount(() => {
     refresh();
     stopFeed = connectStatus((msg) => {
-      if (msg.type === 'stream') status = msg.payload;
+      if (msg.type === 'stream') {
+        const local = status?.position;
+        const sameClip = status?.playing?.id === msg.payload?.playing?.id
+          && status?.status === msg.payload?.status;
+        status = msg.payload;
+        // Same clip, same state: the local clock is the better one.
+        if (sameClip && local != null && status.position != null
+            && Math.abs(status.position - local) <= 2) status.position = local;
+      }
       if (msg.type === 'schedule') view = msg.payload;
       if (msg.type === 'progress') {
         const p = msg.payload;

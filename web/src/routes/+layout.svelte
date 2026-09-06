@@ -51,7 +51,7 @@
   // rewriting a clock that is already right.
   const syncPosition = (server) => {
     if (server == null) return;
-    if (Math.abs(server - position) > 1.5) position = server;
+    if (Math.abs(server - position) > 2.5) position = server;
   };
   let speed = $state(null);
   // Redacted server-side; nothing here ever holds a stream key.

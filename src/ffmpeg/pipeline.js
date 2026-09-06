@@ -1771,7 +1771,18 @@ export class PipelinePlayout extends EventEmitter {
       // truncated frame at the junction, and the decoder holds a still
       // frame until it resyncs. Ending the bank on an access point costs
       // up to one GOP of re-encode — the cushion absorbs it.
-      const runway = this._applyRunway();
+      /**
+       * The Studio honours buffer.applySeconds as the cushion KEPT — that
+       * is what the setting says and what the panel promises ("on air in
+       * about 15 seconds"). The self-tuning runway that lands a track
+       * switch in ~3 s (df795aa) had quietly become the overlay's wait too,
+       * cutting a 15 s cushion to 3 s and re-encoding 12 s on every Apply:
+       * the promise was wrong on the panel and the re-encode was paid on
+       * the box. The runway stays as the floor a spawn needs; a setting
+       * below it cannot be honoured without starving the publisher.
+       */
+      const runway = Math.min(this.bufferSeconds,
+        Math.max(this._applyRunway(), this.applySeconds ?? this.bufferSeconds));
       const { rewound, gop, resume } = this._bankCutForApply(runway);
       const ahead = Math.max(0, resume - (this.aired ?? resume));
       this.emit('log', `[overlay] applied — on air in ~${ahead.toFixed(1)}s `

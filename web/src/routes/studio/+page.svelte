@@ -642,7 +642,14 @@
    * right by coincidence.
    */
   const applySecs = $derived(Math.max(0, Math.round(cfg?.buffer?.applySeconds ?? 15)));
-  const applyWhen = $derived(applySecs < 1 ? 'immediately' : `in about ${applySecs} seconds`);
+  /**
+   * The engine keeps the configured seconds of cushion and never less than
+   * the few seconds a fresh encoder needs to start, so a change lands when
+   * that kept cushion has played out — sooner if less was buffered, and
+   * never "immediately": the exact figure is in the console's [overlay]
+   * line.
+   */
+  const applyWhen = $derived(applySecs < 4 ? 'in a few seconds' : `in up to ${applySecs} seconds`);
   /** Studio's own cost notices, which an operator can turn off. */
   const warningsOn = $derived(cfg?.buffer?.studioWarnings !== false);
 
