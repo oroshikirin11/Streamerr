@@ -6891,7 +6891,7 @@ export function buildSourceArgs({
         ? `${gpuImgs.filters.join(';')};[vb][ov]overlay_vaapi=x=0:y=${band.y}[v]`
         : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
       : compositeMode === 'cpu'
-        ? '[b]hwdownload,format=nv12[bc];[bc][ov]overlay=format=nv12:eof_action=repeat[vc];[vc]hwupload[v]'
+        ? '[b]hwdownload,format=nv12,format=yuv420p[bc];[bc][ov]overlay=format=yuv420:eof_action=repeat[vc];[vc]format=nv12,hwupload[v]'
         : composite;
     // Boxes sit on the base picture, under the canvas. A chain that pads
     // has already placed the picture in the frame; one that has not is
