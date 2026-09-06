@@ -49,8 +49,11 @@ mkdirSync(`${DIR}cache`, { recursive: true });
 const MODE = process.env.MODE ?? '';
 const PASS = MODE === 'pass';
 const LONG = MODE === 'long';
-const HEVC = MODE === 'hevc' || PASS || LONG;
-const srcPath = FX + (LONG ? 'longgop.mkv' : PASS ? 'hevcsub-e1.mkv' : 'fixture.mkv');
+// pgs: the HEVC fixture carrying a synthetic PGS track (make-pgs.py) as its
+// only subtitle, so SUBS=1 takes the bitmap path and its sidecar.
+const PGS = MODE === 'pgs';
+const HEVC = MODE === 'hevc' || PASS || LONG || PGS;
+const srcPath = FX + (LONG ? 'longgop.mkv' : PASS ? 'hevcsub-e1.mkv' : PGS ? 'fixture-pgs.mkv' : 'fixture.mkv');
 const tracks = await probeTracks(srcPath);
 const subs = await listSubtitles(srcPath, tracks);
 const selection = selectTracks(tracks, subs, {});
@@ -77,14 +80,36 @@ const profile = {
       ? [{ id: 't1', type: 'text', text: '{name} #{count}', x: 0.5, y: 0.1, size: 0.06,
         colour: '#ffffff', outline: true, enabled: true }]
       : []),
+    // PICS=n: n bouncing pictures (generated solid squares), the studio
+    // shape that murdered Backrooms. GPUMOVE=0 keeps them on the canvas.
+    ...Array.from({ length: Number(process.env.PICS || 0) }, (_, i) => ({
+      id: `p${i + 1}`, type: 'image', file: `pic${i + 1}.png`, x: 0.5, y: 0.5,
+      size: 0.1 + i * 0.03, rotation: 0, opacity: 1, motion: 'bounce', speed: 0.08, enabled: true,
+    })),
   ],
   parallelChunks: 1, chunkSeconds: 20,
 };
+if (Number(process.env.PICS || 0) > 0) {
+  const { spawnSync } = await import('child_process');
+  const { existsSync } = await import('fs');
+  const { vaapiMoveHonored } = await import('../../src/ffmpeg/probe.js');
+  const colours = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan'];
+  for (let i = 0; i < Number(process.env.PICS); i++) {
+    const out = `${FX}pic${i + 1}.png`;
+    if (!existsSync(out)) {
+      spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+        `color=c=${colours[i % colours.length]}@0.85:s=200x200:r=1,format=rgba`, '-frames:v', '1', out]);
+    }
+  }
+  profile.gpuMove = process.env.GPUMOVE === '0' ? false : await vaapiMoveHonored(profile.device);
+  console.log(`# pictures: ${process.env.PICS}, gpuMove=${profile.gpuMove}`);
+}
 
 const e = new PipelinePlayout({
   destinations: [{ protocol: 'tcp', creds: { url: `tcp://127.0.0.1:${PORT}`, key: 'k' }, primary: true, name: 'sink' }],
   profile, selection,
   cacheDir: `${DIR}cache`,
+  overlayDir: FX,
   buffer: process.env.THINBUF ? { seconds: Number(process.env.THINBUF), applySeconds: 3 } : undefined,
   runAhead: process.env.RUNAHEAD ? { ramBytes: 512 * 1024 * 1024 } : null,
 });

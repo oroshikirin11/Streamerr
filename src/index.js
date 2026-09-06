@@ -34,7 +34,7 @@ import {
   throttleCheck, throttleFail, throttleReset, destroyOtherSessions,
 } from './auth.js';
 import {
-  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored,
+  probeAll, selectBackend, probeConcatCapabilities, vaapiAlphaHonored, vaapiMoveHonored,
   vaapiTonemapPresent, cpuTonemapAvailable, vaapiMain10Present,
   TONEMAP_CURVES, pickPillarboxGraph,
 } from './ffmpeg/probe.js';
@@ -263,6 +263,7 @@ async function tuneProfile(profile, selection, srcPath = null) {
   if (config.encoder.gpuSubs === false) return;
   profile.gpuFull = true;
   profile.gpuSubs = false;
+  profile.gpuMove = false;
   profile.barsGraph = undefined;
 
   // The composite is probed whenever anything will be drawn — a subtitle,
@@ -282,6 +283,24 @@ async function tuneProfile(profile, selection, srcPath = null) {
   }
   profile.gpuSubs = globalThis.__alphaOk;
   if (!profile.gpuSubs) return;
+
+  // A moving picture is composited from a surface uploaded once, cropped
+  // per frame by the GPU (vaapiMovedImageChain) — if the driver honours
+  // the crop, keeps the alpha and lands on the pixel. Asked once, only
+  // when something actually moves; a no keeps such pictures on the canvas.
+  const moving = !config.overlay?.hidden
+    && (config.overlay?.items ?? []).some((i) => i?.enabled !== false
+      && i?.type === 'image' && i?.file && i?.motion === 'bounce');
+  if (moving) {
+    globalThis.__moveOk ??= await vaapiMoveHonored(profile.device);
+    profile.gpuMove = globalThis.__moveOk;
+    if (!globalThis.__moveSaid) {
+      globalThis.__moveSaid = true;
+      console.log(profile.gpuMove
+        ? '[studio] moving pictures are composited by the GPU from surfaces uploaded once'
+        : '[studio] this driver would not move a picture by cropping — moving pictures ride the canvas');
+    }
+  }
 
   // Pillarboxed content needs a graph shape this driver actually
   // supports; which one that is has to be measured, not assumed.
@@ -323,6 +342,7 @@ function tunedFields(p) {
     hdrWanted: p.hdrWanted,
     gpuFull: p.gpuFull,
     gpuSubs: p.gpuSubs,
+    gpuMove: p.gpuMove,
     barsGraph: p.barsGraph,
   };
 }
@@ -1693,6 +1713,10 @@ app.put('/api/config', (req, res) => {
     // An unknown value must not silently become a filter graph.
     patch.encoder.tonemap = ['auto', 'vaapi', 'cpu', 'none']
       .includes(patch.encoder.tonemap) ? patch.encoder.tonemap : config.encoder.tonemap;
+  }
+  if (patch.encoder?.subComposite !== undefined) {
+    patch.encoder.subComposite = ['auto', 'cpu', 'gpu']
+      .includes(patch.encoder.subComposite) ? patch.encoder.subComposite : 'auto';
   }
   if (patch.encoder?.tonemapCurve !== undefined) {
     patch.encoder.tonemapCurve = TONEMAP_CURVES

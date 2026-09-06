@@ -498,6 +498,15 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
       filter: null,
       overlayInput: `0:s:${subtitle.typeIndex}`,
       canvasInput: `0:s:${subtitle.typeIndex}`,
+      /**
+       * The extracted copy of a bitmap track is a Matroska sidecar
+       * (subcache.js): the GPU graphs open it as an input of its own and
+       * read the canvas frames from THERE, so the frames come at the
+       * sidecar's few heartbeats a second instead of at every packet of
+       * a 40 Mbps remux. The builder places the input and rewrites
+       * canvasInput to it; the software chain keeps the main input.
+       */
+      sidecar: extractedPath ?? null,
       canvasOverlay: overlayPath
         ? `subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}:alpha=1`
         : null,

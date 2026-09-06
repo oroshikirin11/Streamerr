@@ -345,6 +345,67 @@ export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width 
 }
 
 /**
+ * Will this driver move a picture by cropping a looped surface per frame?
+ *
+ * The moving-picture chain (vaapiMovedImageChain) uploads a picture once
+ * on a wide transparent stage and lets `crop` metadata plus a VAAPI scale
+ * pass pick a different window every frame. Three things a driver could
+ * get wrong without failing: ignore the crop (the picture never moves),
+ * flatten alpha through the scale pass (an opaque box), or resample the
+ * window off-grid (a soft edge). So two frames are rendered exactly as the
+ * chain does — a half-transparent white square over green, moved 100 px
+ * between them — and read back raw, no encoder in the way:
+ *
+ *   frame 0: blended at (50,50), pure green at (150,50)
+ *   frame 1: pure green at (50,50), blended at (150,50)
+ *   edges:   the column before the square is green, the first column of
+ *            the square is blended (no smear beyond a pixel)
+ *
+ * Synthetic, ~0.5 s, cached per device by the caller.
+ */
+export async function vaapiMoveHonored(device = '/dev/dri/renderD128') {
+  const W = 640;
+  const H = 360;
+  const px = await new Promise((res) => {
+    const c = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+      '-f', 'lavfi', '-i', `color=c=green:s=${W}x${H}:r=10,format=nv12`,
+      '-f', 'lavfi', '-r', '10', '-i', 'color=c=white@0.5:s=100x100:r=10,format=rgba',
+      '-filter_complex',
+      '[0:v]hwupload[b];'
+      + '[1:v]trim=end_frame=1,premultiply=inplace=1,format=rgba,'
+      + `pad=w=${2 * W - 100}:h=${2 * H - 100}:x=${W - 100}:y=${H - 100}:color=black@0.0,`
+      + 'hwupload,loop=loop=-1:size=1:start=0,setpts=N/10/TB,'
+      + `crop=w=${W}:h=${H}:x=floor(${W - 100}-t*1000):y=${H - 100},`
+      + `scale_vaapi=w=${W}:h=${H}:out_range=pc[m];`
+      + '[b][m]overlay_vaapi=x=0:y=0:eof_action=repeat[v0];[v0]hwdownload,format=nv12[v]',
+      '-map', '[v]', '-frames:v', '2', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const bufs = [];
+    c.stdout.on('data', (d) => bufs.push(d));
+    const kill = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 25_000);
+    c.on('error', () => { clearTimeout(kill); res(null); });
+    c.on('close', () => { clearTimeout(kill); res(Buffer.concat(bufs)); });
+  });
+  const frameBytes = W * H * 3;
+  if (!px || px.length < frameBytes * 2) return false;
+  const at = (f, x, y) => {
+    const i = f * frameBytes + (y * W + x) * 3;
+    return [px[i], px[i + 1], px[i + 2]];
+  };
+  // Half white over green, through an NV12 round trip: mid red/blue, high
+  // green. Green alone: low red/blue. Same tolerances as the alpha probe.
+  const blended = ([r, g, b]) => g > 150 && r > 70 && r < 190 && b > 70 && b < 190;
+  const green = ([r, g, b]) => g > 100 && r < 40 && b < 40;
+  return blended(at(0, 50, 50)) && green(at(0, 150, 50))
+    && green(at(1, 50, 50)) && blended(at(1, 150, 50))
+    // Edges: frame 1 has the square at x 100..199.
+    && green(at(1, 98, 50)) && blended(at(1, 101, 50))
+    && blended(at(1, 198, 50)) && green(at(1, 201, 50));
+}
+
+/**
  * Which filtergraph shape can composite subtitles onto pillarboxed video.
  *
  * Two graph shapes were shipped for this on reasoning alone and both failed

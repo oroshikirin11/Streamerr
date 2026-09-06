@@ -136,6 +136,19 @@ const DEFAULTS = {
      * and says so, because dead air is worse than a substitution.
      */
     tonemap: 'auto',   // auto | vaapi | cpu | none
+    /**
+     * Where subtitles, captions, pictures and censor boxes are blended
+     * into a GPU-decoded frame.
+     *
+     * 'auto' (and 'cpu') draws on the CPU at output size between the GPU's
+     * scale/tone map and the GPU encoder: the frame comes down once, the
+     * blend touches only the pixels it changes, and it goes back up.
+     * 'gpu' keeps the overlay_vaapi composite, a full-frame render-kernel
+     * pass that measured at half the frame rate of a 4K HDR title on an
+     * N100 (see the CPU composite in pipeline.js). The engine falls back
+     * to 'gpu' by itself when a CPU-composite spawn fails on a driver.
+     */
+    subComposite: 'auto',   // auto | cpu | gpu
     // Decode on the GPU. Whether this helps depends entirely on the machine
     // and the source: it is a large win for 10-bit HEVC on a weak CPU, and a
     // loss for 8-bit H.264 on a strong one, because the GPU-to-CPU transfer

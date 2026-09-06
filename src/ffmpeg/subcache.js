@@ -59,14 +59,41 @@ const EXT_FOR = {
   ass: 'ass', ssa: 'ass',
   subrip: 'srt', srt: 'srt', text: 'srt',
   mov_text: 'srt', webvtt: 'vtt',
+  /**
+   * Bitmap tracks go into a Matroska SIDECAR, bytes untouched. Not for the
+   * duplicate read a text track pays — sub2video already decodes them from
+   * the main input — but because of what that decode costs on air: ffmpeg
+   * re-sends the subtitle frame on EVERY packet read from the file (any
+   * stream), and even gated to twelve a second each is a 4K RGBA frame to
+   * scale before the canvas can be uploaded. Ghost in the Shell measured
+   * 0.70x with that against 1.23x bare on the N100. From a sidecar that
+   * carries only the track and a tiny heartbeat stream, frames arrive when
+   * a cue changes and a few times a second between, and the scale is
+   * paid a couple of times per cue instead of twelve times per second.
+   */
+  hdmv_pgs_subtitle: 'mks', dvd_subtitle: 'mks',
 };
 
 /** File extension → the ffmpeg muxer name, which is not always the same. */
-const MUXER_FOR = { ass: 'ass', srt: 'srt', vtt: 'webvtt' };
+const MUXER_FOR = { ass: 'ass', srt: 'srt', vtt: 'webvtt', mks: 'matroska' };
 
-/** Bitmap formats cannot be extracted to a text file and must stay in place. */
+/**
+ * Heartbeats a bitmap sidecar carries, in packets per second: what bounds
+ * how late a cue's END lands when the file has no explicit clear and how
+ * long a fresh spawn waits for its first subtitle frame. PGS discs clear
+ * every cue with an empty display set, so a few beats a second suffice;
+ * DVD subs end by duration alone and keep the canvas interval.
+ */
+const HEARTBEATS = { hdmv_pgs_subtitle: 4, dvd_subtitle: 12 };
+
+/** An embedded track the engine pulls out to a file before it plays. */
 export function isExtractable(sub) {
-  return Boolean(sub && !sub.external && !sub.bitmap && EXT_FOR[sub.codec]);
+  return Boolean(sub && !sub.external && EXT_FOR[sub.codec]);
+}
+
+/** Does this track come out as a sidecar the graph reads as its own input? */
+export function isSidecar(sub) {
+  return Boolean(sub && EXT_FOR[sub.codec] === 'mks');
 }
 
 /** http(s) sources — the SMB bridge, or any future remote library. */
@@ -126,10 +153,18 @@ export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null,
     timeout = Math.min(3_600_000,
       Math.max(600_000, (statSync(srcPath).size / 30e6) * 1000 + 120_000));
   } catch { /* keep the default */ }
+  const hb = HEARTBEATS[sub.codec];
   const ok = await run([
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-i', srcPath,
+    // The heartbeat: a 16x16 clip at a few frames a second, a few dozen
+    // bytes a packet. Its packets are what make sub2video re-send the
+    // current subtitle frame — without any other stream in the file a
+    // cue that ends by duration would never be taken down.
+    ...(ext === 'mks' ? ['-f', 'lavfi', '-i', `color=c=black:s=16x16:r=${hb},format=yuv420p`] : []),
     '-map', `0:s:${sub.typeIndex}`,
+    ...(ext === 'mks' ? ['-map', '1:v', '-c:v', 'libx264', '-preset', 'ultrafast',
+      '-qp', '40', '-g', '600', '-shortest'] : []),
     // Copy where possible; ffmpeg converts when the target format differs.
     '-c:s', ext === 'srt' ? 'srt' : 'copy',
     // The format must be explicit: the temp name ends in .partial, so ffmpeg

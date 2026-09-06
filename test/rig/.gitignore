@@ -4,3 +4,8 @@ fixtures/*.ass
 *.log
 arrival.log
 cache/
+fixtures/*.png
+fixtures/*.sup
+*.out
+pics-*.log
+pgs-*.log

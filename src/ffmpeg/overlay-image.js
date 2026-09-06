@@ -478,6 +478,101 @@ export function canvasImageChain(images, opts = {}) {
   const r = imageOverlayChain(images, opts);
   if (!r.filters.length) return r;
   const last = r.filters.length - 1;
-  r.filters[last] = r.filters[last].replace(/\[(\w+)\]$/, ',format=rgba[$1]');
+  const fmt = opts.format ?? 'rgba';
+  r.filters[last] = r.filters[last].replace(/\[(\w+)\]$/, `,format=${fmt}[$1]`);
   return r;
 }
+
+/**
+ * A moving picture composited by the GPU from a surface uploaded ONCE.
+ *
+ * The bounce used to be drawn on the CPU canvas, and the canvas was the
+ * cost: a 1920x1038 RGBA frame is 8 MB, and on the N100 every canvas
+ * frame handed to the driver measured ~17-20 ms of the graph thread —
+ * whatever was drawn on it. One bouncing logo took a 4K HDR title from
+ * 1.27x to 0.83x; four of them to 0.77x. A still through overlay_vaapi
+ * cost nothing measurable (1.32x), because its surface goes up once and
+ * the composite pass itself is cheap. So a moving picture must become a
+ * still that the GPU merely reads from a different place each frame.
+ *
+ * overlay_vaapi resolves its x/y once, so the motion cannot be expressed
+ * there. It CAN be expressed as cropping: `crop` on a hardware frame
+ * writes crop offsets into the frame's metadata (no pixels touched, no
+ * copy), and the next VAAPI filter reads its input region from exactly
+ * those fields. So the picture is padded, on the CPU, into a transparent
+ * stage twice the frame less the picture, uploaded once and looped as
+ * references; per frame a crop of frame size slides over it with the
+ * bounce expression, a VAAPI scale pass renders that window into a fresh
+ * frame-sized surface (a pass, never a copy through the CPU), and the
+ * result composites onto the video like any still.
+ *
+ * The trajectory is the software builder's, term for term: with the stage
+ * `iw` wide and the picture `pw`, the crop's `iw-W` IS `W-pw`, the range
+ * the bounce runs over, so `x = R - abs(mod(v(t+p), 2R) - R)` places the
+ * picture exactly where `overlay` would have. Two frames a second apart
+ * differ; pixels match the CPU composite (measured, both drivers).
+ *
+ * out_range=pc on the scale is load-bearing: without any colour option
+ * scale_vaapi at an identity size passes frames through untouched — crop
+ * metadata included — and overlay_vaapi ignores the overlay's crop. For an
+ * RGBA surface the range is a no-op, so nothing changes but the bypass.
+ *
+ * The pad expressions clamp so a picture wider than the frame (a large
+ * rotated one) yields a stage no narrower than the frame; crop then
+ * clamps its own offsets. Such a picture sits still rather than breaking
+ * the graph.
+ */
+export function vaapiMovedImageChain(images, {
+  width = 1920, height = 1080, firstInput = 1, inLabel = 'in', outLabel = 'out',
+  rate = '30', phase = 0, end = null,
+} = {}) {
+  const list = (images ?? []).filter((i) => i?.path);
+  if (!list.length) return { inputs: [], filters: [], looping: false };
+  const inputs = [];
+  const filters = [];
+  let cur = inLabel;
+  const esc = (s) => s.replace(/,/g, '\\,');
+  list.forEach((img, i) => {
+    const idx = firstInput + i;
+    // -r gives the single frame a duration of one output frame, which is
+    // what the loop below repeats it at — the layer input does the same.
+    inputs.push('-r', String(rate), '-i', img.path);
+    const steps = ['format=rgba'];
+    const w = Math.max(2, Math.round((Number(img.size) || 0.2) * width / 2) * 2);
+    steps.push(`scale=w=${w}:h=-2`);
+    const rot = Number(img.rotation) || 0;
+    if (rot) {
+      const rad = (rot * Math.PI / 180).toFixed(6);
+      steps.push(`rotate=${rad}:c=none:ow=rotw(${rad}):oh=roth(${rad})`);
+    }
+    const op = img.opacity;
+    if (op != null && Number(op) < 1) {
+      steps.push(`colorchannelmixer=aa=${Math.max(0, Math.min(1, Number(op))).toFixed(3)}`);
+    }
+    // Premultiplied, for the reason vaapiImageOverlayChain gives.
+    steps.push('premultiply=inplace=1', 'format=rgba');
+    steps.push(esc(`pad=w=max(2*${width}-iw,${width}):h=max(2*${height}-ih,${height})`
+      + `:x=max(0,${width}-iw):y=max(0,${height}-ih):color=black@0.0`));
+    steps.push('hwupload', 'loop=loop=-1:size=1:start=0', `setpts=N/(${rate})/TB`);
+    if (end != null && end > 0) steps.push(`trim=end=${Number(end).toFixed(3)}`);
+    const v = Math.max(1, frac(img.speed, DEFAULT_SPEED) * width);   // px/second
+    const p = (Number(phase) || 0) + i * 3.1;
+    const u = `(${v.toFixed(3)}*(t+${p.toFixed(3)}))`;
+    const rx = `max(1,iw-${width})`;
+    const ry = `max(1,ih-${height})`;
+    const cx = `floor(${rx}-abs(mod(${u},2*${rx})-${rx}))`;
+    const cy = `floor(${ry}-abs(mod(${u},2*${ry})-${ry}))`;
+    steps.push(esc(`crop=w=${width}:h=${height}:x=${cx}:y=${cy}`));
+    steps.push(`scale_vaapi=w=${width}:h=${height}:out_range=pc`);
+    filters.push(`[${idx}:v]${steps.join(',')}[mv${i}]`);
+    const next = i === list.length - 1 ? outLabel : `mo${i}`;
+    filters.push(`[${cur}][mv${i}]overlay_vaapi=x=0:y=0:eof_action=repeat[${next}]`);
+    cur = next;
+  });
+  // The loop is unbounded: the caller ends the output with the clip.
+  return { inputs, filters, looping: true };
+}
+
+/** Can this picture ride the GPU-moved chain? Moving, not animated, untimed. */
+export const gpuMovable = (img) => isMoving(img) && !img?.animated
+  && img?.start == null && img?.end == null;

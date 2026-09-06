@@ -43,8 +43,8 @@ import { censorBoxes, censorStage } from './censor.js';
 import { analyseAssBand, bandScript } from './subband.js';
 import { overlayAss, fillOverlayText } from './overlay-ass.js';
 import {
-  imageOverlayChain, vaapiImageOverlayChain, canvasImageChain,
-  splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
+  imageOverlayChain, vaapiImageOverlayChain, canvasImageChain, vaapiMovedImageChain,
+  gpuMovable, splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
 } from './overlay-image.js';
 import { publishOutputArgs, targetUrl, SECRET_FIELDS } from '../publish.js';
 import { TcpBridge } from './tcp-bridge.js';
@@ -4329,7 +4329,9 @@ export class PipelinePlayout extends EventEmitter {
        * still lands in cacheDir, so nothing downstream can tell the
        * difference between this and an extracted one.
        */
-      subBand: this._subtitleBand(
+      // A bitmap track's extracted copy is a Matroska sidecar, not a
+      // script; the band analyser reads scripts.
+      subBand: this.selection?.subtitle?.bitmap ? null : this._subtitleBand(
         this.selection?.subtitle?.external
           ? this.selection.subtitle.path ?? null
           : cached?.path ?? null,
@@ -4722,8 +4724,12 @@ export class PipelinePlayout extends EventEmitter {
       const halfRate = !all.some((i) => i?.motion === 'bounce'
         || /\.gif$/i.test(i?.file ?? ''));
       if (sub && !sub.bitmap) {
-        out.push(`canvas ${rect.w}x${h} RGBA at ${halfRate ? 'half' : 'FULL'} frame rate`
-          + `, uploaded and blended every frame`);
+        const gated = /mpdecimate=hi=0/.test(this._lastArgs ?? '');
+        out.push(`canvas ${rect.w}x${h} at ${halfRate ? 'half' : 'FULL'} frame rate`
+          + (gated ? ', uploaded only when a cue changes' : ', uploaded and blended every frame'));
+      }
+      if (/loop=loop=-1:size=1:start=0,setpts=N\/\([^)]+\)\/TB,(trim=[^,]+,)?crop=w=/.test(this._lastArgs ?? '')) {
+        out.push('moving pictures composited by the GPU from surfaces uploaded once — not the cause');
       }
       if (rect.bars) out.push('output is pillarboxed — bars cost encode time too');
     } catch { /* diagnosis must never throw on the warning path */ }
@@ -4810,7 +4816,14 @@ export class PipelinePlayout extends EventEmitter {
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
-    if (gpuComposite) return 1;
+    // The CPU composite is a GPU graph too: decode, scale, tone map and
+    // encode stay on the device and only the blend runs on the CPU, so it
+    // beats CPU workers for the same reason the GPU composite does.
+    const cpuComposite = Boolean(this.profile?.gpuFull)
+      && cpuCompositeWanted(this.profile)
+      && !this.profile?.swDecode
+      && gpuDecodable(video);
+    if (gpuComposite || cpuComposite) return 1;
 
     // Every core burns subtitles. The old rule reserved one for the
     // publisher — but the publisher is a copy remux costing a few percent
@@ -5644,6 +5657,43 @@ export class PipelinePlayout extends EventEmitter {
         }
 
         /**
+         * A moving picture the GPU was cropping per frame is given up
+         * first of all: it goes back onto the canvas, which is the graph
+         * every driver here has run, and nothing else about the clip
+         * changes. Once per broadcast, like the other driver properties.
+         */
+        if (!this._sawBlock && this.current && !this.profile?.noGpuMove
+            && /loop=loop=-1:size=1:start=0,setpts=N\/\([^)]+\)\/TB,(trim=[^,]+,)?crop=w=/
+              .test(this._lastArgs ?? '')) {
+          this._demote({ noGpuMove: true });
+          this.emit('warn', 'This driver would not move a picture on the GPU — '
+            + `drawing the moving pictures on the canvas for this broadcast. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
+        /**
+         * The CPU composite is given up first. It is the newest graph and
+         * the overlay_vaapi graphs behind it are the proven ones on every
+         * driver this has run on, so a spawn that dies drawing on the CPU
+         * between GPU decode and GPU encode retries on the GPU composite
+         * before any other demotion is spent. Once per broadcast: whether
+         * the driver will hand frames down and take them back is a
+         * property of the driver, not of the clip.
+         */
+        if (!this._sawBlock && this.current && !this.profile?.noCpuComposite
+            && /-hwaccel vaapi/.test(this._lastArgs ?? '')
+            && /hwdownload,format=(nv12|p010le)/.test(this._lastArgs ?? '')) {
+          this._demote({ noCpuComposite: true });
+          this.emit('warn', 'This driver would not draw on the CPU between GPU decode '
+            + `and GPU encode — compositing on the GPU for this broadcast. (${tail})`);
+          this._play(this.current.item, this.position,
+            { duration: this.current.duration });
+          return;
+        }
+
+        /**
          * Tone mapping is demoted before anything else, because on an HDR
          * source it is the likeliest thing to have killed the clip and the
          * cheapest to give up — the CPU route produces the same picture.
@@ -5860,10 +5910,16 @@ export class PipelinePlayout extends EventEmitter {
     // noIdentitySkip is kept for the same reason: whether the encoder will
     // take the decoder's surfaces is a property of the driver, not of the
     // clip, so re-arming buys one dead spawn per episode to relearn it.
+    // noCpuComposite and noGpuMove likewise: a driver that would not hand
+    // frames down and take them back, or would not crop a looped surface
+    // per frame, will not on the next clip either.
     const keep = this._demoted.noGpuImages || this._demoted.noIdentitySkip
+      || this._demoted.noCpuComposite || this._demoted.noGpuMove
       ? {
         ...(this._demoted.noGpuImages ? { noGpuImages: true } : null),
         ...(this._demoted.noIdentitySkip ? { noIdentitySkip: true } : null),
+        ...(this._demoted.noCpuComposite ? { noCpuComposite: true } : null),
+        ...(this._demoted.noGpuMove ? { noGpuMove: true } : null),
       }
       : null;
     this._demoted = keep;
@@ -6067,6 +6123,18 @@ const item = (self) => self.current?.item?.title ?? 'clip';
  * with keyframes a live receiver can cut on (or HDR, which has no cheap
  * alternative — see the gate in buildSourceArgs for both rationales).
  */
+/**
+ * Does this profile draw on the CPU between GPU decode and GPU encode?
+ *
+ * 'auto' (the default) and 'cpu' do; 'gpu' keeps the overlay_vaapi graphs,
+ * as does the demotion a failed CPU-composite spawn writes. The legacy
+ * experiment values ('vaapi-rgba', 'vaapi-vuya') read as 'gpu'.
+ */
+export function cpuCompositeWanted(profile) {
+  if (!profile || profile.noCpuComposite) return false;
+  return String(profile.subComposite ?? 'auto') === 'cpu';
+}
+
 export function passthroughEligible({
   profile, selection, sub = null, overlayImages = [], overlayAnimated = false,
   censors = null, srcKbps = null,
@@ -6124,9 +6192,22 @@ export function buildSourceArgs({
    * frame — measured moving, two frames a second apart differ. It costs
    * that clip the CPU composite, which is the honest price of the effect.
    */
-  const gpuImages = imgList.length > 0
+  /**
+   * ...unless the driver moves it for us. A bouncing picture becomes a
+   * still on a wide stage that the GPU crops differently per frame (see
+   * vaapiMovedImageChain): uploaded once, composited like a still, and the
+   * canvas is never asked to carry it. Probed at go-live (gpuMove) and
+   * demoted by doing (noGpuMove); pillarboxed clips keep the canvas, whose
+   * composite shapes were measured per driver and are not reopened here.
+   */
+  const rectAll = contentRect(selection?.video, profile);
+  const canMove = Boolean(profile.gpuMove) && Boolean(profile.gpuSubs)
+    && !profile.noGpuImages && !profile.noGpuMove && !rectAll.bars;
+  const moverImgs = canMove ? imgList.filter(gpuMovable) : [];
+  const stillImgs = imgList.filter((i) => !moverImgs.includes(i));
+  const gpuImages = stillImgs.length > 0
     && Boolean(profile.gpuSubs) && !profile.noGpuImages
-    && !imgList.some(isMoving);
+    && !stillImgs.some(isMoving);
   /**
    * Pictures the software chain draws — which is all of them.
    *
@@ -6261,7 +6342,7 @@ export function buildSourceArgs({
    * canvas branch below needs subtitles to exist, so a bouncing picture on
    * a subtitle-free clip disappeared with nothing logged.
    */
-  const imagesNeedPerFrame = imgList.some((i) => isMoving(i) || i?.animated);
+  const imagesNeedPerFrame = stillImgs.some((i) => isMoving(i) || i?.animated);
   /**
    * Deinterlacing, at last — there was NONE anywhere before this. 'auto'
    * trusts the probe's field_order (interlaced sources comb without it);
@@ -6296,6 +6377,182 @@ export function buildSourceArgs({
    */
   const hdrPass = Boolean(profile.hdrOut) && Boolean(selection?.video?.hdr)
     && imgList.length === 0 && censors.length === 0;
+
+  /**
+   * THE CPU COMPOSITE — decode, scale and tone map on the GPU, draw on
+   * the CPU at output size, encode on the GPU.
+   *
+   * Everything drawn used to reach the picture through overlay_vaapi: a
+   * transparent canvas built on the CPU, uploaded, and blended by the
+   * driver. On Intel's iHD that blend is not a fixed-function pass — it is
+   * a render kernel on the execution units, and the N100 has 24 of them at
+   * a 6 W budget shared with the decoder and encoder. Measured on that box
+   * (6 Sep 2026, seek-pinned): a 4K HDR title runs 1.3-1.4x with decode,
+   * scale, tone map and VDENC and no composite; the same chain with ONE
+   * overlay_vaapi pass runs 0.7x, and it costs the same whether the
+   * overlay is a 384px logo or the whole frame, because the kernel walks
+   * every output block regardless. Backrooms with four bouncing pictures:
+   * 0.77x with the source ffmpeg at a third of one core — the GPU was the
+   * wall, the CPU was idle.
+   *
+   * So the picture leaves the GPU for one moment: the finished 8-bit frame
+   * at output size (3 MB) is downloaded, the CPU draws exactly what the
+   * software chain has always drawn — libass into the frame, the bitmap
+   * subtitle frames, the studio's pictures on their own coordinates, the
+   * censor boxes — and the frame is uploaded again for the encoder. The
+   * fixed-function stages stay where they are; only the blend moves, and
+   * the CPU blend touches the pixels it changes rather than the frame.
+   * Measured on a desktop core: the whole draw is under a millisecond a
+   * frame for four moving pictures or a dense subtitle track, roughly 3 ms
+   * on an E-core, against the ~30 ms the GPU pass costs there.
+   *
+   * What it does NOT change: which pixels come out. The subtitle canvas is
+   * still rendered at the content rectangle at the same rate it was (half
+   * rate for text, every frame for a moving caption), bitmap subtitles are
+   * scaled exactly as before, and pictures are placed with the same
+   * expressions at the same size. Stills go under the subtitles and the
+   * live pictures over them, which is the order the canvas kept.
+   *
+   * Opt-in (`encoder.subComposite: 'cpu'`), not the default. The same
+   * measurements that found the composite pass free found the TRANSFER to
+   * be the cost — every byte crossing between CPU and GPU — and this graph
+   * moves 6 MB a frame (the 8-bit frame down and up) where the canvas
+   * graphs, once their uploads happen only on change, move almost none.
+   * It stays as the measurable alternative for a box where a frame
+   * download is cheap. A failed spawn on it demotes to the GPU composite
+   * (noCpuComposite); clips the GPU cannot decode take the software chain.
+   */
+  const hwDecOk = gpuDecodable(selection?.video) && !profile.swDecode;
+  const mustDraw = Boolean(sub.filter || sub.needsComplex || sub.canvasInput
+    || sub.canvasFilter || imgList.length || censors.length);
+  const cpuComposite = cpuCompositeWanted(profile);
+  if (profile.gpuFull && profile.backend === 'vaapi' && hwDecOk && cpuComposite && mustDraw) {
+    const rect = contentRect(selection?.video, profile);
+    const eff = effAll;
+    const shift = Number(offset).toFixed(3);
+    const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
+    const hdr = Boolean(selection?.video?.hdr);
+    // The GPU half: fields intact into the deinterlacer, then the scale to
+    // the content rectangle with the tone map riding it where the driver
+    // has one. A driver without a tone mapper scales on the GPU and maps
+    // on the CPU after the download — one download either way, where the
+    // old graph downloaded, mapped, uploaded and then composited.
+    let front;
+    let down;
+    if (hdr && (profile.tonemap ?? 'vaapi') === 'cpu') {
+      front = `${gpuDeint}scale_vaapi=w=${rect.w}:h=${rect.h}${smode}`;
+      down = `hwdownload,format=p010le,${cpuTonemap(profile.tonemapCurve)},format=yuv420p`;
+    } else {
+      const scalePart = scaleIsIdentity(selection?.video, profile, rect) ? 'null'
+        : scaleAndTonemap(selection?.video, profile, rect, smode);
+      front = `${gpuDeint}${scalePart}`;
+      // yuv420p, explicitly: overlay's `auto` would pick RGB for an NV12
+      // main and convert the whole frame both ways.
+      down = 'hwdownload,format=nv12,format=yuv420p';
+    }
+    const canvasCap = duration != null && duration > 0
+      ? ['-t', (Math.max(1, duration - offset) + 5).toFixed(3)]
+      : [];
+    const parts = [`[0:v]${front}[b]`, `[b]${down}[f0]`];
+    const inputs = [];
+    let nextIn = 1;
+    let cur = 'f0';
+    let n = 0;
+    let looping = false;
+    const step = (frag) => {
+      const out = `f${n + 1}`;
+      parts.push(frag(cur, out));
+      cur = out;
+      n += 1;
+    };
+    // Boxes on the base picture, under everything, at rect coordinates —
+    // the frame has not been padded yet.
+    if (censors.length) {
+      step((i, o) => censorStage(censors, {
+        width: profile.width, height: profile.height, stage: rect,
+        inLabel: i, outLabel: o, gpu: false,
+      }));
+    }
+    const pictures = (imgs) => {
+      if (!imgs.length) return;
+      const c = imageOverlayChain(imgs, {
+        width: rect.w, firstInput: nextIn, inLabel: cur, outLabel: `f${n + 1}`,
+        phase: offset,
+      });
+      inputs.push(...c.inputs);
+      nextIn += imgs.length;
+      parts.push(...c.filters);
+      cur = `f${n + 1}`;
+      n += 1;
+      looping = looping || c.looping;
+    };
+    const { baked: stills, live } = splitStaticImages(imgList);
+    pictures(stills);
+    // The text layer: subtitles and captions rendered by libass into a
+    // transparent canvas at the content rectangle, at the canvas rate the
+    // GPU graph used, blended at its origin (or at the band's row).
+    const band = subBand && !sub.canvasInput
+      && subBand.rect.w === rect.w && subBand.rect.h === rect.h ? subBand : null;
+    const textFilter = band ? `${band.filter}:alpha=1`
+      : (sub.canvasFilter ?? sub.canvasOverlay ?? null);
+    const canvasRate = (!overlayAnimated && halfRate(eff.rate)) || eff.rate;
+    if (textFilter) {
+      const canvasH = band ? band.height : rect.h;
+      inputs.push('-f', 'lavfi', ...canvasCap, '-i',
+        `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=rgba`);
+      const ci = nextIn;
+      nextIn += 1;
+      parts.push(`[${ci}:v]setpts=PTS+${shift}/TB,${textFilter},setpts=PTS-STARTPTS,format=rgba[tx]`);
+      step((i, o) => `[${i}][tx]overlay=x=0:y=${band ? band.y : 0}`
+        + `:eof_action=repeat:format=yuv420[${o}]`);
+    }
+    // Bitmap subtitles: the decoded frames, gated to the canvas interval
+    // (sub2video re-sends them per packet read) and scaled to the rect.
+    if (sub.canvasInput) {
+      const interval = (() => {
+        const [a, b = 1] = String(canvasRate).split('/').map(Number);
+        return (b / a).toFixed(4);
+      })();
+      let subSrc = sub.canvasInput;
+      if (sub.sidecar) {
+        subSrc = `${nextIn}:s:0`;
+        nextIn += 1;
+        inputs.push(...(offset > 0 ? ['-ss', shift] : []), '-i', sub.sidecar);
+      }
+      // Gated only from the media file (see the canvas graph).
+      const gate = sub.sidecar ? '' : `select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${interval}),`;
+      parts.push(`[${subSrc}]${gate}`
+        + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf]`);
+      step((i, o) => `[${i}][sf]overlay=eof_action=pass:format=yuv420[${o}]`);
+    }
+    pictures(live);
+    const padPart = rect.bars
+      ? `pad=${profile.width}:${profile.height}:${rect.x}:${rect.y}:color=black,` : '';
+    parts.push(`[${cur}]${padPart}format=nv12,hwupload[v]`);
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
+      '-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi', '-hwaccel_device', 'va',
+      '-extra_hw_frames', '8',
+      ...(offset > 0 ? ['-ss', shift] : []),
+      '-i', srcPath,
+      ...inputs,
+      '-filter_complex', parts.join(';'),
+      '-map', '[v]', '-map', `0:a:${audioIdx}?`,
+      // A looping animation or an uncapped canvas is an infinite input;
+      // the output has to end with the clip.
+      ...(looping || (textFilter && !canvasCap.length) ? ['-shortest'] : []),
+      ...be.encoderArgs({ ...profile, fps: eff.fps }),
+      '-async_depth', '4',
+      ...audioArgs(profile),
+      '-r', eff.rate, '-fps_mode', 'cfr',
+      '-output_ts_offset', Number(tsOffset).toFixed(3),
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', tsFlags,
+      '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+      '-f', 'mpegts', 'pipe:1',
+    ];
+  }
+
   if (profile.gpuFull && !sub.filter && !sub.needsComplex && !imagesNeedPerFrame) {
     const rect = contentRect(selection?.video, profile);
     const smode = (selection?.video?.width ?? 0) >= rect.w * 1.5 ? ':mode=fast' : '';
@@ -6315,9 +6572,21 @@ export function buildSourceArgs({
     // video. One overlay_vaapi — the same count as the subtitle path the
     // device already runs — and nothing per-frame on the CPU. This is the
     // cheapest the feature can be.
-    const gpuImgs = vaapiImageOverlayChain(gpuImages ? imgList : [], {
-      width: profile.width, height: profile.height, firstInput: 1, inLabel: 'b', outLabel: 'v',
+    const stills = gpuImages ? stillImgs : [];
+    const gpuImgs = vaapiImageOverlayChain(stills, {
+      width: profile.width, height: profile.height, firstInput: 1, inLabel: 'b',
+      outLabel: moverImgs.length ? 'vs' : 'v',
     });
+    // Moving pictures after the stills, over them, from surfaces uploaded
+    // once — the fixed-function path keeps its name: nothing per frame on
+    // the CPU, and no canvas.
+    const movers = vaapiMovedImageChain(moverImgs, {
+      width: profile.width, height: profile.height, firstInput: 1 + stills.length,
+      inLabel: gpuImgs.filters.length ? 'vs' : 'b', outLabel: 'v',
+      rate: effAll.rate, phase: offset,
+      end: duration != null && duration > 0 ? Math.max(1, duration - offset) + 5 : null,
+    });
+    const drawn = gpuImgs.filters.length || movers.filters.length;
     // Boxes go on the base picture before any picture overlay. This chain
     // has already padded to the frame, so they sit in frame coordinates. A
     // -vf chain cannot split, so a box forces the filter_complex form even
@@ -6325,7 +6594,7 @@ export function buildSourceArgs({
     const censorGraph = censors.length
       ? censorStage(censors, {
         width: profile.width, height: profile.height,
-        inLabel: 'b0', outLabel: gpuImgs.filters.length ? 'b' : 'v', gpu: true,
+        inLabel: 'b0', outLabel: drawn ? 'b' : 'v', gpu: true,
       })
       : '';
     return [
@@ -6338,14 +6607,16 @@ export function buildSourceArgs({
       ...(offset > 0 ? ['-ss', Number(offset).toFixed(3)] : []),
       '-i', srcPath,
       ...gpuImgs.inputs,
+      ...movers.inputs,
       // Software-decoded frames have to be handed to the GPU explicitly.
-      ...(gpuImgs.filters.length || censorGraph
+      ...(drawn || censorGraph
         ? ['-filter_complex',
           [`[0:v]${vaapiChain}[${censorGraph ? 'b0' : 'b'}]`,
-            ...(censorGraph ? [censorGraph] : []), ...gpuImgs.filters].join(';'), '-map', '[v]']
+            ...(censorGraph ? [censorGraph] : []), ...gpuImgs.filters, ...movers.filters]
+            .join(';'), '-map', '[v]']
         : ['-vf', vaapiChain, '-map', '0:v:0']),
       '-map', `0:a:${audioIdx}?`,
-      ...(gpuImgs.looping ? ['-shortest'] : []),
+      ...(gpuImgs.looping || movers.looping ? ['-shortest'] : []),
       ...be.encoderArgs(profEff),
       // The PQ tags travel in the bitstream; without them a correct 10-bit
       // encode still displays as washed SDR because no player is told it
@@ -6550,10 +6821,10 @@ export function buildSourceArgs({
      */
     const band = subBand && !sub.canvasInput && !canvasPad && !rect.bars
       && subBand.rect.w === rect.w && subBand.rect.h === rect.h
-      && (!imgList.length || gpuImages) ? subBand : null;
+      && (!stillImgs.length || gpuImages) ? subBand : null;
 
-    const gpuImgs = band && imgList.length
-      ? vaapiImageOverlayChain(imgList, {
+    const gpuImgs = band && stillImgs.length
+      ? vaapiImageOverlayChain(stillImgs, {
         width: rect.w, height: rect.h, firstInput: 2,
         // Pictures go UNDER the band: they composite onto the bare video and
         // hand it on, then the subtitle band lands on the result. Subtitles
@@ -6571,10 +6842,31 @@ export function buildSourceArgs({
     const layer = layerPath && existsSync(layerPath) ? layerPath : null;
     // Timed and animated pictures cannot be baked into a still, so they keep
     // the per-frame path on top of the layer.
-    const canvasImgs = band ? { inputs: [], filters: [] } : canvasImageChain(
-      layer ? splitStaticImages(imgList).live : imgList, {
+    /**
+     * What the canvas still carries: subtitles, captions, baked stills and
+     * the pictures the GPU cannot take on its own (an animated GIF, a mover
+     * on a driver that failed the crop probe). Moving pictures the GPU
+     * crops per frame are NOT here — see vaapiMovedImageChain below.
+     *
+     * A canvas whose content changes only when a cue does is built as
+     * yuva444p rather than RGBA, so that mpdecimate (which has no RGBA
+     * form) can drop every frame identical to the last one uploaded. The
+     * upload was the cost — measured ~17-20 ms per canvas frame on the N100
+     * whatever was drawn — and a dialogue track changes a few times a
+     * minute, not twelve times a second. 4:4:4 keeps every pixel; the YUV
+     * round trip of libass's ink measured at most one code value on 5% of
+     * painted pixels against the RGBA canvas. Only the frames that pass
+     * are converted back to RGBA for the upload. A canvas that changes
+     * every frame (animated caption, GIF, a canvas-drawn mover) stays RGBA
+     * and skips the compare, exactly as before.
+     */
+    const canvasList = band ? [] : (layer ? splitStaticImages(stillImgs).live : stillImgs);
+    const perFrameImgs = canvasList.some((i) => i?.animated || isMoving(i));
+    const perFrame = overlayAnimated || perFrameImgs;
+    const canvasFmt = perFrame ? 'rgba' : 'yuva444p';
+    const canvasImgs = canvasImageChain(canvasList, {
         width: rect.w, firstInput: bgInput.length ? 3 : 2,
-        inLabel: 'sub', outLabel: 'cv',
+        inLabel: 'sub', outLabel: 'cv', format: canvasFmt,
         // Motion follows the MEDIA timeline, not this spawn's. `t` restarts
         // at zero every time the source restarts, so without this a bouncing
         // picture would jump back to its starting corner on every Apply,
@@ -6615,14 +6907,12 @@ export function buildSourceArgs({
      * already accepted for subtitle cues. An animated GIF and a moving
      * picture are the two that genuinely change.
      */
-    const perFrameImgs = imgList.some((i) => i?.animated || isMoving(i));
     // A moving caption lives in the ASS script rather than in imgList, so it
     // has to be asked about separately — it is drawn onto this same canvas
     // and is just as stepped at half rate.
-    const perFrame = overlayAnimated || (canvasImgs.filters.length && perFrameImgs);
     const canvasRate = (!perFrame && halfRate(eff.rate)) || eff.rate;
     const layerSrc = layer
-      ? `[1:v]loop=loop=-1:size=1:start=0,setpts=N/(${canvasRate})/TB,`
+      ? `[1:v]format=${canvasFmt},loop=loop=-1:size=1:start=0,setpts=N/(${canvasRate})/TB,`
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
       : '[1:v]';
     const canvasH = band ? band.height : rect.h;
@@ -6644,24 +6934,42 @@ export function buildSourceArgs({
       const [n, d = 1] = String(canvasRate).split('/').map(Number);
       return (d / n).toFixed(4);
     })();
+    // A bitmap track's frames come from its sidecar when one is extracted
+    // — the last input, after every picture — and from the main input
+    // until then (see buildSubtitleFilter). Index counted the same way the
+    // picture inputs are, so it cannot drift from them.
+    const sidecarIdx = 2 + (bgInput.length ? 1 : 0) + canvasList.length
+      + (gpuImgs.filters.length ? stillImgs.length : 0) + moverImgs.length;
+    const subSrc = sub.sidecar ? `${sidecarIdx}:s:0` : sub.canvasInput;
+    // The gate exists for the media file's thousands of heartbeats a
+    // second. A sidecar beats a few times a second, and the gate would
+    // do harm there: a cue change lands at the same pts as the beat that
+    // re-sent the old frame, loses the toss, and only shows at the next
+    // beat. Ungated, the change is the last frame at its pts and lands
+    // on the frame it belongs to.
+    const subGate = sub.sidecar ? ''
+      : `select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`;
     const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
-        + `setpts=PTS-STARTPTS,format=rgba[c0];`
-        + `[${sub.canvasInput}]select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`
+        + `setpts=PTS-STARTPTS,format=${canvasFmt}[c0];`
+        + `[${subSrc}]${subGate}`
         + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
-        + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
+        + `[c0][sf]overlay=eof_action=pass:format=${perFrame ? 'auto' : 'yuv444'},format=${canvasFmt}`
       : (band || sub.canvasFilter)
         ? `${layerSrc}setpts=PTS+${shift}/TB,`
           + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
-          + 'setpts=PTS-STARTPTS,format=rgba'
+          + `setpts=PTS-STARTPTS,format=${canvasFmt}`
         // Pictures alone: a transparent canvas, the pictures drawn below.
-        : `${layerSrc}setpts=PTS-STARTPTS,format=rgba`;
+        : `${layerSrc}setpts=PTS-STARTPTS,format=${canvasFmt}`;
+    // The gate: a frame identical to the last one uploaded never reaches
+    // the driver; overlay_vaapi keeps compositing the one it already has.
+    const gate = perFrame ? '' : 'mpdecimate=hi=0:lo=0:frac=1,';
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to
-      // stay RGBA to the upload or the composite becomes an opaque box.
+      // reach the upload as RGBA or the composite becomes an opaque box.
       ? `${canvasHead}[sub];${canvasImgs.filters.join(';')};`
-        + `[cv]null${canvasPad},hwupload[ov];`
-      : `${canvasHead}${canvasPad},hwupload[ov];`;
+        + `[cv]${gate}null${canvasPad},format=rgba,hwupload[ov];`
+      : `${canvasHead},${gate}null${canvasPad},format=rgba,hwupload[ov];`;
     // A band is a shorter surface than the frame, so it has to be told where
     // to land. Reachable only when there are no bars, which is the one case
     // whose composite is a bare overlay_vaapi. Pictures, when there are any,
@@ -6673,6 +6981,19 @@ export function buildSourceArgs({
         ? `${gpuImgs.filters.join(';')};[vb][ov]overlay_vaapi=x=0:y=${band.y}[v]`
         : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
       : composite;
+    // Moving pictures over the composite, from surfaces uploaded once —
+    // over the subtitles, which is where the canvas kept them. Only on the
+    // plain shape (no bars), so the composite always ends in [v] here.
+    const movers = vaapiMovedImageChain(moverImgs, {
+      width: rect.w, height: rect.h,
+      firstInput: 2 + (bgInput.length ? 1 : 0) + canvasList.length
+        + (gpuImgs.filters.length ? stillImgs.length : 0),
+      inLabel: 'vc', outLabel: 'v', rate: eff.rate, phase: offset,
+      end: duration != null && duration > 0 ? Math.max(1, duration - offset) + 5 : null,
+    });
+    const composited = movers.filters.length
+      ? `${bandComposite.replace(/\[v\]$/, '[vc]')};${movers.filters.join(';')}`
+      : bandComposite;
     // Boxes sit on the base picture, under the canvas. A chain that pads
     // has already placed the picture in the frame; one that has not is
     // still the bare content rect, so the boxes shift by its origin and
@@ -6687,7 +7008,7 @@ export function buildSourceArgs({
     const graph = `${canvasChain}`
       + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[${censorGraph ? 'b0' : 'b'}];`
       + (censorGraph ? `${censorGraph};` : '')
-      + `${bandComposite}`;
+      + `${composited}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
       '-init_hw_device', `vaapi=va:${profile.device}`, '-filter_hw_device', 'va',
@@ -6705,14 +7026,18 @@ export function buildSourceArgs({
       ...(layer
         ? ['-r', canvasRate, '-i', layer]
         : ['-f', 'lavfi', ...canvasCap,
-          '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=rgba`]),
+          '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=${canvasFmt}`]),
       ...bgInput,
       // Mutually exclusive: a banded canvas has no pictures drawn into it,
       // and an unbanded one composites none on the GPU. Either way the first
       // picture input lands at index 2, which is what both chains were
-      // numbered against.
+      // numbered against. The GPU-moved pictures come after whichever.
       ...canvasImgs.inputs,
       ...gpuImgs.inputs,
+      ...movers.inputs,
+      // The sidecar seeks with the clip, so its frames line up with the
+      // main input's rebased timestamps.
+      ...(sub.sidecar ? [...(offset > 0 ? ['-ss', shift] : []), '-i', sub.sidecar] : []),
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),

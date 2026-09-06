@@ -59,3 +59,12 @@ for f in hevcsub-e1 longgop; do
   ffprobe -v error -select_streams v -show_entries packet=pts_time,flags -of csv=p=0 "$f.mkv" \
     | awk -F, '$2 ~ /K/ {print $1}' | sort -n | awk 'NR>1{printf "%.2f ", $1-p} {p=$1}' | cut -c1-60; echo
 done
+
+# fixture-pgs: the HEVC fixture with a synthetic PGS track (make-pgs.py) as
+# its only subtitle. -itsoffset keeps the first cue at 1 s: ffmpeg rebases a
+# secondary input to start at 0, and a cue at exactly 0 races sub2video's
+# initial blank frame — a pathology no real disc has.
+python3 ../make-pgs.py synth.sup 1280 720 >/dev/null
+ffmpeg -hide_banner -loglevel error -y -i hevcsub-e1.mkv -itsoffset 1 -i synth.sup \
+  -map 0:v -map 0:a -map 1:s -c copy -metadata:s:s:0 language=eng fixture-pgs.mkv
+echo "  fixture-pgs.mkv $(du -h fixture-pgs.mkv | cut -f1)"
