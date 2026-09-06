@@ -4766,6 +4766,20 @@ export class PipelinePlayout extends EventEmitter {
     const sub = this.selection?.subtitle;
     if (!sub) return 1;
 
+    // Per-frame studio drawing — a bouncing picture, an animated GIF, a
+    // moving caption — is paid by EVERY worker on every frame, so it
+    // does not parallelise: measured on the N100 with a PGS subtitle,
+    // four workers under four bouncing pictures ran 0.67x while one
+    // process ran 0.75x, and every studio apply also restarts the
+    // scheduler from an empty cache. One process, and the buffer it can
+    // hold, beats that. Still pictures are baked into one layer and cost
+    // nothing per frame, so they do not count.
+    const items = this.profile?.overlay ?? [];
+    const perFrame = items.some((i) => i?.enabled !== false
+      && ((i?.type === 'image' && (i.motion === 'bounce' || /\.gif$/i.test(String(i.file ?? ''))))
+        || (i?.type === 'text' && i.motion === 'bounce')));
+    if (perFrame) return 1;
+
     // Exactly the conditions buildSourceArgs uses to pick the GPU
     // composite. If it is available, it beats any number of CPU workers.
     //

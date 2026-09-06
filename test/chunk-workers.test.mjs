@@ -55,3 +55,13 @@ test('the chunker takes a shorter opener when asked', () => {
   assert.ok(Math.abs(mk(3)._firstSize() - 3) < 0.05);
   assert.equal(mk(3)._rampCount(), 7);
 });
+
+test('a moving picture keeps a bitmap-subtitled clip on one process', () => {
+  const pgs = { codec: 'hdmv_pgs_subtitle', bitmap: true, text: false };
+  const bounce = [{ type: 'image', enabled: true, file: 'logo.png', motion: 'bounce' }];
+  const still = [{ type: 'image', enabled: true, file: 'logo.png', motion: 'none' }];
+  const off = [{ type: 'image', enabled: false, file: 'logo.png', motion: 'bounce' }];
+  assert.equal(workers(pgs, { overlay: bounce }), 1);
+  assert.equal(workers(pgs, { overlay: still }), Math.max(1, availableCores()));
+  assert.equal(workers(pgs, { overlay: off }), Math.max(1, availableCores()));
+});
