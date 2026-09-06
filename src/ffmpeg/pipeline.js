@@ -6635,25 +6635,30 @@ export function buildSourceArgs({
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
       : '[1:v]';
     const canvasH = band ? band.height : rect.h;
-    // A bitmap track never touches the CPU canvas: sub2video hands the
-    // decoded subtitle as a full-size RGBA frame of the SOURCE's size, and
-    // scaling a 4K one on the CPU measured three N100 cores (0.08x on
-    // Ghost in the Shell) — measured here too: 0.9 core per second of
-    // content for the CPU scale against 0.02 for an upload. So the frames
-    // go up as they are: hwupload is one copy, scale_vaapi and
-    // overlay_vaapi do the rest, as a pass before the studio composite
-    // (subPassChain). No fps gate in front: the duplicates frame sync
-    // drops cost nothing, and a rate filter on a sparse stream is how a
-    // graph ends up never finishing. The canvas then carries only the
-    // studio: the caption by libass in clip time, and the pictures.
-    const subGpu = Boolean(sub.canvasInput);
-    const subPassChain = subGpu
-      ? `[${sub.canvasInput}]hwupload,scale_vaapi=w=${rect.w}:h=${rect.h}[sf];`
-        + '[bv][sf]overlay_vaapi[b];'
-      : '';
-    const canvasHead = subGpu
+    // A bitmap track rides the same canvas: the decoded subtitle frames
+    // are overlaid onto it on the CPU, after the caption. Two things
+    // learned the hard way sit in this chain:
+    //  - sub2video hands the subtitle as a full-size RGBA frame of the
+    //    SOURCE's size and re-sends it on every packet read from the file,
+    //    any stream. Scaling a 4K one per heartbeat cost three N100 cores
+    //    (Ghost in the Shell, two TrueHD tracks, ~2500 packets a second).
+    //    The select in front passes a frame at most once per canvas
+    //    interval; it evaluates an expression per frame and copies
+    //    nothing, unlike fps, which spun without end on this stream.
+    //  - Uploading the frames and scaling them with scale_vaapi instead
+    //    was fast on an AMD device and slow on the N100's iHD even for
+    //    1080p frames, so the subtitle never goes to the GPU unscaled;
+    //    only the finished canvas is uploaded, as for text subtitles.
+    const canvasInterval = (() => {
+      const [n, d = 1] = String(canvasRate).split('/').map(Number);
+      return (d / n).toFixed(4);
+    })();
+    const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
-        + 'setpts=PTS-STARTPTS,format=rgba'
+        + `setpts=PTS-STARTPTS,format=rgba[c0];`
+        + `[${sub.canvasInput}]select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`
+        + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
+        + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
       : `${layerSrc}setpts=PTS+${shift}/TB,`
         + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
         + 'setpts=PTS-STARTPTS,format=rgba';
@@ -6678,21 +6683,16 @@ export function buildSourceArgs({
     // has already placed the picture in the frame; one that has not is
     // still the bare content rect, so the boxes shift by its origin and
     // clip to it.
-    // Label plumbing: video -> [b0] -> censor -> [bv] -> subtitle pass
-    // -> [b] -> studio composite. Each optional stage is skipped by
-    // naming its input as its output.
-    const afterVideo = censors.length ? 'b0' : (subGpu ? 'bv' : 'b');
     const censorGraph = censors.length
       ? censorStage(censors, {
         width: profile.width, height: profile.height,
         stage: /pad_vaapi/.test(videoChain) ? null : rect,
-        inLabel: 'b0', outLabel: subGpu ? 'bv' : 'b', gpu: true,
+        inLabel: 'b0', outLabel: 'b', gpu: true,
       })
       : '';
     const graph = `${canvasChain}`
-      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[${afterVideo}];`
+      + `[0:v]${hwDec ? '' : 'format=nv12,hwupload,'}${videoChain}[${censorGraph ? 'b0' : 'b'}];`
       + (censorGraph ? `${censorGraph};` : '')
-      + subPassChain
       + `${bandComposite}`;
     return [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
