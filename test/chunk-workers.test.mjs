@@ -78,7 +78,8 @@ test('a bitmap subtitle on a GPU box takes the composite: video stays on the GPU
   const selection = { video, subtitle: { codec: 'hdmv_pgs_subtitle', bitmap: true, text: false, typeIndex: 2 } };
   const args = buildSourceArgs({ srcPath: '/x/dn.mkv', profile, selection, duration: 1400, overlayImages: [], overlayLayer: () => null }).join(' ');
   assert.ok(args.includes('-hwaccel vaapi'), 'decodes on the GPU');
-  assert.ok(/\[0:s:2\]scale=1920:1080[^;]*\[sf\];\[c0\]\[sf\]overlay=eof_action=pass/.test(args), 'subtitle frames land on the canvas');
-  assert.ok(args.includes('overlay_vaapi'), 'one GPU composite');
+  assert.ok(/\[0:s:2\]hwupload,scale_vaapi=w=1920:h=1080\[sf\];\[bv\]\[sf\]overlay_vaapi\[b\];/.test(args), 'subtitle frames are uploaded, scaled and blended on the GPU');
+  assert.ok(/\[b\]\[ov\]overlay_vaapi/.test(args), 'the studio canvas composites after the subtitle pass');
+  assert.ok(!/\[0:s:2\]scale=/.test(args), 'the CPU never scales the subtitle frames');
   assert.ok(!/\[0:v:0\]\[0:s:2\]overlay/.test(args), 'never blended onto the video on the CPU');
 });
