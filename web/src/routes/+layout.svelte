@@ -511,10 +511,8 @@
       {/if}
     </div>
     {#if live && stream.relayRooms?.length}
-      <!-- A receiver room in relay mode: this broadcast is H.264 SDR for it. -->
-      <div class="relayrow">
-        <span class="relaychip" title={`${stream.relayRooms.join(', ')} relays to external players (VRChat), which take H.264 SDR only — this broadcast is held to H.264 for them; the destination's own codec comes back when the room is a theater again`}>H.264 for relay · {stream.relayRooms.join(', ')}</span>
-      </div>
+      <!-- A receiver room in relay mode holds this broadcast to H.264 SDR. -->
+      <div class="relayline"><span class="relaytag" title={`${stream.relayRooms.join(', ')}: held to H.264 SDR for VRChat players`}>H.264 relay</span></div>
     {/if}
   {/snippet}
   {#snippet bufBlock()}
@@ -944,20 +942,12 @@
     display: flex; align-items: center; gap: 8px; font-size: 12px;
   }
   /* Green = broadcasting, red = not, amber = preparing subtitles. */
-  .relayrow { padding: 0 8px 12px; margin-top: -6px; }
-  .relaychip {
-    display: inline-block;
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    padding: 3px 9px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--accent, #6ba3f0) 55%, transparent);
-    color: var(--accent, #6ba3f0);
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .relayline { padding: 0 8px 10px; margin-top: -4px; }
+  .relaytag {
+    display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.03em; line-height: 1;
+    padding: 3px 6px; border-radius: 4px;
+    color: var(--muted); border: 1px solid var(--border);
+    white-space: nowrap; cursor: default;
   }
   .onair {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1203,6 +1193,8 @@
     .topbar .status { padding: 0; flex-shrink: 0; }
     .topbar .bufrow { padding: 0; margin: 0; width: 88px; flex-shrink: 0; }
     .topbar .buf { width: 60px; height: 22px; flex: none; }
+    /* No room beside the buffer and the speed; Settings' Best card says it. */
+    .topbar .relayline { display: none; }
 
     main { padding: 14px; }
 

@@ -243,8 +243,14 @@ async function tuneProfile(profile, selection, srcPath = null) {
   // Intent, separate from capability: passthrough needs no encoder, so an
   // HDR-native HEVC file may ship untouched on the operator's say-so even
   // where the driver could not ENCODE main10.
-  profile.hdrWanted = Boolean(config.encoder?.hdrOutput);
-  if (config.encoder?.hdrOutput && (config.encoder?.codec ?? 'h264') === 'hevc') {
+  // The RUN's profile, not the stored setting: a relay room holds a
+  // broadcast to H.264 SDR (hdrOutput false, codec h264 in the profile)
+  // while the setting stays HEVC/HDR. Reading config here sent PQ p010
+  // frames into h264_vaapi, which refused every HDR title for the relay.
+  const hdrOutput = Boolean(profile.hdrOutput ?? config.encoder?.hdrOutput);
+  const codec = profile.codec ?? config.encoder?.codec ?? 'h264';
+  profile.hdrWanted = hdrOutput;
+  if (hdrOutput && codec === 'hevc') {
     globalThis.__main10Cap ??= await vaapiMain10Present(profile.device);
     profile.hdrOut = Boolean(globalThis.__main10Cap);
     if (!profile.hdrOut && !globalThis.__main10Said) {
