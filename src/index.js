@@ -2658,7 +2658,10 @@ const startStreamInner = async (req, res) => {
     // The H.264 anchor bitrate never changes; other codecs derive their
     // cheaper rate from it (or an explicit hevcBitrate/av1Bitrate override).
     videoBitrate: codecBitrate({ ...config.encoder, codec }),
-    lowPower,
+    // Probed, but an explicit encoder.lowPower=false in the config wins:
+    // VDENC (fixed-function) against the full HEVC encoder is a thing to
+    // measure per box, not to assume.
+    lowPower: config.encoder?.lowPower === false ? false : lowPower,
   };
 
   // Resolve every item up front so a bad path fails before we go on air.
