@@ -513,7 +513,7 @@
     {#if live && stream.relayRooms?.length}
       <!-- A receiver room in relay mode: this broadcast is H.264 SDR for it. -->
       <div class="relayrow">
-        <span class="relaychip" title={`${stream.relayRooms.join(', ')} relays to external players — this broadcast is H.264 SDR for them`}>relay · {stream.relayRooms.join(', ')}</span>
+        <span class="relaychip" title={`${stream.relayRooms.join(', ')} relays to external players (VRChat), which take H.264 SDR only — this broadcast is held to H.264 for them; the destination's own codec comes back when the room is a theater again`}>H.264 for relay · {stream.relayRooms.join(', ')}</span>
       </div>
     {/if}
   {/snippet}
