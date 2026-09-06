@@ -1466,7 +1466,13 @@ app.get('/api/debug/cpu', async (req, res) => {
     });
   }
   procs.sort((x, y) => y.cpu - x.cpu);
-  res.json({ cores: (await import('os')).cpus().length, procs });
+  // The host's load average as well — /proc/loadavg is host-wide even
+  // inside the container. A slow measurement with ffmpeg at 7% of a core
+  // and nothing else visible here was the whole story once (6 Sep): the
+  // load was another container's, and this endpoint could not say so.
+  let loadavg = null;
+  try { loadavg = rf('/proc/loadavg', 'utf8').trim().split(' ').slice(0, 3).map(Number); } catch { /* not linux */ }
+  res.json({ cores: (await import('os')).cpus().length, loadavg, procs });
 });
 
 /**
