@@ -190,6 +190,16 @@ export function availableCores() {
  */
 const ISSUES_URL = 'https://github.com/oroshikirin11/Streamerr/issues';
 
+/**
+ * Can this subtitle be drawn on the alpha canvas the GPU composite
+ * uploads? Text subtitles (libass) always; bitmap subtitles (PGS, DVD)
+ * since their decoded frames can be overlaid onto that canvas on the CPU
+ * — sparse frames, one small blit each — instead of onto the video.
+ */
+export function canvasComposable(sub) {
+  return Boolean(sub?.filter && !sub?.needsComplex) || Boolean(sub?.canvasInput);
+}
+
 export function gpuDecodable(video) {
   if (!video) return true;
   const codec = String(video.codec ?? '').toLowerCase();
@@ -4642,7 +4652,8 @@ export class PipelinePlayout extends EventEmitter {
     if (!sub) {
       out.push('no subtitles — not the cause');
     } else if (sub.bitmap) {
-      out.push(`bitmap subtitles (${sub.codec ?? '?'}) — always CPU, never banded`);
+      out.push(`bitmap subtitles (${sub.codec ?? '?'}) — ${/overlay_vaapi/.test(this._lastArgs ?? '')
+        ? 'on the GPU canvas' : 'blended on the CPU'}, never banded`);
     } else {
       const n = this._subInfo?.events ? ` (${this._subInfo.events} events)` : '';
       out.push(this._bandInfo?.applied
@@ -4766,20 +4777,6 @@ export class PipelinePlayout extends EventEmitter {
     const sub = this.selection?.subtitle;
     if (!sub) return 1;
 
-    // Per-frame studio drawing — a bouncing picture, an animated GIF, a
-    // moving caption — is paid by EVERY worker on every frame, so it
-    // does not parallelise: measured on the N100 with a PGS subtitle,
-    // four workers under four bouncing pictures ran 0.67x while one
-    // process ran 0.75x, and every studio apply also restarts the
-    // scheduler from an empty cache. One process, and the buffer it can
-    // hold, beats that. Still pictures are baked into one layer and cost
-    // nothing per frame, so they do not count.
-    const items = this.profile?.overlay ?? [];
-    const perFrame = items.some((i) => i?.enabled !== false
-      && ((i?.type === 'image' && (i.motion === 'bounce' || /\.gif$/i.test(String(i.file ?? ''))))
-        || (i?.type === 'text' && i.motion === 'bounce')));
-    if (perFrame) return 1;
-
     // Exactly the conditions buildSourceArgs uses to pick the GPU
     // composite. If it is available, it beats any number of CPU workers.
     //
@@ -4800,11 +4797,25 @@ export class PipelinePlayout extends EventEmitter {
     // 1.40x with 65s banked in a minute.
     const video = this.selection?.video;
     const gpuComposite = Boolean(this.profile?.gpuSubs)
-      && !sub.bitmap
+      && canvasComposable(buildSubtitleFilter(sub, null))
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
     if (gpuComposite) return 1;
+
+    // Per-frame studio drawing — a bouncing picture, an animated GIF, a
+    // moving caption — is paid by EVERY worker on every frame, so it
+    // does not parallelise: measured on the N100 with a PGS subtitle,
+    // four workers under four bouncing pictures ran 0.67x while one
+    // process ran 0.75x, and every studio apply also restarts the
+    // scheduler from an empty cache. One process, and the buffer it can
+    // hold, beats that. Still pictures are baked into one layer and cost
+    // nothing per frame, so they do not count.
+    const items = this.profile?.overlay ?? [];
+    const perFrame = items.some((i) => i?.enabled !== false
+      && ((i?.type === 'image' && (i.motion === 'bounce' || /\.gif$/i.test(String(i.file ?? ''))))
+        || (i?.type === 'text' && i.motion === 'bounce')));
+    if (perFrame) return 1;
 
     // Every core burns subtitles. The old rule reserved one for the
     // publisher — but the publisher is a copy remux costing a few percent
@@ -6372,7 +6383,7 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (profile.gpuSubs && sub.filter && !sub.needsComplex
+  if (profile.gpuSubs && canvasComposable(sub)
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -6546,7 +6557,7 @@ export function buildSourceArgs({
      * canvas goes back to carrying nothing but subtitles and the band
      * applies to a clip with a picture on it too.
      */
-    const band = subBand && !canvasPad && !rect.bars
+    const band = subBand && !sub.canvasInput && !canvasPad && !rect.bars
       && subBand.rect.w === rect.w && subBand.rect.h === rect.h
       && (!imgList.length || gpuImages) ? subBand : null;
 
@@ -6624,9 +6635,19 @@ export function buildSourceArgs({
         + `trim=end=${(Math.max(1, duration - offset) + 5).toFixed(3)},`
       : '[1:v]';
     const canvasH = band ? band.height : rect.h;
-    const canvasHead = `${layerSrc}setpts=PTS+${shift}/TB,`
-      + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
-      + 'setpts=PTS-STARTPTS,format=rgba';
+    // A bitmap track: the canvas carries the caption (libass, in clip
+    // time) and then takes the decoded subtitle frames — already in
+    // seeked time, like the video — with overlay. eof_action=pass keeps
+    // the canvas flowing after the last subtitle; the decoder's clearing
+    // frames end each cue, so nothing lingers.
+    const canvasHead = sub.canvasInput
+      ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
+        + `setpts=PTS-STARTPTS,format=rgba[c0];`
+        + `[${sub.canvasInput}]scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
+        + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
+      : `${layerSrc}setpts=PTS+${shift}/TB,`
+        + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
+        + 'setpts=PTS-STARTPTS,format=rgba';
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to
       // stay RGBA to the upload or the composite becomes an opaque box.

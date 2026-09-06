@@ -490,9 +490,17 @@ export function buildSubtitleFilter(subtitle, mediaPath, opts = {}) {
     // for the caller to append AFTER the scale — at output coordinates,
     // exactly where the text path puts it. Without this, switching to a
     // PGS track silently took the overlay off screen.
+    //
+    // On a GPU box the same decoded bitmaps ride the alpha canvas the
+    // text path already uploads (canvasInput), so the video never leaves
+    // the GPU; the caption goes onto that canvas as a libass pass.
     return {
       filter: null,
       overlayInput: `0:s:${subtitle.typeIndex}`,
+      canvasInput: `0:s:${subtitle.typeIndex}`,
+      canvasOverlay: overlayPath
+        ? `subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}:alpha=1`
+        : null,
       needsComplex: true,
       postFilter: overlayPath
         ? `,subtitles=filename=${escapeFilterPath(overlayPath)}${fonts}`
