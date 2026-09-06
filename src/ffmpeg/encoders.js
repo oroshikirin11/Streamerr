@@ -131,6 +131,14 @@ export const BACKENDS = {
       // and -sc_threshold do not exist here and are silently ignored.
       '-g', String(Math.round(p.gopSeconds * p.fps)),
       '-bf', '0',
+      /**
+       * Config-only escape hatch for measuring the driver's rate control
+       * on a box without a shell: `encoder.vaapiExtra` is appended as
+       * given, so a later `-rc_mode VBR` or `-bufsize 64000k` wins over
+       * the defaults above. Tokens only (the sanitizer admits nothing a
+       * filter graph or a path could hide in). Not a setting to keep.
+       */
+      ...(Array.isArray(p.vaapiExtra) ? p.vaapiExtra.map(String) : []),
     ],
   },
 

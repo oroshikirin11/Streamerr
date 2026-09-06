@@ -1716,6 +1716,14 @@ app.put('/api/config', (req, res) => {
     patch.encoder.tonemap = ['auto', 'vaapi', 'cpu', 'none']
       .includes(patch.encoder.tonemap) ? patch.encoder.tonemap : config.encoder.tonemap;
   }
+  if (patch.encoder?.vaapiExtra !== undefined) {
+    // Plain tokens for the encoder's own argument list: no spaces, no
+    // quotes, no path separators — a measurement knob, not a shell.
+    patch.encoder.vaapiExtra = Array.isArray(patch.encoder.vaapiExtra)
+      ? patch.encoder.vaapiExtra.slice(0, 12).map(String)
+        .filter((t) => /^[-A-Za-z0-9_:.]{1,32}$/.test(t))
+      : [];
+  }
   if (patch.encoder?.subComposite !== undefined) {
     patch.encoder.subComposite = ['auto', 'cpu', 'gpu']
       .includes(patch.encoder.subComposite) ? patch.encoder.subComposite : 'auto';
