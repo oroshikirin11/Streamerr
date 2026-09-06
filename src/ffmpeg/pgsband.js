@@ -136,3 +136,60 @@ export function writePgsScan(cacheDir, key, scan) {
     renameSync(`${p}.partial`, p);
   } catch { /* the cache is an optimisation */ }
 }
+
+/**
+ * Scans in flight, by cache key. Module-level on purpose: a scan outlives
+ * the engine that started it. Stopping a broadcast does not lose minutes
+ * of reading, and the moment nothing is on air a throttled scan is
+ * restarted flat out — a disc that takes half an hour beside a live clip
+ * takes a few minutes alone.
+ */
+const inFlight = new Map();
+
+/**
+ * Start (or join) the scan for a track. `readrate` > 0 throttles; the
+ * returned promise resolves to the scan (or null) and is shared by every
+ * caller. `onDone` runs once with the result; `onLog` receives lines.
+ */
+export function ensureScan(srcPath, typeIndex, cacheDir, { readrate = 0, onLog = null } = {}) {
+  const key = pgsCacheKey(srcPath, typeIndex);
+  const stored = readPgsScan(cacheDir, key);
+  if (stored) return { key, promise: Promise.resolve(stored), joined: true };
+  const have = inFlight.get(key);
+  if (have) return { key, promise: have.promise, joined: true };
+  const entry = { srcPath, typeIndex, cacheDir, readrate, controller: new AbortController(), promise: null, resolve: null, log: onLog ?? ((l) => console.log(l)) };
+  entry.promise = new Promise((resolve) => { entry.resolve = resolve; });
+  inFlight.set(key, entry);
+  runScan(key, entry);
+  return { key, promise: entry.promise, joined: false };
+}
+
+function runScan(key, entry) {
+  const started = Date.now();
+  scanPgsWindows(entry.srcPath, entry.typeIndex, { signal: entry.controller.signal, readrate: entry.readrate })
+    .then((scan) => {
+      if (entry.restarting) { entry.restarting = false; return; } // a restart took over
+      inFlight.delete(key);
+      if (scan) writePgsScan(entry.cacheDir, key, scan);
+      entry.log(`[band] ${entry.srcPath.split('/').pop()} scanned in ${((Date.now() - started) / 1000).toFixed(0)}s`
+        + (scan ? '' : ': no PGS windows found'));
+      entry.resolve(scan);
+    });
+}
+
+/** Nothing is on air: every throttled scan restarts at full speed. */
+export function unthrottleScans() {
+  for (const [key, entry] of inFlight) {
+    if (!(entry.readrate > 0)) continue;
+    entry.restarting = true;
+    entry.controller.abort();
+    entry.controller = new AbortController();
+    entry.readrate = 0;
+    entry.log(`[band] nothing on air — scanning ${entry.srcPath.split('/').pop()} at full speed`);
+    runScan(key, entry);
+  }
+}
+
+export function scanInFlight(srcPath, typeIndex) {
+  return inFlight.has(pgsCacheKey(srcPath, typeIndex));
+}

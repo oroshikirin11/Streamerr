@@ -47,3 +47,54 @@ test('the builder crops the subtitle frames to the band and composites at its y'
   assert.ok(args.includes(`s=1920x${band.height}:`), 'canvas is the band');
   assert.ok(args.includes(`overlay_vaapi=x=0:y=${band.y}`), 'composited at the band');
 });
+
+import { ensureScan, scanInFlight, unthrottleScans } from '../src/ffmpeg/pgsband.js';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+test('a scan is shared by every caller, survives an unthrottle, and settles to null for a file that is not there', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pgsband-'));
+  try {
+    const a = ensureScan('/nowhere/missing.mkv', 0, dir, { readrate: 3, onLog: () => {} });
+    const b = ensureScan('/nowhere/missing.mkv', 0, dir, { readrate: 3, onLog: () => {} });
+    assert.equal(a.key, b.key); assert.equal(a.joined, false); assert.equal(b.joined, true);
+    assert.equal(scanInFlight('/nowhere/missing.mkv', 0), true);
+    unthrottleScans();
+    assert.equal(await a.promise, null); assert.equal(await b.promise, null);
+    assert.equal(scanInFlight('/nowhere/missing.mkv', 0), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+import { pgsWindowsViaCues } from '../src/ffmpeg/mkvcues.js';
+import { spawnSync } from 'child_process';
+import { writeFileSync } from 'fs';
+
+function segAt(pts, type, payload) {
+  const h = Buffer.alloc(13); h.write('PG', 0); h.writeUInt32BE(Math.round(pts * 90000), 2); h.writeUInt32BE(0, 6); h[10] = type; h.writeUInt16BE(payload.length, 11);
+  return Buffer.concat([h, payload]);
+}
+
+test('the windows of a muxed PGS track are read through the cue index without a demux', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mkvcues-'));
+  try {
+    // Three cues, windows at the bottom of a 1280x720 frame, one second apart.
+    const parts = [];
+    for (let i = 0; i < 3; i++) {
+      const t = i * 1.2;
+      parts.push(segAt(t, 0x16, Buffer.concat([pcs(1280, 720, 1), Buffer.from([0, 1, 0, 0, 0x01, 0x40, 0x02, 0x3a])])),
+        segAt(t, 0x17, wds([[320, 570, 640, 90]])), segAt(t, 0x80, Buffer.alloc(0)),
+        segAt(t + 1, 0x16, pcs(1280, 720, 0)), segAt(t + 1, 0x17, wds([[320, 570, 640, 90]])), segAt(t + 1, 0x80, Buffer.alloc(0)));
+    }
+    const sup = join(dir, 't.sup'); writeFileSync(sup, Buffer.concat(parts));
+    const mkv = join(dir, 't.mkv');
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:r=24', '-i', sup, '-t', '5', '-map', '0:v', '-map', '1:s', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:s', 'copy', mkv], { stdio: ['ignore', 'ignore', 'pipe'] });
+    assert.equal(r.status, 0, String(r.stderr));
+    const scan = await pgsWindowsViaCues(mkv, 0);
+    assert.ok(scan, 'windows found through the cues');
+    assert.equal(scan.width, 1280); assert.equal(scan.height, 720);
+    assert.equal(scan.minY, 570); assert.equal(scan.maxY, 660);
+    assert.ok(scan.blocks >= 3);
+    assert.equal(await pgsWindowsViaCues(mkv, 1), null, 'no second subtitle track');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

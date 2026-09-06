@@ -282,7 +282,8 @@ export function contentRect(video, profile) {
   return { w, h, x, y, bars: x > 1 || y > 1 };
 }
 import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
-import { pgsCacheKey, scanPgsWindows, pgsBandFor, readPgsScan, writePgsScan } from './pgsband.js';
+import { pgsCacheKey, pgsBandFor, readPgsScan, writePgsScan, ensureScan, unthrottleScans } from './pgsband.js';
+import { pgsWindowsViaCues } from './mkvcues.js';
 import { ChunkScheduler } from './chunker.js';
 import { cpuTonemap } from './probe.js';
 
@@ -1232,6 +1233,7 @@ export class PipelinePlayout extends EventEmitter {
   stop({ graceful = false } = {}) {
     this._stopping = true;
     this._abort.abort();     // take background extractions down too
+    unthrottleScans();       // a PGS scan outlives us, and may now run flat out
     this._tcpBridges?.forEach((b) => { try { b.close(); } catch { /* down */ } });
     this._tcpBridges = null;
     // Stopping during an off-air break: no publisher exists, so the close
@@ -5274,47 +5276,73 @@ export class PipelinePlayout extends EventEmitter {
    * lands while the clip is on air with a full canvas and a band applies,
    * the clip respawns behind the cushion to take it.
    */
+  /**
+   * The fast way to a bitmap track's windows: through the file's cue
+   * index (mkvcues.js), a few thousand small reads at known offsets
+   * instead of a demux of the whole file. Awaited during a clip's
+   * preparation, so the band is there at the first spawn. A file without
+   * subtitle cues falls back to the detached demux scan.
+   */
+  async _pgsQuick(item) {
+    const sub = this.selection?.subtitle;
+    const srcPath = item?.srcPath;
+    if (!sub?.bitmap || sub.external || !srcPath || !this.cacheDir) return null;
+    const key = pgsCacheKey(srcPath, sub.typeIndex);
+    this._pgsScans ??= new Map();
+    if (this._pgsScans.has(key)) return this._pgsScans.get(key);
+    const stored = readPgsScan(this.cacheDir, key);
+    if (stored) { this._pgsScans.set(key, stored); return stored; }
+    const t0 = Date.now();
+    const scan = await pgsWindowsViaCues(srcPath, sub.typeIndex);
+    if (this._stopping) return null;
+    const name = srcPath.split('/').pop();
+    if (scan) {
+      this._pgsScans.set(key, scan);
+      writePgsScan(this.cacheDir, key, scan);
+      this.emit('log', `[band] ${name}: PGS windows read from the cue index in `
+        + `${((Date.now() - t0) / 1000).toFixed(1)}s (${scan.blocks} blocks)\n`);
+      return scan;
+    }
+    this.emit('log', `[band] ${name}: no subtitle cues in the index — scanning the file instead\n`);
+    this._pgsScanFor(item, sub);
+    return null;
+  }
+
   _pgsScanFor(item, sub) {
     const srcPath = item?.srcPath;
     if (!srcPath || !sub?.bitmap || !this.cacheDir) return;
     const key = pgsCacheKey(srcPath, sub.typeIndex);
     this._pgsScans ??= new Map();
     if (this._pgsScans.has(key)) return;
-    const stored = readPgsScan(this.cacheDir, key);
-    if (stored) { this._pgsScans.set(key, stored); return; }
-    this._pgsScanning ??= new Set();
-    if (this._pgsScanning.has(key)) return;
-    this._pgsScanning.add(key);
-    const t0 = Date.now();
-    let lastLog = t0;
+    this._pgsAsked ??= new Set();
+    if (this._pgsAsked.has(key)) return;
+    this._pgsAsked.add(key);
     const name = srcPath.split('/').pop();
     // Gentle while something is on air: three times the file's own rate,
-    // niced, so the live source keeps the disk. Idle, flat out.
+    // niced, so the live source keeps the disk. The scan itself lives in
+    // pgsband.js and outlives this engine: a stop restarts it flat out.
     const onAir = this.status === 'running' || this.status === 'preparing';
-    this.emit('log', `[band] scanning ${name} for its PGS windows (whole file, in the background`
-      + `${onAir ? ', throttled while on air' : ''})\n`);
-    this._detached(scanPgsWindows(srcPath, sub.typeIndex, {
-      signal: this._abort.signal,
+    const { promise, joined } = ensureScan(srcPath, sub.typeIndex, this.cacheDir, {
       readrate: onAir ? 3 : 0,
-      onProgress: () => {
-        const now = Date.now();
-        if (now - lastLog > 60_000) { lastLog = now; this.emit('log', `[band] still scanning ${name}…\n`); }
-      },
-    }).then((scan) => {
-      this._pgsScanning.delete(key);
-      if (!scan) { this._pgsScans.set(key, null); this.emit('log', `[band] ${name}: no PGS windows found\n`); return; }
+      onLog: (line) => this.emit('log', `${line}\n`),
+    });
+    if (!joined) {
+      this.emit('log', `[band] scanning ${name} for its PGS windows (whole file, in the background`
+        + `${onAir ? ', throttled while on air' : ''})\n`);
+    }
+    this._detached(promise.then((scan) => {
       this._pgsScans.set(key, scan);
-      writePgsScan(this.cacheDir, key, scan);
+      if (!scan) return;
+      if (this._stopping || this.status !== 'running') return;
       const rect = contentRect(this.selection?.video, this.profile);
       const { band, reason } = pgsBandFor(scan, rect);
-      this.emit('log', `[band] ${name} scanned in ${((Date.now() - t0) / 1000).toFixed(0)}s: `
-        + (band ? `${rect.w}x${band.height} band` : `full canvas — ${reason}`) + `\n`);
+      this.emit('log', `[band] ${name}: ${band ? `${rect.w}x${band.height} band` : `full canvas — ${reason}`}\n`);
       if (!band) return;
       // On air with a full canvas on this very clip: take the band now.
-      if (this.current?.item !== item || this.status !== 'running' || this._stopping) return;
+      if (this.current?.item !== item) return;
       if (this._bandInfo?.applied) return;
       this._respawnForBand(item);
-    }), 'scanning PGS windows');
+    }), 'awaiting the PGS scan');
   }
 
   /** A cushion-kept respawn of the clip on air, the way a studio apply lands. */
@@ -5359,11 +5387,12 @@ export class PipelinePlayout extends EventEmitter {
   async prepare(item) {
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
-    this._detached(this._extract(item), 'extracting subtitles');
-    // A bitmap track's band comes from a scan of its windows; warm that
-    // too, so the next clip spawns banded from its first frame.
+    // A bitmap track's band comes from its windows, read through the cue
+    // index inside _extract (seconds); awaited here so the clip spawns
+    // banded from its first frame. Text tracks stay detached as before.
     const sub = this.selection?.subtitle;
-    if (sub?.bitmap && !sub.external) this._pgsScanFor(item, sub);
+    if (sub?.bitmap && !sub.external) await this._extract(item);
+    else this._detached(this._extract(item), 'extracting subtitles');
   }
 
   /**
@@ -5433,6 +5462,17 @@ export class PipelinePlayout extends EventEmitter {
    */
   _extract(item) {
     const sub = this.selection?.subtitle;
+    // A bitmap track has nothing to extract; what every path that awaits
+    // this needs before a respawn is the track's windows, so the band is
+    // there at the spawn. One read per file, shared while in flight.
+    if (sub?.bitmap && !sub.external && item?.srcPath && this.cacheDir) {
+      const key = pgsCacheKey(item.srcPath, sub.typeIndex);
+      this._pgsQuickInFlight ??= new Map();
+      if (!this._pgsQuickInFlight.has(key)) {
+        this._pgsQuickInFlight.set(key, this._pgsQuick(item).finally(() => this._pgsQuickInFlight.delete(key)));
+      }
+      return this._pgsQuickInFlight.get(key).then(() => null, () => null);
+    }
     const key = this._subKey(item?.srcPath);
     if (!key || !this.cacheDir) return Promise.resolve(null);
     if (this._subCache.has(key)) return Promise.resolve(this._subCache.get(key));
