@@ -1636,6 +1636,9 @@ export class PipelinePlayout extends EventEmitter {
       this._detached(this._extract(item).finally(() => {
         if (this._stopping || this._selToken !== tok) return;
         if (this.current?.item !== item || this.status !== 'running') return;
+        // A spawn deferred behind this very extraction (a seek made right
+        // after the switch) already carries the new selection: let it land.
+        if (this._deferred != null) return;
         // The bank SURVIVES a track change — the same trade the classic
         // overlay apply makes, for the same reason. Flushing put the new
         // track on air instantly but left the publisher with nothing to
@@ -4175,6 +4178,17 @@ export class PipelinePlayout extends EventEmitter {
     // Fold this clip's shape into the profile before anything reads it.
     // A change needs a new RTMP session, so hand off to _reshape and let it
     // call back into _play once the new publisher is up.
+    // Never point the subtitles filter at the media file: on a big remux
+    // it demuxes the whole file before emitting a frame, the source stays
+    // silent, and the watchdog respawns it identically forever (Backrooms,
+    // a seek right after a subtitle switch, 30s silences in a loop). The
+    // extracted copy is what the spawn needs; when the in-memory cache
+    // does not have it yet — a restart empties it even though the file
+    // sits on disk, a switch made while preparing never extracted — take
+    // it first and spawn after. From disk that is instant; the source on
+    // air keeps feeding the bank meanwhile.
+    const playGen = (this._playGen = (this._playGen ?? 0) + 1);
+    if (this._deferForExtraction(item, offset, { duration }, playGen)) return;
     const shape = this._shapeFor(this.selection?.video);
     // swDecode is a per-clip demotion (cleared by _rearmGpu at the clip
     // boundary). Whoever set it on the live profile meant it for THIS
@@ -5323,6 +5337,27 @@ export class PipelinePlayout extends EventEmitter {
    * subs are composited from the main input, so neither pays the in-band
    * second read that makes waiting necessary.
    */
+  /**
+   * True when this spawn must wait for the subtitle extraction, in which
+   * case the extraction is started and the spawn re-issued after it.
+   */
+  _deferForExtraction(item, offset, opts, gen) {
+    if (!this._needsExtraction(item)) return false;
+    this.emit('log', `[subs] extracting before the spawn at ${Number(offset).toFixed(1)}s\n`);
+    // A track switch's own respawn (setSelection) stands down while this
+    // is pending: the deferred spawn carries the new selection already,
+    // at the position the user asked for last.
+    this._deferred = gen;
+    this._detached(this._extract(item).then(() => {
+      if (this._deferred === gen) this._deferred = null;
+      // Any play issued since (a further seek, a skip, a stop) supersedes
+      // this one; the generation says so without guessing at items.
+      if (this._stopping || this._playGen !== gen) return;
+      this._play(item, offset, opts);
+    }), 'extracting before the spawn');
+    return true;
+  }
+
   _needsExtraction(item) {
     const sub = this.selection?.subtitle;
     const key = this._subKey(item?.srcPath);
