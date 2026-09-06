@@ -6660,8 +6660,10 @@ export function buildSourceArgs({
     // which reads a quarter of the pixels; a disc's PGS is authored at
     // that 2x, so the pick lands on real glyph pixels. Anything closer
     // to 1:1 keeps the bilinear.
-    const subScaleFlags = (selection?.video?.width ?? 0) >= rect.w * 2
-      && (selection?.video?.height ?? 0) >= rect.h * 2 ? 'neighbor' : 'fast_bilinear';
+    // A ratio, not an exact 2x: a 3840x2074 disc into 1920x1038 is
+    // 1.998 tall, and an equality test kept it on bilinear.
+    const subScaleFlags = (selection?.video?.width ?? 0) / rect.w >= 1.9
+      && (selection?.video?.height ?? 0) / rect.h >= 1.9 ? 'neighbor' : 'fast_bilinear';
     const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
         + `setpts=PTS-STARTPTS,format=rgba[c0];`
