@@ -88,7 +88,8 @@ test('a 4K source samples its bitmap subtitle with nearest neighbour; 1080p keep
   const profile = { backend: 'vaapi', device: '/dev/dri/renderD128', codec: 'hevc', width: 1920, height: 1080, videoBitrate: '16000k', gpuFull: true, gpuSubs: true, overlay: [], gopSeconds: 1 };
   const sub = { codec: 'hdmv_pgs_subtitle', bitmap: true, text: false, typeIndex: 2 };
   const build = (v) => buildSourceArgs({ srcPath: '/x.mkv', profile, selection: { video: v, subtitle: sub }, duration: 1400, overlayImages: [], overlayLayer: () => null }).join(' ');
-  const uhd = { ...video, width: 3840, height: 2160, pixFmt: 'yuv420p10le' };
-  assert.ok(/\[0:s:2\][^;]*scale=1920:1080:flags=neighbor\[sf\]/.test(build(uhd)));
+  // The real disc: 3840x2074 into a 1920x1038 rectangle is 1.998 tall.
+  const uhd = { ...video, width: 3840, height: 2074, dar: '1920:1037', pixFmt: 'yuv420p10le' };
+  assert.ok(/\[0:s:2\][^;]*scale=1920:10\d\d:flags=neighbor\[sf\]/.test(build(uhd)), build(uhd).slice(build(uhd).indexOf('[0:s:2]'), build(uhd).indexOf('[0:s:2]') + 140));
   assert.ok(/\[0:s:2\][^;]*scale=1920:1080:flags=fast_bilinear\[sf\]/.test(build(video)));
 });
