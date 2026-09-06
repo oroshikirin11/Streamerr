@@ -1464,6 +1464,23 @@ export class PipelinePlayout extends EventEmitter {
      * point is what a relative skip counts from, exactly as the flushed
      * playhead was.
      */
+    // A seek onto a subtitle that is not extracted yet waits for the
+    // extraction FIRST — instant from disk, minutes on a first read — and
+    // touches nothing meanwhile: the clip on air keeps playing untouched,
+    // and the seek is re-issued when the copy is there. Cutting the bank
+    // first and spawning with the media file in the subtitles filter was
+    // a dead source and a bank of stale content (Backrooms, 6 Sep).
+    if (this._needsExtraction(this.current.item)) {
+      const item = this.current.item;
+      const want = Math.max(0, position != null ? Number(position) : (this.position ?? 0) + Number(delta));
+      this._setPending('seek', { from: this._onAir().item ?? item, to: want });
+      this.emit('log', `[subs] seek to ${want.toFixed(0)}s waits for the subtitle extraction\n`);
+      this._detached(this._extract(item).then(() => {
+        if (this._stopping || this.current?.item !== item || this.status !== 'running') return;
+        this.seek({ position: want });
+      }), 'extracting before a seek');
+      return this.position;
+    }
     const cut = this._bankCutForApply(this._applyRunway());
     this.position = cut.resume;
     let next = position != null ? Number(position) : this.position + Number(delta);
@@ -1636,9 +1653,6 @@ export class PipelinePlayout extends EventEmitter {
       this._detached(this._extract(item).finally(() => {
         if (this._stopping || this._selToken !== tok) return;
         if (this.current?.item !== item || this.status !== 'running') return;
-        // A spawn deferred behind this very extraction (a seek made right
-        // after the switch) already carries the new selection: let it land.
-        if (this._deferred != null) return;
         // The bank SURVIVES a track change — the same trade the classic
         // overlay apply makes, for the same reason. Flushing put the new
         // track on air instantly but left the publisher with nothing to
@@ -4178,17 +4192,6 @@ export class PipelinePlayout extends EventEmitter {
     // Fold this clip's shape into the profile before anything reads it.
     // A change needs a new RTMP session, so hand off to _reshape and let it
     // call back into _play once the new publisher is up.
-    // Never point the subtitles filter at the media file: on a big remux
-    // it demuxes the whole file before emitting a frame, the source stays
-    // silent, and the watchdog respawns it identically forever (Backrooms,
-    // a seek right after a subtitle switch, 30s silences in a loop). The
-    // extracted copy is what the spawn needs; when the in-memory cache
-    // does not have it yet — a restart empties it even though the file
-    // sits on disk, a switch made while preparing never extracted — take
-    // it first and spawn after. From disk that is instant; the source on
-    // air keeps feeding the bank meanwhile.
-    const playGen = (this._playGen = (this._playGen ?? 0) + 1);
-    if (this._deferForExtraction(item, offset, { duration }, playGen)) return;
     const shape = this._shapeFor(this.selection?.video);
     // swDecode is a per-clip demotion (cleared by _rearmGpu at the clip
     // boundary). Whoever set it on the live profile meant it for THIS
@@ -4214,6 +4217,22 @@ export class PipelinePlayout extends EventEmitter {
     this._bandInfo = null;
     this._subInfo = null;
     this.position = offset;
+
+    // Last line of defence: the subtitles filter is never pointed at the
+    // media file (it demuxes the whole remux before its first frame — a
+    // silent source respawned forever). A spawn that reaches here with an
+    // embedded text track not yet extracted plays WITHOUT it, extracts in
+    // the background, and takes it back behind the cushion when ready.
+    if (this._needsExtraction(item)) {
+      const full = this.selection;
+      this.selection = { ...full, subtitle: null };
+      this.emit('warn', `${item?.title ?? 'This clip'}: subtitles are not extracted yet — playing without them until they are`);
+      this._detached(this._extract(item, full.subtitle).then(() => {
+        if (this._stopping || this.current?.item !== item || this.status !== 'running') return;
+        if (this.selection?.subtitle) return;   // something else chose since
+        this.setSelection(full);                 // cushion-kept respawn with the subtitle
+      }), 'extracting for a clip on air');
+    }
 
     const cached = this._cachedSubs(item.srcPath);
     const clipDuration = this.current.duration;
@@ -5191,8 +5210,7 @@ export class PipelinePlayout extends EventEmitter {
     } catch { return null; }
   }
 
-  _subKey(srcPath) {
-    const sub = this.selection?.subtitle;
+  _subKey(srcPath, sub = this.selection?.subtitle) {
     return sub && !sub.external ? `${srcPath}:${sub.typeIndex}` : null;
   }
 
@@ -5278,9 +5296,8 @@ export class PipelinePlayout extends EventEmitter {
    * the subtitle source is a kilobyte-sized local file. The first episode of
    * a session still reads from the mkv rather than delaying go-live.
    */
-  _extract(item) {
-    const sub = this.selection?.subtitle;
-    const key = this._subKey(item?.srcPath);
+  _extract(item, sub = this.selection?.subtitle) {
+    const key = this._subKey(item?.srcPath, sub);
     if (!key || !this.cacheDir) return Promise.resolve(null);
     if (this._subCache.has(key)) return Promise.resolve(this._subCache.get(key));
     this._extracting ??= new Map();
@@ -5337,27 +5354,6 @@ export class PipelinePlayout extends EventEmitter {
    * subs are composited from the main input, so neither pays the in-band
    * second read that makes waiting necessary.
    */
-  /**
-   * True when this spawn must wait for the subtitle extraction, in which
-   * case the extraction is started and the spawn re-issued after it.
-   */
-  _deferForExtraction(item, offset, opts, gen) {
-    if (!this._needsExtraction(item)) return false;
-    this.emit('log', `[subs] extracting before the spawn at ${Number(offset).toFixed(1)}s\n`);
-    // A track switch's own respawn (setSelection) stands down while this
-    // is pending: the deferred spawn carries the new selection already,
-    // at the position the user asked for last.
-    this._deferred = gen;
-    this._detached(this._extract(item).then(() => {
-      if (this._deferred === gen) this._deferred = null;
-      // Any play issued since (a further seek, a skip, a stop) supersedes
-      // this one; the generation says so without guessing at items.
-      if (this._stopping || this._playGen !== gen) return;
-      this._play(item, offset, opts);
-    }), 'extracting before the spawn');
-    return true;
-  }
-
   _needsExtraction(item) {
     const sub = this.selection?.subtitle;
     const key = this._subKey(item?.srcPath);
