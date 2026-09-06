@@ -55,7 +55,7 @@ export class ChunkScheduler extends EventEmitter {
   constructor({
     srcPath, startOffset = 0, duration = null,
     chunkSeconds = 20, workers = 3, workDir, buildArgs,
-    holdUntilReady = false, tsOffsetOf = null, firstSeconds = null,
+    holdUntilReady = false, tsOffsetOf = null,
     aheadSeconds = null, aheadBytes = null, keepBytes = null,
   }) {
     super();
@@ -97,9 +97,6 @@ export class ChunkScheduler extends EventEmitter {
     this.startOffset = startOffset;
     this.duration = duration;
     this.chunkSeconds = onAudioGrid(Math.max(4, chunkSeconds));
-    // The opener's length. The default suits going live; a successor
-    // landing behind a kept cushion asks for a shorter one.
-    this.firstSeconds = Number(firstSeconds) > 0 ? Number(firstSeconds) : FIRST_CHUNK_SECONDS;
     this.workers = Math.max(1, workers);
     this.workDir = workDir;
     this.buildArgs = buildArgs;
@@ -120,7 +117,7 @@ export class ChunkScheduler extends EventEmitter {
 
   /** The short ramp chunk, on the same audio-frame grid as the rest. */
   _firstSize() {
-    return Math.min(this.chunkSeconds, onAudioGrid(this.firstSeconds));
+    return Math.min(this.chunkSeconds, onAudioGrid(FIRST_CHUNK_SECONDS));
   }
 
   /**

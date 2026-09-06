@@ -282,8 +282,6 @@ export function contentRect(video, profile) {
   return { w, h, x, y, bars: x > 1 || y > 1 };
 }
 import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
-import { pgsCacheKey, pgsBandFor, readPgsScan, writePgsScan, ensureScan, unthrottleScans } from './pgsband.js';
-import { pgsWindowsViaCues } from './mkvcues.js';
 import { ChunkScheduler } from './chunker.js';
 import { cpuTonemap } from './probe.js';
 
@@ -395,13 +393,6 @@ export function hevcEosPacket(ptsSeconds = 0) {
   return pkt;
 }
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
-/**
- * Opener chunk for a chunked successor that lands behind a KEPT cushion
- * (a live track or overlay switch): 3s instead of the 5s default, so on
- * a box whose workers each run well under realtime the first bytes reach
- * the bank before the cushion drains.
- */
-const LIVE_SWITCH_OPENER_SECONDS = 3;
 /**
  * A ceiling on the bank, in bytes, derived from the depth actually asked for
  * rather than fixed.
@@ -1233,7 +1224,6 @@ export class PipelinePlayout extends EventEmitter {
   stop({ graceful = false } = {}) {
     this._stopping = true;
     this._abort.abort();     // take background extractions down too
-    unthrottleScans();       // a PGS scan outlives us, and may now run flat out
     this._tcpBridges?.forEach((b) => { try { b.close(); } catch { /* down */ } });
     this._tcpBridges = null;
     // Stopping during an off-air break: no publisher exists, so the close
@@ -2883,14 +2873,6 @@ export class PipelinePlayout extends EventEmitter {
    */
   _applyRunway() {
     const cap = this.applySeconds ?? this.bufferSeconds ?? 15;
-    // A chunked successor has no single spawn to cover: its first bytes
-    // are a whole opener chunk encoded by a worker running at a fraction
-    // of realtime (an N100 with four workers: ~0.35x each, so a 5s
-    // opener lands after ~15s). Cut to a spawn-sized runway, the
-    // publisher ran dry for 21s at every subtitle switch onto a bitmap
-    // track. Keep the whole cushion instead; the opener is shortened
-    // to match in _playChunked.
-    if (this._chunkWorkers() > 1 && this.selection?.subtitle) return cap;
     if (this._spawnMs == null) return cap;
     const floor = (this._spawnMs / 1000) * 2 + (this.profile?.gopSeconds ?? 2) + 1;
     return Math.min(cap, Math.max(3, floor));
@@ -3910,9 +3892,6 @@ export class PipelinePlayout extends EventEmitter {
    * analysis is a whitelist.
    */
   _subtitleBand(extractedPath, { overlayPath, fontsDir }) {
-    // A bitmap track has no script to analyse; its band comes from the
-    // windows the PGS stream declares (pgsband.js), scanned once per file.
-    if (this.selection?.subtitle?.bitmap) return this._pgsBand(overlayPath);
     if (!this.cacheDir || !extractedPath) return null;
     // A Studio caption is a second libass pass over the same canvas and can
     // sit anywhere on screen, so it keeps the full frame. Pictures do not
@@ -4659,8 +4638,7 @@ export class PipelinePlayout extends EventEmitter {
       out.push('no subtitles — not the cause');
     } else if (sub.bitmap) {
       out.push(`bitmap subtitles (${sub.codec ?? '?'}) — ${/overlay_vaapi/.test(this._lastArgs ?? '')
-        ? 'on the GPU canvas' : 'blended on the CPU'}`
-        + (this._bandInfo?.applied ? `, ${this._bandInfo.height}px band` : `, full canvas${this._bandInfo?.reason ? ` (${this._bandInfo.reason})` : ''}`));
+        ? 'on the GPU canvas' : 'blended on the CPU'}, never banded`);
     } else {
       const n = this._subInfo?.events ? ` (${this._subInfo.events} events)` : '';
       out.push(this._bandInfo?.applied
@@ -4794,35 +4772,12 @@ export class PipelinePlayout extends EventEmitter {
     // CPU anyway — libass burning subtitles on one core with no workers,
     // which is the unstreamable case the GPU graph exists to avoid. One
     // enabled logo was enough to trigger it on every subtitled clip.
-    //
-    // Bitmap subtitles (PGS, DVD) never take the GPU composite: the
-    // builder draws them with `overlay` on the CPU (needsComplex). Read
-    // gpuSubs alone and this returned 1 for exactly those clips — one
-    // CPU process, no buffer — the moment a live switch re-tuned the
-    // profile (1 Sep). Measured on the N100 with a PGS-subtitled 1080p
-    // HEVC: one process 0.99x and a cache that never grows, four workers
-    // 1.40x with 65s banked in a minute.
     const video = this.selection?.video;
     const gpuComposite = Boolean(this.profile?.gpuSubs)
-      && canvasComposable(buildSubtitleFilter(sub, null))
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
     if (gpuComposite) return 1;
-
-    // Per-frame studio drawing — a bouncing picture, an animated GIF, a
-    // moving caption — is paid by EVERY worker on every frame, so it
-    // does not parallelise: measured on the N100 with a PGS subtitle,
-    // four workers under four bouncing pictures ran 0.67x while one
-    // process ran 0.75x, and every studio apply also restarts the
-    // scheduler from an empty cache. One process, and the buffer it can
-    // hold, beats that. Still pictures are baked into one layer and cost
-    // nothing per frame, so they do not count.
-    const items = this.profile?.overlay ?? [];
-    const perFrame = items.some((i) => i?.enabled !== false
-      && ((i?.type === 'image' && (i.motion === 'bounce' || /\.gif$/i.test(String(i.file ?? ''))))
-        || (i?.type === 'text' && i.motion === 'bounce')));
-    if (perFrame) return 1;
 
     // Every core burns subtitles. The old rule reserved one for the
     // publisher — but the publisher is a copy remux costing a few percent
@@ -4857,12 +4812,6 @@ export class PipelinePlayout extends EventEmitter {
       duration: this.current.duration,
       chunkSeconds,
       workers,
-      // A cushion-kept switch (publisher running, nothing flushed) has
-      // the kept cushion to land in: the shorter the opener, the sooner
-      // the first bytes arrive behind it. Everything else keeps the
-      // default opener — going live and card-covered resumes are gated
-      // on a full chunk anyway, and fewer ramp seams means less drift.
-      firstSeconds: this.publisher && !flushed ? LIVE_SWITCH_OPENER_SECONDS : undefined,
       holdUntilReady: cover,
       workDir: this._chunkPlan().dir,
       // A quarter of the budget retains what has already aired, so a
@@ -5228,163 +5177,6 @@ export class PipelinePlayout extends EventEmitter {
     } catch { return null; }
   }
 
-  /**
-   * The band for the current clip's bitmap subtitle, from a scan of the
-   * track's windows. Null — a full canvas — until the scan has answered;
-   * the scan runs detached and, when it lands while this clip is still on
-   * air with a full canvas, the clip respawns behind the cushion to take
-   * the band, as a studio apply would.
-   */
-  _pgsBand(overlayPath) {
-    const sub = this.selection?.subtitle;
-    const item = this.current?.item;
-    const srcPath = item?.srcPath;
-    if (!sub?.bitmap || !srcPath || !this.cacheDir) return null;
-    if (overlayPath) { this._bandInfo = { reason: 'a text overlay is in use' }; return null; }
-    const rect = contentRect(this.selection?.video, this.profile);
-    if (rect.bars) { this._bandInfo = { reason: 'the output is pillarboxed' }; return null; }
-    const key = pgsCacheKey(srcPath, sub.typeIndex);
-    this._pgsScans ??= new Map();
-    let scan = this._pgsScans.get(key) ?? readPgsScan(this.cacheDir, key);
-    if (scan === undefined || scan === null) {
-      this._pgsScanFor(item, sub);
-      this._bandInfo = { reason: 'PGS windows not scanned yet' };
-      return null;
-    }
-    this._pgsScans.set(key, scan);
-    const { band, reason } = pgsBandFor(scan, rect, this.selection?.video);
-    if (!band) {
-      this._bandInfo = { reason };
-      if (!this._bandSaid?.has(key)) {
-        (this._bandSaid ??= new Set()).add(key);
-        this.emit('log', `[band] full-height canvas — ${reason}\n`);
-      }
-      return null;
-    }
-    this._bandInfo = { applied: true, height: band.height };
-    if (!this._bandSaid?.has(key)) {
-      (this._bandSaid ??= new Set()).add(key);
-      this.emit('log', `[band] ${rect.w}x${band.height} canvas from the PGS windows`
-        + ` — ${(100 - (band.height / rect.h) * 100).toFixed(0)}% less to composite\n`);
-    }
-    return band;
-  }
-
-  /**
-   * Scan a bitmap track's windows once, detached. Persisted next to the
-   * cache by file identity, so the next night reads it back. When the scan
-   * lands while the clip is on air with a full canvas and a band applies,
-   * the clip respawns behind the cushion to take it.
-   */
-  /**
-   * The fast way to a bitmap track's windows: through the file's cue
-   * index (mkvcues.js), a few thousand small reads at known offsets
-   * instead of a demux of the whole file. Awaited during a clip's
-   * preparation, so the band is there at the first spawn. A file without
-   * subtitle cues falls back to the detached demux scan.
-   */
-  async _pgsQuick(item) {
-    const sub = this.selection?.subtitle;
-    const srcPath = item?.srcPath;
-    if (!sub?.bitmap || sub.external || !srcPath || !this.cacheDir) return null;
-    const key = pgsCacheKey(srcPath, sub.typeIndex);
-    this._pgsScans ??= new Map();
-    if (this._pgsScans.has(key)) return this._pgsScans.get(key);
-    const stored = readPgsScan(this.cacheDir, key);
-    if (stored) { this._pgsScans.set(key, stored); return stored; }
-    const t0 = Date.now();
-    const diag = {};
-    // Ten seconds at most on the clip's preparation: past that the read
-    // goes on in the background and the clip spawns on the full canvas,
-    // to respawn behind the cushion when the answer lands.
-    const reading = pgsWindowsViaCues(srcPath, sub.typeIndex, { diag });
-    const name = srcPath.split('/').pop();
-    const settle = (scan) => {
-      if (this._stopping) return null;
-      if (scan) {
-        this._pgsScans.set(key, scan);
-        writePgsScan(this.cacheDir, key, scan);
-        this.emit('log', `[band] ${name}: PGS windows read from the cue index in `
-          + `${((Date.now() - t0) / 1000).toFixed(1)}s (${scan.blocks} blocks)\n`);
-        return scan;
-      }
-      this.emit('log', `[band] ${name}: cue index gave no windows — ${diag.reason ?? 'unknown'}`
-        + ` (${((Date.now() - t0) / 1000).toFixed(1)}s) — scanning the file instead\n`);
-      this._pgsScanFor(item, sub);
-      return null;
-    };
-    const scan = await Promise.race([reading, new Promise((r) => setTimeout(() => r('late'), 10_000))]);
-    if (scan !== 'late') return settle(scan);
-    this.emit('log', `[band] ${name}: still reading the cue index — spawning meanwhile\n`);
-    this._detached(reading.then((late) => {
-      const got = settle(late);
-      if (!got || this.current?.item !== item || this.status !== 'running' || this._bandInfo?.applied) return;
-      const rect = contentRect(this.selection?.video, this.profile);
-      if (pgsBandFor(got, rect, this.selection?.video).band) this._respawnForBand(item);
-    }), 'late cue index');
-    return null;
-  }
-
-  _pgsScanFor(item, sub) {
-    const srcPath = item?.srcPath;
-    if (!srcPath || !sub?.bitmap || !this.cacheDir) return;
-    const key = pgsCacheKey(srcPath, sub.typeIndex);
-    this._pgsScans ??= new Map();
-    if (this._pgsScans.has(key)) return;
-    this._pgsAsked ??= new Set();
-    if (this._pgsAsked.has(key)) return;
-    this._pgsAsked.add(key);
-    const name = srcPath.split('/').pop();
-    // Gentle while something is on air: three times the file's own rate,
-    // niced, so the live source keeps the disk. The scan itself lives in
-    // pgsband.js and outlives this engine: a stop restarts it flat out.
-    const onAir = this.status === 'running' || this.status === 'preparing';
-    const { promise, joined } = ensureScan(srcPath, sub.typeIndex, this.cacheDir, {
-      readrate: onAir ? 3 : 0,
-      onLog: (line) => this.emit('log', `${line}\n`),
-    });
-    if (!joined) {
-      this.emit('log', `[band] scanning ${name} for its PGS windows (whole file, in the background`
-        + `${onAir ? ', throttled while on air' : ''})\n`);
-    }
-    this._detached(promise.then((scan) => {
-      this._pgsScans.set(key, scan);
-      if (!scan) return;
-      if (this._stopping || this.status !== 'running') return;
-      const rect = contentRect(this.selection?.video, this.profile);
-      const { band, reason } = pgsBandFor(scan, rect, this.selection?.video);
-      this.emit('log', `[band] ${name}: ${band ? `${rect.w}x${band.height} band` : `full canvas — ${reason}`}\n`);
-      if (!band) return;
-      // On air with a full canvas on this very clip: take the band now.
-      if (this.current?.item !== item) return;
-      if (this._bandInfo?.applied) return;
-      this._respawnForBand(item);
-    }), 'awaiting the PGS scan');
-  }
-
-  /** A cushion-kept respawn of the clip on air, the way a studio apply lands. */
-  _respawnForBand(item) {
-    if (this.current?.item !== item || this.status !== 'running') return;
-    const dur = this.current.duration;
-    if (dur && this.position >= dur - 1) return;
-    const tok = (this._bandToken = (this._bandToken ?? 0) + 1);
-    this._detached(this._extract(item).finally(() => {
-      if (this._stopping || this._bandToken !== tok) return;
-      if (this.current?.item !== item || this.status !== 'running') return;
-      const runway = this._applyRunway();
-      const { rewound, gop, resume } = this._bankCutForApply(runway);
-      const ahead = Math.max(0, resume - (this.aired ?? resume));
-      this.emit('log', `[band] applied — on air in ~${ahead.toFixed(1)}s `
-        + (rewound > 0.05
-          ? `(cushion cut to ${runway.toFixed(1)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
-          : gop > 0
-            ? `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`
-            : '(cushion kept)')
-        + '\n');
-      this._play(item, resume, { duration: dur });
-    }), 'applying the subtitle band');
-  }
-
   _subKey(srcPath) {
     const sub = this.selection?.subtitle;
     return sub && !sub.external ? `${srcPath}:${sub.typeIndex}` : null;
@@ -5404,12 +5196,7 @@ export class PipelinePlayout extends EventEmitter {
   async prepare(item) {
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
-    // A bitmap track's band comes from its windows, read through the cue
-    // index inside _extract (seconds); awaited here so the clip spawns
-    // banded from its first frame. Text tracks stay detached as before.
-    const sub = this.selection?.subtitle;
-    if (sub?.bitmap && !sub.external) await this._extract(item);
-    else this._detached(this._extract(item), 'extracting subtitles');
+    this._detached(this._extract(item), 'extracting subtitles');
   }
 
   /**
@@ -5479,17 +5266,6 @@ export class PipelinePlayout extends EventEmitter {
    */
   _extract(item) {
     const sub = this.selection?.subtitle;
-    // A bitmap track has nothing to extract; what every path that awaits
-    // this needs before a respawn is the track's windows, so the band is
-    // there at the spawn. One read per file, shared while in flight.
-    if (sub?.bitmap && !sub.external && item?.srcPath && this.cacheDir) {
-      const key = pgsCacheKey(item.srcPath, sub.typeIndex);
-      this._pgsQuickInFlight ??= new Map();
-      if (!this._pgsQuickInFlight.has(key)) {
-        this._pgsQuickInFlight.set(key, this._pgsQuick(item).finally(() => this._pgsQuickInFlight.delete(key)));
-      }
-      return this._pgsQuickInFlight.get(key).then(() => null, () => null);
-    }
     const key = this._subKey(item?.srcPath);
     if (!key || !this.cacheDir) return Promise.resolve(null);
     if (this._subCache.has(key)) return Promise.resolve(this._subCache.get(key));
@@ -6737,7 +6513,7 @@ export function buildSourceArgs({
      * canvas goes back to carrying nothing but subtitles and the band
      * applies to a clip with a picture on it too.
      */
-    const band = subBand && (!sub.canvasInput || subBand.bitmap) && !canvasPad && !rect.bars
+    const band = subBand && !sub.canvasInput && !canvasPad && !rect.bars
       && subBand.rect.w === rect.w && subBand.rect.h === rect.h
       && (!imgList.length || gpuImages) ? subBand : null;
 
@@ -6833,53 +6609,21 @@ export function buildSourceArgs({
       const [n, d = 1] = String(canvasRate).split('/').map(Number);
       return (d / n).toFixed(4);
     })();
-    // The scale runs on the graph thread, and while it runs no frame
-    // reaches the GPU chain: twelve 4K scales a second at ~35ms each
-    // idled the N100's GPU a third of the time (0.65x with the CPU at
-    // 45%). A source at least twice the output takes nearest sampling,
-    // which reads a quarter of the pixels; a disc's PGS is authored at
-    // that 2x, so the pick lands on real glyph pixels. Anything closer
-    // to 1:1 keeps the bilinear.
-    // A ratio, not an exact 2x: a 3840x2074 disc into 1920x1038 is
-    // 1.998 tall, and an equality test kept it on bilinear.
-    const subScaleFlags = (selection?.video?.width ?? 0) / rect.w >= 1.9
-      && (selection?.video?.height ?? 0) / rect.h >= 1.9 ? 'neighbor' : 'fast_bilinear';
-    // With a band (pgsband.js: the union of the track's windows sits in
-    // the lower part of the frame), the subtitle frames are cropped to
-    // that part before the scale — crop is a pointer offset — and land
-    // on a canvas of the band's height, composited at band.y. Proportional
-    // crop expressions, since the frames are the stream's own size.
-    const subCrop = band?.bitmap
-      ? `crop=w=iw:h=ih*${(1 - band.topFrac).toFixed(4)}:x=0:y=ih*${band.topFrac.toFixed(4)},`
-      : '';
-    const subCanvasH = band?.bitmap ? band.height : rect.h;
     const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
         + `setpts=PTS-STARTPTS,format=rgba[c0];`
         + `[${sub.canvasInput}]select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`
-        + `${subCrop}scale=${rect.w}:${subCanvasH}:flags=${subScaleFlags}[sf];`
+        + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
         + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
       : `${layerSrc}setpts=PTS+${shift}/TB,`
         + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
         + 'setpts=PTS-STARTPTS,format=rgba';
-    // EXPERIMENT (measured on the N100, decided afterwards): how the
-    // canvas reaches the picture. 'vaapi-rgba' is the composite as it
-    // always was; 'vaapi-vuya' uploads the canvas as YUV+alpha so the
-    // VPP blends without a colour conversion; 'cpu' downloads the
-    // finished 1080p frame, blends on the CPU and uploads NV12 — a few
-    // MB per frame instead of a full-frame VPP pass. The last two only
-    // for the plain shape (no bars, no band, no censor).
-    const compositeMode = (!rect.bars && !band && !censors.length && !bgInput.length)
-      ? (profile.subComposite ?? 'vaapi-rgba') : 'vaapi-rgba';
-    const canvasOut = compositeMode === 'vaapi-vuya' ? 'format=vuya,hwupload[ov];'
-      : compositeMode === 'cpu' ? 'format=rgba[ov];'
-        : 'hwupload[ov];';
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to
       // stay RGBA to the upload or the composite becomes an opaque box.
       ? `${canvasHead}[sub];${canvasImgs.filters.join(';')};`
-        + `[cv]null${canvasPad},${canvasOut}`
-      : `${canvasHead}${canvasPad},${canvasOut}`;
+        + `[cv]null${canvasPad},hwupload[ov];`
+      : `${canvasHead}${canvasPad},hwupload[ov];`;
     // A band is a shorter surface than the frame, so it has to be told where
     // to land. Reachable only when there are no bars, which is the one case
     // whose composite is a bare overlay_vaapi. Pictures, when there are any,
@@ -6890,9 +6634,7 @@ export function buildSourceArgs({
       ? (gpuImgs.filters.length
         ? `${gpuImgs.filters.join(';')};[vb][ov]overlay_vaapi=x=0:y=${band.y}[v]`
         : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
-      : compositeMode === 'cpu'
-        ? '[b]hwdownload,format=nv12,format=yuv420p[bc];[bc][ov]overlay=format=yuv420:eof_action=repeat[vc];[vc]format=nv12,hwupload[v]'
-        : composite;
+      : composite;
     // Boxes sit on the base picture, under the canvas. A chain that pads
     // has already placed the picture in the frame; one that has not is
     // still the bare content rect, so the boxes shift by its origin and
