@@ -113,13 +113,15 @@ export const BACKENDS = {
        */
       '-c:v', { h264: 'h264_vaapi', hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[p.codec ?? 'h264'] ?? 'h264_vaapi',
       /**
-       * VDENC for HEVC where the driver has it (probed at start, never
-       * assumed): -low_power routes encode through the fixed-function
-       * media block instead of the EUs — on an N100 that is the
-       * difference between HEVC costing more than H.264 and costing
-       * less. H.264 is left alone: that path is tuned and working.
+       * VDENC where the driver has it (probed at start, never assumed):
+       * -low_power routes encode through the fixed-function media block
+       * instead of the EUs. On an N100 that is the difference between
+       * HEVC costing more than H.264 and costing less — and, measured
+       * later the same way, between a 720p H.264 relay broadcast crawling
+       * at 0.7x on the EUs and running. Both codecs take it when their
+       * probe passes; AV1 has no such mode on the hardware this has met.
        */
-      ...(p.lowPower && p.codec === 'hevc' ? ['-low_power', '1'] : []),
+      ...(p.lowPower && (p.codec === 'hevc' || (p.codec ?? 'h264') === 'h264') ? ['-low_power', '1'] : []),
       '-rc_mode', 'CBR',
       '-b:v', p.videoBitrate,
       '-maxrate', p.videoBitrate,

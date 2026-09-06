@@ -2645,8 +2645,27 @@ const startStreamInner = async (req, res) => {
   // not remembered — the next start asks again.
   const probeKey = `${codec}|${config.encoder.device ?? ''}|${config.encoder.backend ?? ''}`;
   const probed = encoderProbeCache.get(probeKey);
-  if (codec !== 'h264' && probed && Date.now() - probed.t < PROBE_CACHE_MS) {
+  if (probed && Date.now() - probed.t < PROBE_CACHE_MS) {
     ({ lowPower, softwareCodec } = probed);
+  } else if (codec === 'h264' && config.encoder.backend !== 'x264') {
+    /**
+     * H.264 gets the same VDENC probe HEVC has had. It was "left alone"
+     * as the tuned path — until the relay room held a broadcast to H.264
+     * on the N100 and a 720p25 file ran 0.70x with the source at 7% of a
+     * core (6 Sep, measured with and without the identity-scale skip:
+     * 0.70x and 0.74x). Without -low_power the H.264 encode runs on the
+     * execution units, the part of that chip that measured slow all day;
+     * VDENC is the fixed-function block. Probed by doing, per box, and an
+     * explicit encoder.lowPower=false still wins below.
+     */
+    const dev = config.encoder.device ?? '/dev/dri/renderD128';
+    const probe = spawnSyncSafe('ffmpeg', ['-v', 'error', '-xerror',
+      '-init_hw_device', `vaapi=va:${dev}`, '-f', 'lavfi',
+      '-i', 'color=c=black:s=320x180:r=24', '-frames:v', '1',
+      '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-low_power', '1', '-f', 'null', '-']);
+    lowPower = probe === 0;
+    if (lowPower) dpush('info', 'H.264 encode: VDENC (low_power) available — using the fixed-function encoder');
+    encoderProbeCache.set(probeKey, { t: Date.now(), lowPower, softwareCodec: false });
   } else if (codec !== 'h264') {
     const enc = { hevc: 'hevc_vaapi', av1: 'av1_vaapi' }[codec];
     const dev = config.encoder.device ?? '/dev/dri/renderD128';
