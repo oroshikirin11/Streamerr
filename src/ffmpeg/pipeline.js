@@ -6862,12 +6862,24 @@ export function buildSourceArgs({
       : `${layerSrc}setpts=PTS+${shift}/TB,`
         + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
         + 'setpts=PTS-STARTPTS,format=rgba';
+    // EXPERIMENT (measured on the N100, decided afterwards): how the
+    // canvas reaches the picture. 'vaapi-rgba' is the composite as it
+    // always was; 'vaapi-vuya' uploads the canvas as YUV+alpha so the
+    // VPP blends without a colour conversion; 'cpu' downloads the
+    // finished 1080p frame, blends on the CPU and uploads NV12 — a few
+    // MB per frame instead of a full-frame VPP pass. The last two only
+    // for the plain shape (no bars, no band, no censor).
+    const compositeMode = (!rect.bars && !band && !censors.length && !bgInput.length)
+      ? (profile.subComposite ?? 'vaapi-rgba') : 'vaapi-rgba';
+    const canvasOut = compositeMode === 'vaapi-vuya' ? 'format=vuya,hwupload[ov];'
+      : compositeMode === 'cpu' ? 'format=rgba[ov];'
+        : 'hwupload[ov];';
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to
       // stay RGBA to the upload or the composite becomes an opaque box.
       ? `${canvasHead}[sub];${canvasImgs.filters.join(';')};`
-        + `[cv]null${canvasPad},hwupload[ov];`
-      : `${canvasHead}${canvasPad},hwupload[ov];`;
+        + `[cv]null${canvasPad},${canvasOut}`
+      : `${canvasHead}${canvasPad},${canvasOut}`;
     // A band is a shorter surface than the frame, so it has to be told where
     // to land. Reachable only when there are no bars, which is the one case
     // whose composite is a bare overlay_vaapi. Pictures, when there are any,
@@ -6878,7 +6890,9 @@ export function buildSourceArgs({
       ? (gpuImgs.filters.length
         ? `${gpuImgs.filters.join(';')};[vb][ov]overlay_vaapi=x=0:y=${band.y}[v]`
         : `[b][ov]overlay_vaapi=x=0:y=${band.y}[v]`)
-      : composite;
+      : compositeMode === 'cpu'
+        ? '[b]hwdownload,format=nv12[bc];[bc][ov]overlay=format=nv12:eof_action=repeat[vc];[vc]hwupload[v]'
+        : composite;
     // Boxes sit on the base picture, under the canvas. A chain that pads
     // has already placed the picture in the frame; one that has not is
     // still the bare content rect, so the boxes shift by its origin and
