@@ -19,6 +19,7 @@
  * one cuts a cue off the top of a broadcast.
  */
 import { spawn } from 'child_process';
+import os from 'os';
 import { createHash } from 'crypto';
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -70,12 +71,18 @@ export function parsePgs(buf, acc = { width: 0, height: 0, minY: Infinity, maxY:
  * accumulated geometry; null when the file has no such track or ffmpeg
  * failed. Never throws.
  */
-export function scanPgsWindows(srcPath, typeIndex, { signal = null, onProgress = null } = {}) {
+export function scanPgsWindows(srcPath, typeIndex, { signal = null, onProgress = null, readrate = 0 } = {}) {
   return new Promise((resolve) => {
-    const args = ['-hide_banner', '-nostdin', '-v', 'error', '-i', srcPath,
-      '-map', `0:s:${typeIndex}`, '-c', 'copy', '-f', 'sup', 'pipe:1'];
+    // readrate caps the demux at a multiple of the file's own rate: while a
+    // clip is on air the scan shares its disk with the live read, and an
+    // unthrottled 25 GB pass through a USB disk stalls the source it was
+    // meant to help. Idle, it runs flat out.
+    const args = ['-hide_banner', '-nostdin', '-v', 'error',
+      ...(readrate > 0 ? ['-readrate', String(readrate)] : []),
+      '-i', srcPath, '-map', `0:s:${typeIndex}`, '-c', 'copy', '-f', 'sup', 'pipe:1'];
     let child;
     try { child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return resolve(null); }
+    try { os.setPriority(child.pid, 19); } catch { /* not ours to lower */ }
     let acc = { width: 0, height: 0, minY: Infinity, maxY: -Infinity, minX: Infinity, maxX: -Infinity, windows: 0, cues: 0 };
     let carry = Buffer.alloc(0);
     let bytes = 0;

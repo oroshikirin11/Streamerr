@@ -5288,9 +5288,14 @@ export class PipelinePlayout extends EventEmitter {
     const t0 = Date.now();
     let lastLog = t0;
     const name = srcPath.split('/').pop();
-    this.emit('log', `[band] scanning ${name} for its PGS windows (whole file, in the background)\n`);
+    // Gentle while something is on air: three times the file's own rate,
+    // niced, so the live source keeps the disk. Idle, flat out.
+    const onAir = this.status === 'running' || this.status === 'preparing';
+    this.emit('log', `[band] scanning ${name} for its PGS windows (whole file, in the background`
+      + `${onAir ? ', throttled while on air' : ''})\n`);
     this._detached(scanPgsWindows(srcPath, sub.typeIndex, {
       signal: this._abort.signal,
+      readrate: onAir ? 3 : 0,
       onProgress: () => {
         const now = Date.now();
         if (now - lastLog > 60_000) { lastLog = now; this.emit('log', `[band] still scanning ${name}…\n`); }
