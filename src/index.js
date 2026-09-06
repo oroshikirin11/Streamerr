@@ -1813,7 +1813,20 @@ app.put('/api/config', (req, res) => {
     // air until the next broadcast. The engine decides whether the change is
     // worth restarting the source for.
     if (patch.overlay !== undefined && engine) {
-      engine.setOverlay(visibleOverlay());
+      // Showing the studio mid-broadcast changes what will be drawn, so the
+      // profile is re-tuned first — the GPU composite is probed for the
+      // studio's pictures and captions as it is for a subtitle. Without
+      // this a broadcast that went live with the studio hidden respawned
+      // with gpuSubs still false and took the software chain (Backrooms
+      // with four pictures at 0.3x on the N100, 6 Sep).
+      const eng = engine;
+      const apply = () => { if (eng === engine) eng.setOverlay(visibleOverlay()); };
+      if (eng.profile && typeof eng.retune === 'function') {
+        tuneProfile(eng.profile, eng.selection, eng.current?.item?.srcPath ?? null)
+          .then(() => eng.retune(tunedFields(eng.profile)))
+          .catch((err) => console.warn(`! re-tune for the studio failed: ${err.message}`))
+          .finally(apply);
+      } else apply();
     }
     // Turning the preview off mid-broadcast takes effect immediately: every
     // open panel learns via the status push, and connected preview windows
