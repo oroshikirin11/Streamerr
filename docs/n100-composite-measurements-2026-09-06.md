@@ -17,53 +17,56 @@ of the cinema config, HEVC VDENC 16000k, HDR output on.
 | Ghost in the Shell + English PGS (half-rate canvas) | **0.70x** | 48% |
 | Ghost in the Shell + PGS + four bouncers | 0.52x | 59% |
 
+## After the first deploy (same day, same method)
+
+| case | before | after | note |
+|---|---|---|---|
+| Backrooms + one still at size 1.0 (full-frame overlay surface) | — | 1.165x | composite area costs ~3 ms/frame, not the 20 ms a canvas frame costs |
+| Backrooms + English SRT, canvas gated by exact duplicate drop | 0.99x | 0.957x | the gate bought nothing: the cost is producing the canvas, not uploading it |
+| Backrooms + four bouncers (driver refused the move probe → canvas) | 0.77x | 0.76x | unchanged, as expected |
+| Ghost in the Shell + PGS from the sidecar (gated canvas) | 0.70x | 0.83x | source ffmpeg at 80% of a core; steps 0.66-1.11 |
+| Ghost in the Shell + PGS + four bouncers (gated canvas) | 0.52x | 0.28x, stalled | a sparse canvas stalls the video: frame sync holds the main until the next canvas frame's pts is known |
+| Mr. Robot S1E1 + subs (series control, band applied) | ~1.03x | 1.39x | no regression |
+| Backrooms + four bouncers, CPU composite (opt-in) | 0.77x | 0.547x | the frame down and up costs more than the canvas on iHD |
+| Backrooms + English SRT, CPU composite (opt-in) | 0.99x | 0.533x | same |
+
 ## What the numbers say
 
-- The GPU composite pass is free. A still picture through `overlay_vaapi`
-  runs at the bare speed. The tone map costs ~0.03x.
-- Every canvas frame handed to the driver costs the graph thread about
-  17-20 ms — 8 MB of RGBA per upload on iHD — whatever is drawn on it. At
-  24 fps that is 21 ms per video frame on top of the ~33 ms the VDBOX needs
-  for a 4K decode plus a 1080p VDENC encode, which is exactly 0.77x. The CPU
-  as a whole is idle; the one thread that submits GPU work is what stalls.
+- The GPU composite pass is cheap and scales only mildly with the overlay's
+  area: a small still is free, a full-frame surface costs ~3 ms/frame.
+- Producing a canvas frame is the cost — filling it, drawing onto it,
+  handing it over — roughly 10 ms per canvas frame on the graph thread,
+  whatever is on it. The exact duplicate gate did not help, because
+  frames are still produced (frame sync pulls the canvas ahead until the
+  next kept frame) and, worse, the gap between kept frames stalls the
+  video for its whole length. The gate and the 4:4:4 canvas were removed
+  again the same evening.
 - PGS pays for the 4K `sub2video` frame as well: ffmpeg re-sends it on every
   packet read from the file, the gate lets twelve a second through, and each
-  is scaled from 3840x2160 before the canvas can be uploaded (~50 ms per
-  canvas frame including the upload).
+  is scaled from 3840x2160 before the canvas can be uploaded.
 
-## The rules built on it (this commit; N100 numbers after deploy pending)
+## The rules that stand (second commit; N100 numbers pending)
 
-1. **Moving pictures never touch the canvas.** Each is padded once onto a
-   transparent stage twice the frame, uploaded once, and looped as
-   references; per frame a `crop` (metadata only on hardware frames) slides
-   the bounce expression over it, `scale_vaapi=…:out_range=pc` renders that
-   window (the range option defeats the identity passthrough that would
-   have handed the crop to a filter that ignores it), and `overlay_vaapi`
-   composites it like a still. Probed at go-live (`vaapiMoveHonored`: crop
-   honoured, alpha kept, edge on the pixel), demoted by doing
-   (`noGpuMove`). Local proof: positions match the canvas path within
-   encoder noise (no localised difference > 1500 px against 32000 for a
-   misplaced picture).
-2. **A canvas that only changes with a cue uploads only then.** Built as
-   `yuva444p` and gated with `mpdecimate=hi=0:lo=0:frac=1` (exact: drops a
-   frame only when all four planes are identical), converted to RGBA for the
-   frames that pass. Against the RGBA canvas the YUV round trip measured at
-   most one code value on 5% of painted pixels. A canvas that changes every
-   frame (animated caption, GIF, a mover the driver would not crop) stays
-   RGBA without the gate.
-3. **Bitmap subtitles come from a sidecar.** PGS/DVD tracks are extracted
-   like text tracks into a Matroska file holding only the track and a
-   16x16 heartbeat video at 4 fps (12 fps for DVD subs, which end by
-   duration); the GPU graphs open it as their own input, ungated, so a cue
-   change lands on its own frame and the 4K scale is paid a few times a
-   second instead of twelve. The software chain keeps reading the media
-   file.
-4. The CPU composite (frame down, draw, frame up) moves 6 MB per frame and
-   is opt-in only: `encoder.subComposite: 'cpu'`.
-
+1. **Bitmap subtitles come from a sidecar and go up directly.** PGS/DVD
+   tracks are extracted, like text tracks, into a Matroska file holding only
+   the track and a 16x16 heartbeat video (4 fps for PGS, 12 for DVD subs);
+   the GPU graphs open it as their own input, and when nothing else is drawn
+   the scaled subtitle frame IS the composite's overlay — no generated canvas,
+   no CPU blend, frames at the heartbeat rate. Cue timing measured 1.084 s
+   for a 1.000 s cue against 1.251 s from the media file.
+2. **One or two moving pictures never touch the canvas** on a driver that
+   passes the move probe (upload once, crop per frame, VAAPI window pass,
+   composite like a still). Three or more stay on the canvas: each moved
+   picture is two full-frame passes, and eight passes cost more than the one
+   canvas they replace. The N100's iHD refused the first form of the window
+   pass; the probe now tries four forms and logs what each one did.
+3. The CPU composite (frame down, draw, frame up) is opt-in only:
+   `encoder.subComposite: 'cpu'`.
 ## What to expect
 
-Per the model, Backrooms with four bouncers should land near the bare 1.27x
-(four free composite passes and no uploads), Backrooms with SRT near 1.2x,
-Ghost in the Shell with PGS near 1.15x. Verify with seek-pinned runs at
-600 s; the sustained bank is the number that matters.
+Ghost in the Shell with PGS: the 4K scale and upload four times a second
+plus a ~3 ms composite, so near 1.1x. Backrooms with SRT: unchanged (its
+cues are top-aligned, so the band does not apply and the canvas is
+full-height). Backrooms with four bouncers on this driver: unchanged at
+~0.77x — the full-rate canvas is the floor of this graph on this box until
+the window pass is accepted, and even then only for one or two pictures.

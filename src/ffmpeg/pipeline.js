@@ -6203,7 +6203,15 @@ export function buildSourceArgs({
   const rectAll = contentRect(selection?.video, profile);
   const canMove = Boolean(profile.gpuMove) && Boolean(profile.gpuSubs)
     && !profile.noGpuImages && !profile.noGpuMove && !rectAll.bars;
-  const moverImgs = canMove ? imgList.filter(gpuMovable) : [];
+  const movable = imgList.filter(gpuMovable);
+  /**
+   * Two at most. Each GPU-moved picture is two full-frame passes (the
+   * window and its composite); a full-frame pass measured ~3 ms on the
+   * N100, so four pictures would cost eight passes — more than the one
+   * canvas they replace. One or two are cheaper than the canvas; beyond
+   * that the canvas carries them all, as before.
+   */
+  const moverImgs = canMove && movable.length <= 2 ? movable : [];
   const stillImgs = imgList.filter((i) => !moverImgs.includes(i));
   const gpuImages = stillImgs.length > 0
     && Boolean(profile.gpuSubs) && !profile.noGpuImages
@@ -6863,7 +6871,7 @@ export function buildSourceArgs({
     const canvasList = band ? [] : (layer ? splitStaticImages(stillImgs).live : stillImgs);
     const perFrameImgs = canvasList.some((i) => i?.animated || isMoving(i));
     const perFrame = overlayAnimated || perFrameImgs;
-    const canvasFmt = perFrame ? 'rgba' : 'yuva444p';
+    const canvasFmt = 'rgba';
     const canvasImgs = canvasImageChain(canvasList, {
         width: rect.w, firstInput: bgInput.length ? 3 : 2,
         inLabel: 'sub', outLabel: 'cv', format: canvasFmt,
@@ -6938,7 +6946,13 @@ export function buildSourceArgs({
     // — the last input, after every picture — and from the main input
     // until then (see buildSubtitleFilter). Index counted the same way the
     // picture inputs are, so it cannot drift from them.
-    const sidecarIdx = 2 + (bgInput.length ? 1 : 0) + canvasList.length
+    // Input 1 is the canvas — unless a bitmap track goes up on its own
+    // (see `direct` below), in which case there is no canvas input and
+    // every later input sits one lower.
+    const directSub = Boolean(sub.canvasInput) && !sub.canvasOverlay && !layer
+      && !canvasList.length && !band && !rect.bars;
+    const inputBase = directSub ? 1 : 2;
+    const sidecarIdx = inputBase + (bgInput.length ? 1 : 0) + canvasList.length
       + (gpuImgs.filters.length ? stillImgs.length : 0) + moverImgs.length;
     const subSrc = sub.sidecar ? `${sidecarIdx}:s:0` : sub.canvasInput;
     // The gate exists for the media file's thousands of heartbeats a
@@ -6954,7 +6968,7 @@ export function buildSourceArgs({
         + `setpts=PTS-STARTPTS,format=${canvasFmt}[c0];`
         + `[${subSrc}]${subGate}`
         + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
-        + `[c0][sf]overlay=eof_action=pass:format=${perFrame ? 'auto' : 'yuv444'},format=${canvasFmt}`
+        + `[c0][sf]overlay=eof_action=pass:format=auto,format=${canvasFmt}`
       : (band || sub.canvasFilter)
         ? `${layerSrc}setpts=PTS+${shift}/TB,`
           + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
@@ -6963,13 +6977,26 @@ export function buildSourceArgs({
         : `${layerSrc}setpts=PTS-STARTPTS,format=${canvasFmt}`;
     // The gate: a frame identical to the last one uploaded never reaches
     // the driver; overlay_vaapi keeps compositing the one it already has.
-    const gate = perFrame ? '' : 'mpdecimate=hi=0:lo=0:frac=1,';
-    const canvasChain = canvasImgs.filters.length
-      // null carries the padding step across the relabel; the canvas has to
-      // reach the upload as RGBA or the composite becomes an opaque box.
-      ? `${canvasHead}[sub];${canvasImgs.filters.join(';')};`
-        + `[cv]${gate}null${canvasPad},format=rgba,hwupload[ov];`
-      : `${canvasHead},${gate}null${canvasPad},format=rgba,hwupload[ov];`;
+    /**
+     * A bitmap track with nothing else to draw skips the canvas: the scaled
+     * subtitle frame IS a transparent RGBA frame at the content rectangle,
+     * so it is uploaded as the composite's overlay directly. No generated
+     * canvas frames, no CPU overlay onto them; the frames come at the
+     * sidecar's heartbeat (or the gate's interval from the media file).
+     * Measured on the N100 with Ghost in the Shell: producing a canvas
+     * frame — filling it, blending the subtitle frame onto it, uploading
+     * it — was the cost, twelve times a second, not the composite.
+     */
+    const direct = Boolean(sub.canvasInput) && !sub.canvasOverlay && !layer
+      && !canvasImgs.filters.length && !band && !rect.bars;
+    const canvasChain = direct
+      ? `[${subSrc}]${subGate}scale=${rect.w}:${rect.h}:flags=fast_bilinear,format=rgba,hwupload[ov];`
+      : canvasImgs.filters.length
+        // null carries the padding step across the relabel; the canvas has to
+        // stay RGBA to the upload or the composite becomes an opaque box.
+        ? `${canvasHead}[sub];${canvasImgs.filters.join(';')};`
+          + `[cv]null${canvasPad},hwupload[ov];`
+        : `${canvasHead}${canvasPad},hwupload[ov];`;
     // A band is a shorter surface than the frame, so it has to be told where
     // to land. Reachable only when there are no bars, which is the one case
     // whose composite is a bare overlay_vaapi. Pictures, when there are any,
@@ -6986,7 +7013,7 @@ export function buildSourceArgs({
     // plain shape (no bars), so the composite always ends in [v] here.
     const movers = vaapiMovedImageChain(moverImgs, {
       width: rect.w, height: rect.h,
-      firstInput: 2 + (bgInput.length ? 1 : 0) + canvasList.length
+      firstInput: inputBase + (bgInput.length ? 1 : 0) + canvasList.length
         + (gpuImgs.filters.length ? stillImgs.length : 0),
       inLabel: 'vc', outLabel: 'v', rate: eff.rate, phase: offset, scale: profile.gpuMoveScale,
       end: duration != null && duration > 0 ? Math.max(1, duration - offset) + 5 : null,
@@ -7023,10 +7050,11 @@ export function buildSourceArgs({
       // Input 1 is the canvas base: the pre-rendered picture layer when
       // there is one, otherwise a transparent frame. Same size, same rate,
       // same RGBA — everything downstream is identical either way.
-      ...(layer
-        ? ['-r', canvasRate, '-i', layer]
-        : ['-f', 'lavfi', ...canvasCap,
-          '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=${canvasFmt}`]),
+      ...(direct ? []
+        : layer
+          ? ['-r', canvasRate, '-i', layer]
+          : ['-f', 'lavfi', ...canvasCap,
+            '-i', `color=c=black@0.0:s=${rect.w}x${canvasH}:r=${canvasRate},format=${canvasFmt}`]),
       ...bgInput,
       // Mutually exclusive: a banded canvas has no pictures drawn into it,
       // and an unbanded one composites none on the GPU. Either way the first

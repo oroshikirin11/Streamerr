@@ -69,8 +69,11 @@ console.log('\nthe GPU canvas graph');
   const i = args.lastIndexOf('-i');
   check('the sidecar is the last input', args[i + 1], '/c/k.mks');
   check('...seeked with the clip', args.slice(i - 2, i), ['-ss', '600.000']);
-  check('the canvas reads the frames from it (input 2: media, canvas, sidecar)',
-    g.includes('[2:s:0]scale=1920:1038:flags=fast_bilinear[sf]'), true);
+  check('alone, it goes up directly (input 1: media, sidecar — no canvas)',
+    g.includes('[1:s:0]scale=1920:1038:flags=fast_bilinear,format=rgba,hwupload[ov]'), true);
+  const withCaption = graphOf(build({ extractedPath: '/c/k.mks', overlayPath: '/c/ov.ass' }));
+  check('with a caption, the canvas is back and the sidecar is input 2',
+    withCaption.includes('[2:s:0]scale=1920:1038:flags=fast_bilinear[sf]') && withCaption.includes('[c0][sf]overlay='), true);
   check('...ungated: a sidecar beats a few times a second, and a gate would delay every cue change',
     g.includes('select=isnan(prev_selected_t)'), false);
   check('...not from the media file', g.includes('[0:s:2]'), false);
@@ -82,8 +85,8 @@ console.log('\n...counted past the pictures');
 {
   const args = build({ extractedPath: '/c/k.mks', overlayImages: [bounce(1), bounce(2)] });
   const g = graphOf(args);
-  check('two movers sit at 2 and 3, the sidecar at 4', g.includes('[4:s:0]scale='), true);
-  check('and the movers are where they were', g.includes('[2:v]format=rgba') && g.includes('[3:v]format=rgba'), true);
+  check('two movers sit at 1 and 2, the sidecar at 3 (no canvas)', g.includes('[3:s:0]scale='), true);
+  check('and the movers are where they were', g.includes('[1:v]format=rgba') && g.includes('[2:v]format=rgba'), true);
   check('the sidecar input follows the picture inputs',
     args.indexOf('/c/k.mks') > args.indexOf('/app/overlays/p2.png'), true);
 }

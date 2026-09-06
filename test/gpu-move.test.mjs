@@ -1,17 +1,17 @@
 /**
  * The two zero-upload rules measured on the N100 (6 Sep 2026):
  *
- *  - a canvas whose content only changes with a cue is built as yuva444p
- *    and gated by an exact mpdecimate, so identical frames never reach the
- *    driver (each 8 MB RGBA canvas frame cost ~17-20 ms there);
- *  - a bouncing picture is composited by the GPU from a surface uploaded
- *    once, cropped per frame (the crop metadata rides into a VAAPI scale
- *    pass), instead of being drawn on a full-rate canvas.
+ *  - a bouncing picture (at most two) is composited by the GPU from a
+ *    surface uploaded once, cropped per frame (the crop metadata rides into
+ *    a VAAPI scale pass), instead of being drawn on a full-rate canvas;
+ *  - a bitmap track with nothing else to draw goes up as the composite's
+ *    overlay directly, without a generated canvas.
  *
- * And the things that must NOT change: a canvas that moves every frame stays
- * RGBA without the gate; a driver that failed the probe (or was demoted)
- * keeps the canvas for its movers; stills keep their one-time upload; the
- * CPU composite is opt-in only.
+ * And the things that must NOT change: the canvas stays RGBA and continuous
+ * (an exact duplicate gate was tried and measured: it bought nothing and a
+ * sparse canvas stalls the video behind frame sync); a driver that failed
+ * the probe (or was demoted) keeps the canvas for its movers; stills keep
+ * their one-time upload; the CPU composite is opt-in only.
  *
  * Run: node test/gpu-move.test.mjs
  */
@@ -86,37 +86,33 @@ console.log('\n...and over the subtitle canvas when there is one');
   }));
   check('the canvas composites first, into [vc]', g.includes('[b][ov]overlay_vaapi[vc]'), true);
   check('the mover goes on top of it', g.includes('[vc][mv0]overlay_vaapi=x=0:y=0:eof_action=repeat[v]'), true);
-  check('the canvas itself carries no mover (half rate, gated)',
-    g.includes('r=24000/2002,format=yuva444p') || g.includes('mpdecimate=hi=0:lo=0:frac=1'), true);
+  check('the canvas itself carries no mover (half rate, RGBA)',
+    build({ profile: vaapi, overlayImages: [bounce(1)], selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: srt }, extractedPath: '/c/x.srt' })
+      .join(' ').includes('r=24000/2002,format=rgba'), true);
   check('the canvas is not drawn with the bounce expression', g.includes('2*(W-w)'), false);
 }
 
-console.log('\nthe canvas upload gate');
+console.log('\nthe canvas is continuous RGBA, never gated');
 {
   const g = graphOf(build({
     profile: vaapi, selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: srt }, extractedPath: '/c/x.srt',
   }));
-  check('text subtitles: yuva444p canvas at half rate', g.includes('setpts=PTS-STARTPTS,format=yuva444p'), true);
-  check('...gated by an exact mpdecimate before the upload',
-    g.includes('format=yuva444p,mpdecimate=hi=0:lo=0:frac=1,null,format=rgba,hwupload[ov]'), true);
+  check('text subtitles: RGBA canvas at half rate', g.includes('setpts=PTS-STARTPTS,format=rgba,hwupload[ov]'), true);
+  check('...no duplicate gate (a sparse canvas stalls the video)', g.includes('mpdecimate'), false);
   const p = graphOf(build({ profile: vaapi, selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: pgs } }));
-  check('bitmap subtitles: blended onto the canvas in 4:4:4, then gated',
-    p.includes('overlay=eof_action=pass:format=yuv444,format=yuva444p,mpdecimate=hi=0:lo=0:frac=1'), true);
-  check('...the sub2video gate stays in front of the scale', p.includes('select=isnan(prev_selected_t)'), true);
-  const a = graphOf(build({
-    profile: vaapi, overlayAnimated: true, overlayPath: '/c/ov.ass',
-  }));
-  check('a moving caption: RGBA canvas at full rate, no gate', a.includes('format=rgba[') || a.includes('format=rgba,hwupload'), true);
-  check('...and no mpdecimate', a.includes('mpdecimate'), false);
-  const gg = graphOf(build({ profile: vaapi, overlayImages: [gif] }));
-  check('an animated GIF on the canvas: RGBA, no gate', gg.includes('mpdecimate'), false);
+  check('bitmap subtitles alone: the scaled frame IS the overlay, no canvas',
+    p.includes('[0:s:2]select=isnan(prev_selected_t)') && p.includes('flags=fast_bilinear,format=rgba,hwupload[ov]'), true);
+  check('...and no generated canvas input', build({ profile: vaapi, selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: pgs } }).join(' ').includes('color=c=black@0.0'), false);
+  const pc = graphOf(build({ profile: vaapi, selection: { video: hdr, audio: { typeIndex: 0 }, subtitle: pgs }, overlayPath: '/c/ov.ass' }));
+  check('bitmap subtitles with a caption: the canvas carries both', pc.includes('[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'), true);
+  const a = graphOf(build({ profile: vaapi, overlayAnimated: true, overlayPath: '/c/ov.ass' }));
+  check('a moving caption: RGBA canvas at full rate', a.includes('format=rgba,hwupload'), true);
 }
 
 console.log('\nwhat falls back, and what is untouched');
 {
   const off = graphOf(build({ profile: { ...vaapi, gpuMove: false }, overlayImages: [bounce(1)] }));
   check('no probe pass: the mover is drawn on a full-rate RGBA canvas', off.includes('2*(W-w)') && build({ profile: { ...vaapi, gpuMove: false }, overlayImages: [bounce(1)] }).join(' ').includes('r=24000/1001,format=rgba'), true);
-  check('...without the gate', off.includes('mpdecimate'), false);
   const dem = graphOf(build({ profile: { ...vaapi, noGpuMove: true }, overlayImages: [bounce(1)] }));
   check('demoted: same canvas', dem.includes('2*(W-w)'), true);
   const bars = graphOf(build({
@@ -127,7 +123,9 @@ console.log('\nwhat falls back, and what is untouched');
   check('a still: one upload, one overlay_vaapi, no crop', st.includes('crop=w=1920:h=1038:x=floor('), false);
   check('...still the fixed-function shape', st.includes('[b][img0]overlay_vaapi=x='), true);
   const none = build({ profile: vaapi });
-  check('nothing drawn: -vf chain, no canvas, no gate', none.includes('-vf') && !graphOf(none).includes('mpdecimate'), true);
+  check('nothing drawn: -vf chain, no canvas', none.includes('-vf') && !graphOf(none).includes('hwupload'), true);
+  const three = graphOf(build({ profile: vaapi, overlayImages: [bounce(1), bounce(2), bounce(3)] }));
+  check('three movers: all on the canvas (eight passes would cost more than one canvas)', three.includes('2*(W-w)') && !three.includes('crop=w='), true);
   check('a timed picture is not GPU-movable', gpuMovable({ ...bounce(1), start: 1, end: 5 }), false);
   check('an animated picture is not GPU-movable', gpuMovable({ ...bounce(1), animated: true }), false);
   check('a plain bouncing picture is', gpuMovable(bounce(1)), true);

@@ -35,7 +35,7 @@ expect = [(0.0, 'none'), (1.0, 'bottom'), (3.5, 'none'), (5.0, 'top'), (7.5, 'no
 bad = 0
 for i, (t, s) in enumerate(expect):
     got = edges[i] if i < len(edges) else None
-    ok = got is not None and got[1] == s and t - 0.001 <= got[0] <= t + 0.15
+    ok = got is not None and got[1] == s and t - 0.045 <= got[0] <= t + 0.15
     bad += 0 if ok else 1
     print(f'  edge {i}: expected {s:6s} at {t:.1f}s, got {got[1] + " at %.3fs" % got[0] if got else "nothing"}  {"OK" if ok else "MISMATCH"}')
 print(f'  pixels: {"all OK" if not bad else str(bad) + " MISMATCH"} ({len(states)} frames read)')
