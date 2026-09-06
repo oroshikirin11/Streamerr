@@ -384,6 +384,13 @@ export function hevcEosPacket(ptsSeconds = 0) {
 }
 const BANK_MIN_BYTES = 2 * 1024 * 1024;
 /**
+ * Opener chunk for a chunked successor that lands behind a KEPT cushion
+ * (a live track or overlay switch): 3s instead of the 5s default, so on
+ * a box whose workers each run well under realtime the first bytes reach
+ * the bank before the cushion drains.
+ */
+const LIVE_SWITCH_OPENER_SECONDS = 3;
+/**
  * A ceiling on the bank, in bytes, derived from the depth actually asked for
  * rather than fixed.
  *
@@ -2863,6 +2870,14 @@ export class PipelinePlayout extends EventEmitter {
    */
   _applyRunway() {
     const cap = this.applySeconds ?? this.bufferSeconds ?? 15;
+    // A chunked successor has no single spawn to cover: its first bytes
+    // are a whole opener chunk encoded by a worker running at a fraction
+    // of realtime (an N100 with four workers: ~0.35x each, so a 5s
+    // opener lands after ~15s). Cut to a spawn-sized runway, the
+    // publisher ran dry for 21s at every subtitle switch onto a bitmap
+    // track. Keep the whole cushion instead; the opener is shortened
+    // to match in _playChunked.
+    if (this._chunkWorkers() > 1 && this.selection?.subtitle) return cap;
     if (this._spawnMs == null) return cap;
     const floor = (this._spawnMs / 1000) * 2 + (this.profile?.gopSeconds ?? 2) + 1;
     return Math.min(cap, Math.max(3, floor));
@@ -4810,6 +4825,12 @@ export class PipelinePlayout extends EventEmitter {
       duration: this.current.duration,
       chunkSeconds,
       workers,
+      // A cushion-kept switch (publisher running, nothing flushed) has
+      // the kept cushion to land in: the shorter the opener, the sooner
+      // the first bytes arrive behind it. Everything else keeps the
+      // default opener — going live and card-covered resumes are gated
+      // on a full chunk anyway, and fewer ramp seams means less drift.
+      firstSeconds: this.publisher && !flushed ? LIVE_SWITCH_OPENER_SECONDS : undefined,
       holdUntilReady: cover,
       workDir: this._chunkPlan().dir,
       // A quarter of the budget retains what has already aired, so a
