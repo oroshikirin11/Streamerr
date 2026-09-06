@@ -16,6 +16,7 @@
  * the reader answer null and the caller falls back to a demux.
  */
 import { open } from 'fs/promises';
+import { inflateSync } from 'zlib';
 
 const ID = {
   EBML: 0x1A45DFA3, Segment: 0x18538067, SeekHead: 0x114D9B74, Seek: 0x4DBB,
@@ -24,6 +25,8 @@ const ID = {
   SimpleBlock: 0xA3, BlockGroup: 0xA0, Block: 0xA1, Cues: 0x1C53BB6B,
   CuePoint: 0xBB, CueTrackPositions: 0xB7, CueTrack: 0xF7,
   CueClusterPosition: 0xF1, CueRelativePosition: 0xF0,
+  ContentEncodings: 0x6D80, ContentEncoding: 0x6240, ContentCompression: 0x5034,
+  ContentCompAlgo: 0x4254, ContentCompSettings: 0x4255,
 };
 const TRACK_SUBTITLE = 0x11;
 const MAX_CUES = 50_000;
@@ -73,9 +76,11 @@ function* children(buf, start, end) {
  * The windows of the Nth subtitle stream, read through the cues.
  * Resolves to the scan geometry pgsband.js expects, or null.
  */
-export async function pgsWindowsViaCues(srcPath, subtitleIndex, { maxBlocks = MAX_CUES } = {}) {
+export async function pgsWindowsViaCues(srcPath, subtitleIndex, { maxBlocks = MAX_CUES, diag = null, concurrency = 8 } = {}) {
+  const t0 = Date.now();
+  const bail = (reason) => { if (diag) { diag.reason = reason; diag.ms = Date.now() - t0; } return null; };
   let fh;
-  try { fh = await open(srcPath, 'r'); } catch { return null; }
+  try { fh = await open(srcPath, 'r'); } catch { return bail('cannot open'); }
   try {
     const st = await fh.stat();
     const readAt = async (at, len) => {
@@ -88,9 +93,9 @@ export async function pgsWindowsViaCues(srcPath, subtitleIndex, { maxBlocks = MA
     // EBML header, then the Segment.
     let head = await readAt(0, 64 * 1024);
     const ebml = header(head, 0);
-    if (!ebml || ebml.id !== ID.EBML) return null;
+    if (!ebml || ebml.id !== ID.EBML) return bail('not an EBML file');
     const seg = header(head, ebml.dataAt + ebml.size);
-    if (!seg || seg.id !== ID.Segment) return null;
+    if (!seg || seg.id !== ID.Segment) return bail('no Segment');
     const segStart = seg.dataAt;
 
     // Top-level children: SeekHead (where the Cues are), Tracks, maybe
@@ -123,37 +128,62 @@ export async function pgsWindowsViaCues(srcPath, subtitleIndex, { maxBlocks = MA
       if (h.unknown) break;
       pos += h.headerLen + h.size;   // h was parsed at offset 0 of a buffer read at pos
     }
-    if (!tracksBuf) return null;
+    if (!tracksBuf) return bail('no Tracks before the first Cluster');
     if (!cuesBuf && cuesAt != null) {
       const hb = await readAt(cuesAt, 64);
       const ch = header(hb, 0);
-      if (!ch || ch.id !== ID.Cues || ch.unknown || ch.size > 256 * 1024 * 1024) return null;
+      if (!ch || ch.id !== ID.Cues || ch.unknown || ch.size > 256 * 1024 * 1024) return bail(`Cues at ${cuesAt} unreadable`);
       cuesBuf = await readAt(cuesAt, ch.size + ch.headerLen);
     }
-    if (!cuesBuf) return null;
+    if (!cuesBuf) return bail('no Cues in the SeekHead');
 
     // The Nth subtitle track, in order of appearance — ffmpeg's s:N.
+    // mkvmerge compresses subtitle tracks by default (ContentCompression:
+    // zlib, or header stripping with a settings prefix); the demuxer undoes
+    // that silently, so this reader has to as well.
     const th = header(tracksBuf, 0);
-    let trackNumber = null; let seen = 0;
+    let trackNumber = null; let seen = 0; let compAlgo = null; let compSettings = null;
     for (const te of children(tracksBuf, th.dataAt, th.dataAt + th.size)) {
       if (te.id !== ID.TrackEntry) continue;
-      let num = null; let type = null;
+      let num = null; let type = null; let algo = null; let settings = null;
       for (const c of children(tracksBuf, te.dataAt, te.end)) {
         if (c.id === ID.TrackNumber) num = uintOf(tracksBuf, c.dataAt, c.size);
         if (c.id === ID.TrackType) type = uintOf(tracksBuf, c.dataAt, c.size);
+        if (c.id === ID.ContentEncodings) {
+          for (const enc of children(tracksBuf, c.dataAt, c.end)) {
+            if (enc.id !== ID.ContentEncoding) continue;
+            for (const comp of children(tracksBuf, enc.dataAt, enc.end)) {
+              if (comp.id !== ID.ContentCompression) continue;
+              algo = 0; // ContentCompAlgo defaults to zlib when absent
+              for (const cc of children(tracksBuf, comp.dataAt, comp.end)) {
+                if (cc.id === ID.ContentCompAlgo) algo = uintOf(tracksBuf, cc.dataAt, cc.size);
+                if (cc.id === ID.ContentCompSettings) settings = Buffer.from(tracksBuf.subarray(cc.dataAt, cc.dataAt + cc.size));
+              }
+            }
+          }
+        }
       }
       if (type === TRACK_SUBTITLE) {
-        if (seen === subtitleIndex) { trackNumber = num; break; }
+        if (seen === subtitleIndex) { trackNumber = num; compAlgo = algo; compSettings = settings; break; }
         seen += 1;
       }
     }
-    if (trackNumber == null) return null;
+    if (trackNumber == null) return bail(`no subtitle track #${subtitleIndex} in Tracks`);
+    if (compAlgo != null && compAlgo !== 0 && compAlgo !== 3) return bail(`content compression ${compAlgo} not handled`);
+    const unpack = (frame) => {
+      if (compAlgo === 0) return inflateSync(frame);
+      if (compAlgo === 3) return compSettings ? Buffer.concat([compSettings, frame]) : frame;
+      return frame;
+    };
+    if (diag) diag.compression = compAlgo;
 
     // Every cue for that track.
     const ch = header(cuesBuf, 0);
     const blocks = [];
+    let cuesSeen = 0; let withRel = 0;
     for (const cp of children(cuesBuf, ch.dataAt, ch.dataAt + ch.size)) {
       if (cp.id !== ID.CuePoint) continue;
+      cuesSeen += 1;
       for (const tp of children(cuesBuf, cp.dataAt, cp.end)) {
         if (tp.id !== ID.CueTrackPositions) continue;
         let track = null; let cluster = null; let rel = null;
@@ -162,47 +192,64 @@ export async function pgsWindowsViaCues(srcPath, subtitleIndex, { maxBlocks = MA
           if (c.id === ID.CueClusterPosition) cluster = uintOf(cuesBuf, c.dataAt, c.size);
           if (c.id === ID.CueRelativePosition) rel = uintOf(cuesBuf, c.dataAt, c.size);
         }
+        if (rel != null) withRel += 1;
         if (track === trackNumber && cluster != null && rel != null) blocks.push({ cluster, rel });
       }
-      if (blocks.length > maxBlocks) return null;
+      if (blocks.length > maxBlocks) return bail('too many cues');
     }
-    if (!blocks.length) return null;
+    if (!blocks.length) return bail(`no cue points for track ${trackNumber} (${cuesSeen} cue points, ${withRel} with a relative position)`);
 
     // Read each block: the cluster's header tells where its data starts,
-    // the relative position points at the block element inside it.
+    // the relative position points at the block element inside it. A few
+    // reads in flight at once — the disk's elevator makes short work of
+    // sorted offsets — and every oddity names itself.
     const acc = { width: 0, height: 0, minY: Infinity, maxY: -Infinity, minX: Infinity, maxX: -Infinity, windows: 0, cues: 0, source: 'cues', blocks: blocks.length };
     const clusterData = new Map();
-    for (const b of blocks) {
+    let failure = null; let read = 0;
+    const one = async (b) => {
+      if (failure) return;
       let dataAt = clusterData.get(b.cluster);
       if (dataAt == null) {
         const cb = await readAt(segStart + b.cluster, 16);
         const chh = header(cb, 0);
-        if (!chh || chh.id !== ID.Cluster) return null;
+        if (!chh || chh.id !== ID.Cluster) { failure = `cue points at ${segStart + b.cluster}, which is not a Cluster (id ${chh ? chh.id.toString(16) : '?'})`; return; }
         dataAt = segStart + b.cluster + chh.headerLen;
         clusterData.set(b.cluster, dataAt);
       }
       const at = dataAt + b.rel;
       const bh = await readAt(at, 16);
       let eh = header(bh, 0);
-      if (!eh) return null;
+      if (diag && !diag.first) diag.first = { cluster: segStart + b.cluster, rel: b.rel, at, id: eh ? eh.id.toString(16) : null, size: eh?.size, bytes: bh.subarray(0, 16).toString('hex') };
+      if (!eh) { failure = `no element at block offset ${at}`; return; }
       let frameAt = at + eh.headerLen; let frameLen = eh.size;
       if (eh.id === ID.BlockGroup) {
-        const gb = await readAt(frameAt, 16);
-        const inner = header(gb, 0);
-        if (!inner || inner.id !== ID.Block) return null;
-        frameAt += inner.headerLen; frameLen = inner.size; eh = inner;
-      } else if (eh.id !== ID.SimpleBlock) return null;
-      if (frameLen > 4 * 1024 * 1024) return null;
+        // The Block may not be the group's first child.
+        const gb = await readAt(frameAt, Math.min(eh.size, 64));
+        let q = 0; let inner = null;
+        while (q < gb.length) { const c = header(gb, q); if (!c) break; if (c.id === ID.Block) { inner = { ...c, at: q }; break; } q = c.dataAt + c.size; }
+        if (!inner) { failure = `BlockGroup at ${at} without a Block in its first bytes`; return; }
+        frameAt += inner.dataAt; frameLen = inner.size;
+      } else if (eh.id !== ID.SimpleBlock) { failure = `element ${eh.id.toString(16)} at block offset ${at} is not a block`; return; }
+      if (frameLen > 8 * 1024 * 1024) { failure = `a ${frameLen}-byte block`; return; }
       const blk = await readAt(frameAt, frameLen);
       const tn = vint(blk, 0);
-      if (!tn) return null;
+      if (!tn) { failure = `unreadable block header at ${frameAt}`; return; }
       const flags = blk[tn.length + 2];
-      if (flags & 0x06) return null;           // laced: not worth guessing
-      parseMkvPgsFrame(blk.subarray(tn.length + 3), acc);
+      if (flags & 0x06) { failure = 'a laced block'; return; }
+      let frame = blk.subarray(tn.length + 3);
+      try { frame = unpack(frame); } catch (e) { failure = `block at ${frameAt} did not inflate: ${e?.message ?? e}`; return; }
+      parseMkvPgsFrame(frame, acc);
+      read += 1;
+    };
+    for (let i = 0; i < blocks.length && !failure; i += concurrency) {
+      await Promise.all(blocks.slice(i, i + concurrency).map(one));
     }
-    return acc.windows > 0 ? acc : null;
-  } catch {
-    return null;
+    if (diag) { diag.read = read; diag.windows = acc.windows; diag.cues = acc.cues; diag.ms = Date.now() - t0; }
+    if (failure) return bail(failure);
+    if (!(acc.windows > 0)) return bail(`${read} blocks read, no window definitions (size ${acc.width}x${acc.height}, ${acc.cues} presentation sets)`);
+    return acc;
+  } catch (e) {
+    return bail(`error: ${e?.message ?? e}`);
   } finally {
     try { await fh.close(); } catch { /* closed */ }
   }

@@ -105,10 +105,24 @@ export function scanPgsWindows(srcPath, typeIndex, { signal = null, onProgress =
  * The band for a scanned track at a given output rectangle, or null with a
  * reason. Height is in output rows; y is where the band sits.
  */
-export function pgsBandFor(scan, rect) {
+/** Presentation sizes a PGS stream is authored at. */
+const PGS_SIZES = new Set(['1920x1080', '1280x720', '720x480', '720x576', '3840x2160', '1440x1080', '1920x1088', '4096x2160']);
+
+export function pgsBandFor(scan, rect, video = null) {
   if (!scan || !scan.width || !scan.height || !Number.isFinite(scan.minY)) {
     return { band: null, reason: 'no window geometry in the track' };
   }
+  // Geometry that cannot be a real PGS stream is a misread, never a band:
+  // a wrong crop cuts the subtitles off entirely.
+  const sane = scan.width >= 320 && scan.width <= 8192 && scan.height >= 240 && scan.height <= 8192
+    && scan.minY >= 0 && scan.maxY <= scan.height && scan.minY < scan.maxY
+    && (scan.minX ?? 0) >= 0 && (scan.maxX ?? scan.width) <= scan.width
+    && scan.windows >= 1 && (scan.cues ?? 1) >= 1;
+  if (!sane) return { band: null, reason: 'implausible window geometry — not trusted' };
+  // And a presentation size a disc is authored at, or the video's own.
+  const sizeOk = PGS_SIZES.has(`${scan.width}x${scan.height}`)
+    || (video?.width && video?.height && Math.abs(video.width - scan.width) <= 16 && Math.abs(video.height - scan.height) <= 16);
+  if (!sizeOk) return { band: null, reason: `unfamiliar presentation size ${scan.width}x${scan.height} — not trusted` };
   const top = Math.max(0, scan.minY - MARGIN) / scan.height;
   if (top < LOWEST_TOP) {
     return { band: null, reason: `cues reach ${Math.round(top * 100)}% from the top` };

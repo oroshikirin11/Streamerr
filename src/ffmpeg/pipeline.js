@@ -5252,7 +5252,7 @@ export class PipelinePlayout extends EventEmitter {
       return null;
     }
     this._pgsScans.set(key, scan);
-    const { band, reason } = pgsBandFor(scan, rect);
+    const { band, reason } = pgsBandFor(scan, rect, this.selection?.video);
     if (!band) {
       this._bandInfo = { reason };
       if (!this._bandSaid?.has(key)) {
@@ -5293,18 +5293,35 @@ export class PipelinePlayout extends EventEmitter {
     const stored = readPgsScan(this.cacheDir, key);
     if (stored) { this._pgsScans.set(key, stored); return stored; }
     const t0 = Date.now();
-    const scan = await pgsWindowsViaCues(srcPath, sub.typeIndex);
-    if (this._stopping) return null;
+    const diag = {};
+    // Ten seconds at most on the clip's preparation: past that the read
+    // goes on in the background and the clip spawns on the full canvas,
+    // to respawn behind the cushion when the answer lands.
+    const reading = pgsWindowsViaCues(srcPath, sub.typeIndex, { diag });
     const name = srcPath.split('/').pop();
-    if (scan) {
-      this._pgsScans.set(key, scan);
-      writePgsScan(this.cacheDir, key, scan);
-      this.emit('log', `[band] ${name}: PGS windows read from the cue index in `
-        + `${((Date.now() - t0) / 1000).toFixed(1)}s (${scan.blocks} blocks)\n`);
-      return scan;
-    }
-    this.emit('log', `[band] ${name}: no subtitle cues in the index — scanning the file instead\n`);
-    this._pgsScanFor(item, sub);
+    const settle = (scan) => {
+      if (this._stopping) return null;
+      if (scan) {
+        this._pgsScans.set(key, scan);
+        writePgsScan(this.cacheDir, key, scan);
+        this.emit('log', `[band] ${name}: PGS windows read from the cue index in `
+          + `${((Date.now() - t0) / 1000).toFixed(1)}s (${scan.blocks} blocks)\n`);
+        return scan;
+      }
+      this.emit('log', `[band] ${name}: cue index gave no windows — ${diag.reason ?? 'unknown'}`
+        + ` (${((Date.now() - t0) / 1000).toFixed(1)}s) — scanning the file instead\n`);
+      this._pgsScanFor(item, sub);
+      return null;
+    };
+    const scan = await Promise.race([reading, new Promise((r) => setTimeout(() => r('late'), 10_000))]);
+    if (scan !== 'late') return settle(scan);
+    this.emit('log', `[band] ${name}: still reading the cue index — spawning meanwhile\n`);
+    this._detached(reading.then((late) => {
+      const got = settle(late);
+      if (!got || this.current?.item !== item || this.status !== 'running' || this._bandInfo?.applied) return;
+      const rect = contentRect(this.selection?.video, this.profile);
+      if (pgsBandFor(got, rect, this.selection?.video).band) this._respawnForBand(item);
+    }), 'late cue index');
     return null;
   }
 
@@ -5335,7 +5352,7 @@ export class PipelinePlayout extends EventEmitter {
       if (!scan) return;
       if (this._stopping || this.status !== 'running') return;
       const rect = contentRect(this.selection?.video, this.profile);
-      const { band, reason } = pgsBandFor(scan, rect);
+      const { band, reason } = pgsBandFor(scan, rect, this.selection?.video);
       this.emit('log', `[band] ${name}: ${band ? `${rect.w}x${band.height} band` : `full canvas — ${reason}`}\n`);
       if (!band) return;
       // On air with a full canvas on this very clip: take the band now.
