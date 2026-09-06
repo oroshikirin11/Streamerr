@@ -265,7 +265,14 @@ async function tuneProfile(profile, selection, srcPath = null) {
   profile.gpuSubs = false;
   profile.barsGraph = undefined;
 
-  if (!selection?.subtitle) return;
+  // A studio caption with no subtitle rides the same canvas as a text
+  // subtitle, so it needs the same probe. Returning here left gpuSubs
+  // false for it, and the clip took the CPU graph: measured on the N100,
+  // a caption on a 4K HDR title ran 0.42x on three cores where the GPU
+  // composite runs above realtime.
+  const captionOn = (config.overlay?.items ?? []).some((i) => i?.type === 'text'
+    && i?.enabled !== false && String(i?.text ?? '').trim());
+  if (!selection?.subtitle && !(captionOn && !config.overlay?.hidden)) return;
 
   if (globalThis.__alphaOk === undefined) {
     globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,

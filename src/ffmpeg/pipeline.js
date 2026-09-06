@@ -282,6 +282,7 @@ export function contentRect(video, profile) {
   return { w, h, x, y, bars: x > 1 || y > 1 };
 }
 import { extractSubtitle, extractFonts, isExtractable } from './subcache.js';
+import { pgsCacheKey, scanPgsWindows, pgsBandFor, readPgsScan, writePgsScan } from './pgsband.js';
 import { ChunkScheduler } from './chunker.js';
 import { cpuTonemap } from './probe.js';
 
@@ -3907,6 +3908,9 @@ export class PipelinePlayout extends EventEmitter {
    * analysis is a whitelist.
    */
   _subtitleBand(extractedPath, { overlayPath, fontsDir }) {
+    // A bitmap track has no script to analyse; its band comes from the
+    // windows the PGS stream declares (pgsband.js), scanned once per file.
+    if (this.selection?.subtitle?.bitmap) return this._pgsBand(overlayPath);
     if (!this.cacheDir || !extractedPath) return null;
     // A Studio caption is a second libass pass over the same canvas and can
     // sit anywhere on screen, so it keeps the full frame. Pictures do not
@@ -4653,7 +4657,8 @@ export class PipelinePlayout extends EventEmitter {
       out.push('no subtitles — not the cause');
     } else if (sub.bitmap) {
       out.push(`bitmap subtitles (${sub.codec ?? '?'}) — ${/overlay_vaapi/.test(this._lastArgs ?? '')
-        ? 'on the GPU canvas' : 'blended on the CPU'}, never banded`);
+        ? 'on the GPU canvas' : 'blended on the CPU'}`
+        + (this._bandInfo?.applied ? `, ${this._bandInfo.height}px band` : `, full canvas${this._bandInfo?.reason ? ` (${this._bandInfo.reason})` : ''}`));
     } else {
       const n = this._subInfo?.events ? ` (${this._subInfo.events} events)` : '';
       out.push(this._bandInfo?.applied
@@ -5221,6 +5226,115 @@ export class PipelinePlayout extends EventEmitter {
     } catch { return null; }
   }
 
+  /**
+   * The band for the current clip's bitmap subtitle, from a scan of the
+   * track's windows. Null — a full canvas — until the scan has answered;
+   * the scan runs detached and, when it lands while this clip is still on
+   * air with a full canvas, the clip respawns behind the cushion to take
+   * the band, as a studio apply would.
+   */
+  _pgsBand(overlayPath) {
+    const sub = this.selection?.subtitle;
+    const item = this.current?.item;
+    const srcPath = item?.srcPath;
+    if (!sub?.bitmap || !srcPath || !this.cacheDir) return null;
+    if (overlayPath) { this._bandInfo = { reason: 'a text overlay is in use' }; return null; }
+    const rect = contentRect(this.selection?.video, this.profile);
+    if (rect.bars) { this._bandInfo = { reason: 'the output is pillarboxed' }; return null; }
+    const key = pgsCacheKey(srcPath, sub.typeIndex);
+    this._pgsScans ??= new Map();
+    let scan = this._pgsScans.get(key) ?? readPgsScan(this.cacheDir, key);
+    if (scan === undefined || scan === null) {
+      this._pgsScanFor(item, sub);
+      this._bandInfo = { reason: 'PGS windows not scanned yet' };
+      return null;
+    }
+    this._pgsScans.set(key, scan);
+    const { band, reason } = pgsBandFor(scan, rect);
+    if (!band) {
+      this._bandInfo = { reason };
+      if (!this._bandSaid?.has(key)) {
+        (this._bandSaid ??= new Set()).add(key);
+        this.emit('log', `[band] full-height canvas — ${reason}\n`);
+      }
+      return null;
+    }
+    this._bandInfo = { applied: true, height: band.height };
+    if (!this._bandSaid?.has(key)) {
+      (this._bandSaid ??= new Set()).add(key);
+      this.emit('log', `[band] ${rect.w}x${band.height} canvas from the PGS windows`
+        + ` — ${(100 - (band.height / rect.h) * 100).toFixed(0)}% less to composite\n`);
+    }
+    return band;
+  }
+
+  /**
+   * Scan a bitmap track's windows once, detached. Persisted next to the
+   * cache by file identity, so the next night reads it back. When the scan
+   * lands while the clip is on air with a full canvas and a band applies,
+   * the clip respawns behind the cushion to take it.
+   */
+  _pgsScanFor(item, sub) {
+    const srcPath = item?.srcPath;
+    if (!srcPath || !sub?.bitmap || !this.cacheDir) return;
+    const key = pgsCacheKey(srcPath, sub.typeIndex);
+    this._pgsScans ??= new Map();
+    if (this._pgsScans.has(key)) return;
+    const stored = readPgsScan(this.cacheDir, key);
+    if (stored) { this._pgsScans.set(key, stored); return; }
+    this._pgsScanning ??= new Set();
+    if (this._pgsScanning.has(key)) return;
+    this._pgsScanning.add(key);
+    const t0 = Date.now();
+    let lastLog = t0;
+    const name = srcPath.split('/').pop();
+    this.emit('log', `[band] scanning ${name} for its PGS windows (whole file, in the background)\n`);
+    this._detached(scanPgsWindows(srcPath, sub.typeIndex, {
+      signal: this._abort.signal,
+      onProgress: () => {
+        const now = Date.now();
+        if (now - lastLog > 60_000) { lastLog = now; this.emit('log', `[band] still scanning ${name}…\n`); }
+      },
+    }).then((scan) => {
+      this._pgsScanning.delete(key);
+      if (!scan) { this._pgsScans.set(key, null); this.emit('log', `[band] ${name}: no PGS windows found\n`); return; }
+      this._pgsScans.set(key, scan);
+      writePgsScan(this.cacheDir, key, scan);
+      const rect = contentRect(this.selection?.video, this.profile);
+      const { band, reason } = pgsBandFor(scan, rect);
+      this.emit('log', `[band] ${name} scanned in ${((Date.now() - t0) / 1000).toFixed(0)}s: `
+        + (band ? `${rect.w}x${band.height} band` : `full canvas — ${reason}`) + `\n`);
+      if (!band) return;
+      // On air with a full canvas on this very clip: take the band now.
+      if (this.current?.item !== item || this.status !== 'running' || this._stopping) return;
+      if (this._bandInfo?.applied) return;
+      this._respawnForBand(item);
+    }), 'scanning PGS windows');
+  }
+
+  /** A cushion-kept respawn of the clip on air, the way a studio apply lands. */
+  _respawnForBand(item) {
+    if (this.current?.item !== item || this.status !== 'running') return;
+    const dur = this.current.duration;
+    if (dur && this.position >= dur - 1) return;
+    const tok = (this._bandToken = (this._bandToken ?? 0) + 1);
+    this._detached(this._extract(item).finally(() => {
+      if (this._stopping || this._bandToken !== tok) return;
+      if (this.current?.item !== item || this.status !== 'running') return;
+      const runway = this._applyRunway();
+      const { rewound, gop, resume } = this._bankCutForApply(runway);
+      const ahead = Math.max(0, resume - (this.aired ?? resume));
+      this.emit('log', `[band] applied — on air in ~${ahead.toFixed(1)}s `
+        + (rewound > 0.05
+          ? `(cushion cut to ${runway.toFixed(1)}s, ${(rewound + gop).toFixed(1)}s re-encoded)`
+          : gop > 0
+            ? `(cushion kept, GOP-aligned splice, ${gop.toFixed(1)}s re-encoded)`
+            : '(cushion kept)')
+        + '\n');
+      this._play(item, resume, { duration: dur });
+    }), 'applying the subtitle band');
+  }
+
   _subKey(srcPath) {
     const sub = this.selection?.subtitle;
     return sub && !sub.external ? `${srcPath}:${sub.typeIndex}` : null;
@@ -5241,6 +5355,10 @@ export class PipelinePlayout extends EventEmitter {
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
     this._detached(this._extract(item), 'extracting subtitles');
+    // A bitmap track's band comes from a scan of its windows; warm that
+    // too, so the next clip spawns banded from its first frame.
+    const sub = this.selection?.subtitle;
+    if (sub?.bitmap && !sub.external) this._pgsScanFor(item, sub);
   }
 
   /**
@@ -6557,7 +6675,7 @@ export function buildSourceArgs({
      * canvas goes back to carrying nothing but subtitles and the band
      * applies to a clip with a picture on it too.
      */
-    const band = subBand && !sub.canvasInput && !canvasPad && !rect.bars
+    const band = subBand && (!sub.canvasInput || subBand.bitmap) && !canvasPad && !rect.bars
       && subBand.rect.w === rect.w && subBand.rect.h === rect.h
       && (!imgList.length || gpuImages) ? subBand : null;
 
@@ -6664,11 +6782,20 @@ export function buildSourceArgs({
     // 1.998 tall, and an equality test kept it on bilinear.
     const subScaleFlags = (selection?.video?.width ?? 0) / rect.w >= 1.9
       && (selection?.video?.height ?? 0) / rect.h >= 1.9 ? 'neighbor' : 'fast_bilinear';
+    // With a band (pgsband.js: the union of the track's windows sits in
+    // the lower part of the frame), the subtitle frames are cropped to
+    // that part before the scale — crop is a pointer offset — and land
+    // on a canvas of the band's height, composited at band.y. Proportional
+    // crop expressions, since the frames are the stream's own size.
+    const subCrop = band?.bitmap
+      ? `crop=w=iw:h=ih*${(1 - band.topFrac).toFixed(4)}:x=0:y=ih*${band.topFrac.toFixed(4)},`
+      : '';
+    const subCanvasH = band?.bitmap ? band.height : rect.h;
     const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
         + `setpts=PTS-STARTPTS,format=rgba[c0];`
         + `[${sub.canvasInput}]select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`
-        + `scale=${rect.w}:${rect.h}:flags=${subScaleFlags}[sf];`
+        + `${subCrop}scale=${rect.w}:${subCanvasH}:flags=${subScaleFlags}[sf];`
         + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
       : `${layerSrc}setpts=PTS+${shift}/TB,`
         + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
