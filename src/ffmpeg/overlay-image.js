@@ -524,7 +524,7 @@ export function canvasImageChain(images, opts = {}) {
  */
 export function vaapiMovedImageChain(images, {
   width = 1920, height = 1080, firstInput = 1, inLabel = 'in', outLabel = 'out',
-  rate = '30', phase = 0, end = null,
+  rate = '30', phase = 0, end = null, scale = 'out_range=pc',
 } = {}) {
   const list = (images ?? []).filter((i) => i?.path);
   if (!list.length) return { inputs: [], filters: [], looping: false };
@@ -563,7 +563,8 @@ export function vaapiMovedImageChain(images, {
     const cx = `floor(${rx}-abs(mod(${u},2*${rx})-${rx}))`;
     const cy = `floor(${ry}-abs(mod(${u},2*${ry})-${ry}))`;
     steps.push(esc(`crop=w=${width}:h=${height}:x=${cx}:y=${cy}`));
-    steps.push(`scale_vaapi=w=${width}:h=${height}:out_range=pc`);
+    // The colour option the device's probe found it accepts on RGBA.
+    steps.push(`scale_vaapi=w=${width}:h=${height}:${scale || 'out_range=pc'}`);
     filters.push(`[${idx}:v]${steps.join(',')}[mv${i}]`);
     const next = i === list.length - 1 ? outLabel : `mo${i}`;
     filters.push(`[${cur}][mv${i}]overlay_vaapi=x=0:y=0:eof_action=repeat[${next}]`);

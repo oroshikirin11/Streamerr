@@ -293,12 +293,13 @@ async function tuneProfile(profile, selection, srcPath = null) {
       && i?.type === 'image' && i?.file && i?.motion === 'bounce');
   if (moving) {
     globalThis.__moveOk ??= await vaapiMoveHonored(profile.device);
-    profile.gpuMove = globalThis.__moveOk;
+    profile.gpuMove = globalThis.__moveOk.ok;
+    profile.gpuMoveScale = globalThis.__moveOk.scale ?? undefined;
     if (!globalThis.__moveSaid) {
       globalThis.__moveSaid = true;
       console.log(profile.gpuMove
-        ? '[studio] moving pictures are composited by the GPU from surfaces uploaded once'
-        : '[studio] this driver would not move a picture by cropping — moving pictures ride the canvas');
+        ? `[studio] moving pictures are composited by the GPU from surfaces uploaded once (window pass: ${profile.gpuMoveScale})`
+        : `[studio] this driver would not move a picture by cropping — moving pictures ride the canvas (${globalThis.__moveOk.detail})`);
     }
   }
 
@@ -343,6 +344,7 @@ function tunedFields(p) {
     gpuFull: p.gpuFull,
     gpuSubs: p.gpuSubs,
     gpuMove: p.gpuMove,
+    gpuMoveScale: p.gpuMoveScale,
     barsGraph: p.barsGraph,
   };
 }

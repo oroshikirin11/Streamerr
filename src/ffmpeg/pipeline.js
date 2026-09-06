@@ -6583,7 +6583,7 @@ export function buildSourceArgs({
     const movers = vaapiMovedImageChain(moverImgs, {
       width: profile.width, height: profile.height, firstInput: 1 + stills.length,
       inLabel: gpuImgs.filters.length ? 'vs' : 'b', outLabel: 'v',
-      rate: effAll.rate, phase: offset,
+      rate: effAll.rate, phase: offset, scale: profile.gpuMoveScale,
       end: duration != null && duration > 0 ? Math.max(1, duration - offset) + 5 : null,
     });
     const drawn = gpuImgs.filters.length || movers.filters.length;
@@ -6988,7 +6988,7 @@ export function buildSourceArgs({
       width: rect.w, height: rect.h,
       firstInput: 2 + (bgInput.length ? 1 : 0) + canvasList.length
         + (gpuImgs.filters.length ? stillImgs.length : 0),
-      inLabel: 'vc', outLabel: 'v', rate: eff.rate, phase: offset,
+      inLabel: 'vc', outLabel: 'v', rate: eff.rate, phase: offset, scale: profile.gpuMoveScale,
       end: duration != null && duration > 0 ? Math.max(1, duration - offset) + 5 : null,
     });
     const composited = movers.filters.length

@@ -366,43 +366,66 @@ export async function vaapiAlphaHonored(device = '/dev/dri/renderD128', { width 
 export async function vaapiMoveHonored(device = '/dev/dri/renderD128') {
   const W = 640;
   const H = 360;
-  const px = await new Promise((res) => {
-    const c = spawn('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error', '-nostdin',
-      '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
-      '-f', 'lavfi', '-i', `color=c=green:s=${W}x${H}:r=10,format=nv12`,
-      '-f', 'lavfi', '-r', '10', '-i', 'color=c=white@0.5:s=100x100:r=10,format=rgba',
-      '-filter_complex',
-      '[0:v]hwupload[b];'
-      + '[1:v]trim=end_frame=1,premultiply=inplace=1,format=rgba,'
-      + `pad=w=${2 * W - 100}:h=${2 * H - 100}:x=${W - 100}:y=${H - 100}:color=black@0.0,`
-      + 'hwupload,loop=loop=-1:size=1:start=0,setpts=N/10/TB,'
-      + `crop=w=${W}:h=${H}:x=floor(${W - 100}-t*1000):y=${H - 100},`
-      + `scale_vaapi=w=${W}:h=${H}:out_range=pc[m];`
-      + '[b][m]overlay_vaapi=x=0:y=0:eof_action=repeat[v0];[v0]hwdownload,format=nv12[v]',
-      '-map', '[v]', '-frames:v', '2', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
-    ], { stdio: ['ignore', 'pipe', 'ignore'] });
-    const bufs = [];
-    c.stdout.on('data', (d) => bufs.push(d));
-    const kill = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 25_000);
-    c.on('error', () => { clearTimeout(kill); res(null); });
-    c.on('close', () => { clearTimeout(kill); res(Buffer.concat(bufs)); });
-  });
-  const frameBytes = W * H * 3;
-  if (!px || px.length < frameBytes * 2) return false;
-  const at = (f, x, y) => {
-    const i = f * frameBytes + (y * W + x) * 3;
-    return [px[i], px[i + 1], px[i + 2]];
-  };
-  // Half white over green, through an NV12 round trip: mid red/blue, high
-  // green. Green alone: low red/blue. Same tolerances as the alpha probe.
-  const blended = ([r, g, b]) => g > 150 && r > 70 && r < 190 && b > 70 && b < 190;
-  const green = ([r, g, b]) => g > 100 && r < 40 && b < 40;
-  return blended(at(0, 50, 50)) && green(at(0, 150, 50))
-    && green(at(1, 50, 50)) && blended(at(1, 150, 50))
-    // Edges: frame 1 has the square at x 100..199.
-    && green(at(1, 98, 50)) && blended(at(1, 101, 50))
-    && blended(at(1, 198, 50)) && green(at(1, 201, 50));
+  /**
+   * The window pass has to defeat scale_vaapi's identity passthrough with
+   * a colour option, and drivers differ in which they will take on an RGBA
+   * surface: the range is meaningless there and a driver may refuse it,
+   * a matrix or a format swap may be the one it accepts. Tried in turn;
+   * the first that renders the moved square correctly is what the graphs
+   * use (profile.gpuMoveScale).
+   */
+  const variants = ['out_range=pc', 'format=bgra', 'out_color_matrix=bt709', 'format=bgra:out_range=pc'];
+  const details = [];
+  for (const scale of variants) {
+    const res = await new Promise((res2) => {
+      const c = spawn('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+        '-f', 'lavfi', '-i', `color=c=green:s=${W}x${H}:r=10,format=nv12`,
+        '-f', 'lavfi', '-r', '10', '-i', 'color=c=white@0.5:s=100x100:r=10,format=rgba',
+        '-filter_complex',
+        '[0:v]hwupload[b];'
+        + '[1:v]trim=end_frame=1,premultiply=inplace=1,format=rgba,'
+        + `pad=w=${2 * W - 100}:h=${2 * H - 100}:x=${W - 100}:y=${H - 100}:color=black@0.0,`
+        + 'hwupload,loop=loop=-1:size=1:start=0,setpts=N/10/TB,'
+        + `crop=w=${W}:h=${H}:x=floor(${W - 100}-t*1000):y=${H - 100},`
+        + `scale_vaapi=w=${W}:h=${H}:${scale}[m];`
+        + '[b][m]overlay_vaapi=x=0:y=0:eof_action=repeat[v0];[v0]hwdownload,format=nv12[v]',
+        '-map', '[v]', '-frames:v', '2', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const bufs = [];
+      let err = '';
+      c.stdout.on('data', (d) => bufs.push(d));
+      c.stderr.on('data', (d) => { err += d; });
+      const kill = setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* gone */ } }, 25_000);
+      c.on('error', () => { clearTimeout(kill); res2({ px: null, err: 'spawn failed' }); });
+      c.on('close', (code) => { clearTimeout(kill); res2({ px: Buffer.concat(bufs), err: err.trim().split('\n').slice(-2).join(' | '), code }); });
+    });
+    const frameBytes = W * H * 3;
+    if (!res.px || res.px.length < frameBytes * 2) {
+      details.push(`${scale}: no frames (exit ${res.code}) ${res.err}`);
+      continue;
+    }
+    const at = (f, x, y) => {
+      const i = f * frameBytes + (y * W + x) * 3;
+      return [res.px[i], res.px[i + 1], res.px[i + 2]];
+    };
+    // Half white over green, through an NV12 round trip: mid red/blue,
+    // high green. Green alone: low red/blue. Same tolerances as the alpha
+    // probe. Frame 1 has the square at x 100..199.
+    const blended = ([r, g, b]) => g > 150 && r > 70 && r < 190 && b > 70 && b < 190;
+    const green = ([r, g, b]) => g > 100 && r < 40 && b < 40;
+    const checks = [
+      ['f0 in', blended, at(0, 50, 50)], ['f0 out', green, at(0, 150, 50)],
+      ['f1 out', green, at(1, 50, 50)], ['f1 in', blended, at(1, 150, 50)],
+      ['f1 edge-', green, at(1, 98, 50)], ['f1 edge+', blended, at(1, 101, 50)],
+      ['f1 edge2+', blended, at(1, 198, 50)], ['f1 edge2-', green, at(1, 201, 50)],
+    ];
+    const failed = checks.filter(([, fn, px]) => !fn(px));
+    if (!failed.length) return { ok: true, scale, detail: `${scale}: ok` };
+    details.push(`${scale}: ${failed.map(([n, , px]) => `${n}=${px.join('/')}`).join(' ')}`);
+  }
+  return { ok: false, scale: null, detail: details.join('; ') };
 }
 
 /**

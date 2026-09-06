@@ -101,8 +101,10 @@ if (Number(process.env.PICS || 0) > 0) {
         `color=c=${colours[i % colours.length]}@0.85:s=200x200:r=1,format=rgba`, '-frames:v', '1', out]);
     }
   }
-  profile.gpuMove = process.env.GPUMOVE === '0' ? false : await vaapiMoveHonored(profile.device);
-  console.log(`# pictures: ${process.env.PICS}, gpuMove=${profile.gpuMove}`);
+  const mv = process.env.GPUMOVE === '0' ? { ok: false } : await vaapiMoveHonored(profile.device);
+  profile.gpuMove = mv.ok;
+  profile.gpuMoveScale = mv.scale ?? undefined;
+  console.log(`# pictures: ${process.env.PICS}, gpuMove=${profile.gpuMove} (${mv.detail ?? 'off'})`);
 }
 
 const e = new PipelinePlayout({
