@@ -6653,11 +6653,20 @@ export function buildSourceArgs({
       const [n, d = 1] = String(canvasRate).split('/').map(Number);
       return (d / n).toFixed(4);
     })();
+    // The scale runs on the graph thread, and while it runs no frame
+    // reaches the GPU chain: twelve 4K scales a second at ~35ms each
+    // idled the N100's GPU a third of the time (0.65x with the CPU at
+    // 45%). A source at least twice the output takes nearest sampling,
+    // which reads a quarter of the pixels; a disc's PGS is authored at
+    // that 2x, so the pick lands on real glyph pixels. Anything closer
+    // to 1:1 keeps the bilinear.
+    const subScaleFlags = (selection?.video?.width ?? 0) >= rect.w * 2
+      && (selection?.video?.height ?? 0) >= rect.h * 2 ? 'neighbor' : 'fast_bilinear';
     const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
         + `setpts=PTS-STARTPTS,format=rgba[c0];`
         + `[${sub.canvasInput}]select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`
-        + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
+        + `scale=${rect.w}:${rect.h}:flags=${subScaleFlags}[sf];`
         + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
       : `${layerSrc}setpts=PTS+${shift}/TB,`
         + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`

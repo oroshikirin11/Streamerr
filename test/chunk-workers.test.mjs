@@ -83,3 +83,12 @@ test('a bitmap subtitle on a GPU box takes the composite: video stays on the GPU
   assert.ok(!/\[0:s:2\][^;]*hwupload/.test(args), 'the subtitle frames are never uploaded unscaled');
   assert.ok(!/\[0:v:0\]\[0:s:2\]overlay/.test(args), 'never blended onto the video on the CPU');
 });
+
+test('a 4K source samples its bitmap subtitle with nearest neighbour; 1080p keeps bilinear', () => {
+  const profile = { backend: 'vaapi', device: '/dev/dri/renderD128', codec: 'hevc', width: 1920, height: 1080, videoBitrate: '16000k', gpuFull: true, gpuSubs: true, overlay: [], gopSeconds: 1 };
+  const sub = { codec: 'hdmv_pgs_subtitle', bitmap: true, text: false, typeIndex: 2 };
+  const build = (v) => buildSourceArgs({ srcPath: '/x.mkv', profile, selection: { video: v, subtitle: sub }, duration: 1400, overlayImages: [], overlayLayer: () => null }).join(' ');
+  const uhd = { ...video, width: 3840, height: 2160, pixFmt: 'yuv420p10le' };
+  assert.ok(/\[0:s:2\][^;]*scale=1920:1080:flags=neighbor\[sf\]/.test(build(uhd)));
+  assert.ok(/\[0:s:2\][^;]*scale=1920:1080:flags=fast_bilinear\[sf\]/.test(build(video)));
+});
