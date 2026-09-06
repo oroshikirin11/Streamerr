@@ -43,3 +43,15 @@ test('a bitmap subtitle on a GPU box takes the composite: video stays on the GPU
   assert.ok(!/\[0:v:0\]\[0:s:2\]overlay/.test(args), 'never blended onto the video on the CPU');
   assert.ok(!/\[0:s:2\][^;]*hwupload/.test(args), 'the subtitle frames are never uploaded unscaled');
 });
+
+test('moving pictures without a subtitle ride the GPU canvas, never the software chain', () => {
+  const profile = { backend: 'vaapi', device: '/dev/dri/renderD128', codec: 'hevc', width: 1920, height: 1080, videoBitrate: '16000k', gpuFull: true, gpuSubs: true, tonemap: 'vaapi', hdrOutput: true, hdrWanted: true, hdrOut: true, gopSeconds: 1,
+    overlay: [{ id: 'p0', type: 'image', enabled: true, file: 'p0.png', x: 0.1, y: 0.1, size: 0.15, motion: 'bounce', speed: 1 }] };
+  const imgs = [{ path: '/x/ov/p0.png', x: 0.1, y: 0.1, size: 0.15, rotation: 0, opacity: 1, motion: 'bounce', speed: 1, animated: false, start: null, end: null, baked: null }];
+  const hdr = { codec: 'hevc', pixFmt: 'yuv420p10le', width: 3836, height: 2072, hdr: true, colorTransfer: 'smpte2084', frameRate: '24000/1001', sar: '1:1', dar: '137:74' };
+  const args = buildSourceArgs({ srcPath: '/x/br.mkv', profile, selection: { video: hdr, subtitle: null }, duration: 5000, overlayImages: imgs, overlayAnimated: false, overlayLayer: () => null }).join(' ');
+  assert.ok(args.includes('-hwaccel vaapi'), 'decodes on the GPU');
+  assert.ok(args.includes('tonemap_vaapi'), 'tone maps on the GPU');
+  assert.ok(!args.includes('zscale='), 'no CPU tone map');
+  assert.ok(/\[img0\]overlay=/.test(args) && args.includes('overlay_vaapi'), 'the picture is drawn on the canvas and composited once');
+});

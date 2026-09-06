@@ -265,7 +265,16 @@ async function tuneProfile(profile, selection, srcPath = null) {
   profile.gpuSubs = false;
   profile.barsGraph = undefined;
 
-  if (!selection?.subtitle) return;
+  // The composite is probed whenever anything will be drawn — a subtitle,
+  // or the studio's pictures and captions. Probing only for subtitles
+  // left gpuSubs false for a clip with pictures and no subtitle, and the
+  // builder then had no GPU canvas to put them on: since 29 Aug such a
+  // clip went to the software chain, which on a 4K HDR title is a
+  // software decode and a CPU tone map (Backrooms at 0.4x).
+  const studioShowing = !config.overlay?.hidden
+    && (config.overlay?.items ?? []).some((i) => i?.enabled !== false
+      && (i?.type === 'image' ? Boolean(i?.file) : i?.type === 'text' ? String(i?.text ?? '').trim() : false));
+  if (!selection?.subtitle && !studioShowing) return;
 
   if (globalThis.__alphaOk === undefined) {
     globalThis.__alphaOk = await vaapiAlphaHonored(profile.device,

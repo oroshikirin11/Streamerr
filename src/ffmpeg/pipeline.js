@@ -6370,7 +6370,11 @@ export function buildSourceArgs({
   // the N100 this is the difference between 0.85x (unstreamable) and 1.56x.
   // Text subtitles only; requires the driver to honour overlay alpha, which
   // the caller establishes with vaapiAlphaHonored() before setting gpuSubs.
-  if (profile.gpuSubs && canvasComposable(sub)
+  // The composite carries a subtitle, a caption, or the studio's pictures
+  // alone: a moving picture on a clip without subtitles rides the same
+  // canvas instead of pulling the whole clip onto the software chain.
+  const canvasWanted = canvasComposable(sub) || (imgList.length > 0 && !sub.needsComplex);
+  if (profile.gpuSubs && canvasWanted
       // The composite only wins when frames are already ON the GPU. A
       // source the GPU cannot decode would pay two uploads (video + alpha
       // canvas) per frame here; burning during the CPU decode chain and
@@ -6646,9 +6650,12 @@ export function buildSourceArgs({
         + `[${sub.canvasInput}]select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`
         + `scale=${rect.w}:${rect.h}:flags=fast_bilinear[sf];`
         + '[c0][sf]overlay=eof_action=pass:format=auto,format=rgba'
-      : `${layerSrc}setpts=PTS+${shift}/TB,`
-        + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
-        + 'setpts=PTS-STARTPTS,format=rgba';
+      : (band || sub.canvasFilter)
+        ? `${layerSrc}setpts=PTS+${shift}/TB,`
+          + `${band ? `${band.filter}:alpha=1` : sub.canvasFilter},`
+          + 'setpts=PTS-STARTPTS,format=rgba'
+        // Pictures alone: a transparent canvas, the pictures drawn below.
+        : `${layerSrc}setpts=PTS-STARTPTS,format=rgba`;
     const canvasChain = canvasImgs.filters.length
       // null carries the padding step across the relabel; the canvas has to
       // stay RGBA to the upload or the composite becomes an opaque box.
