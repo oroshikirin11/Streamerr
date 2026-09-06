@@ -30,4 +30,5 @@ python3 pgs-check.py capture.ts
 row "MODE=pgs SUBS=1 SEQ=seek:60@18,skip@21,stop@45"       "warm: seek then skip" seekskip
 row "MODE=pgs SUBS=1 PICS=2 SEQ=pause@18,resume@24,stop@45" "PGS + 2 movers: pause/resume" movers
 row "MODE=pgs SEQ=subs-on@18,seek:30@26,stop@45"           "subs on mid-play, then seek" switch
+row "MODE=pgs SUBS=1 TITLE=1 SEQ=skip@18,stop@42"           "PGS + caption (canvas, media-fed): skip" caption
 echo "done"

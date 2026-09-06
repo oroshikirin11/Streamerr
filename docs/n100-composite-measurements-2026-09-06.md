@@ -30,6 +30,21 @@ of the cinema config, HEVC VDENC 16000k, HDR output on.
 | Backrooms + four bouncers, CPU composite (opt-in) | 0.77x | 0.547x | the frame down and up costs more than the canvas on iHD |
 | Backrooms + English SRT, CPU composite (opt-in) | 0.99x | 0.533x | same |
 
+## After the second deploy
+
+| case | before | after |
+|---|---|---|
+| Ghost in the Shell + English PGS, direct from the sidecar | 0.70x | **1.072x** (source ffmpeg 19% of a core, from 48%) |
+| Ghost in the Shell + PGS + four bouncers, canvas fed by the sidecar | 0.52x | 0.25x, stalled — the sidecar now feeds the direct path only; the canvas reads the media file, gated, as before |
+| Backrooms + four bouncers (canvas) | 0.77x | 0.73x (noise) |
+
+The move probe's diagnostic line: every form of the window pass
+(`out_range=pc`, `format=bgra`, `out_color_matrix=bt709`, both) read the
+square's interior as 62/129/62 against 128/191/128 expected — the
+premultiplied alpha does not survive iHD's RGBA-to-RGBA VPP pass, so the
+picture comes out nearly transparent. Moving pictures stay on the canvas
+on this driver; the chain remains for drivers that pass (radeonsi does).
+
 ## What the numbers say
 
 - The GPU composite pass is cheap and scales only mildly with the overlay's

@@ -72,8 +72,9 @@ console.log('\nthe GPU canvas graph');
   check('alone, it goes up directly (input 1: media, sidecar — no canvas)',
     g.includes('[1:s:0]scale=1920:1038:flags=fast_bilinear,format=rgba,hwupload[ov]'), true);
   const withCaption = graphOf(build({ extractedPath: '/c/k.mks', overlayPath: '/c/ov.ass' }));
-  check('with a caption, the canvas is back and the sidecar is input 2',
-    withCaption.includes('[2:s:0]scale=1920:1038:flags=fast_bilinear[sf]') && withCaption.includes('[c0][sf]overlay='), true);
+  check('with a caption, the canvas is back and the frames come from the media file, gated',
+    withCaption.includes('[0:s:2]select=isnan(prev_selected_t)') && withCaption.includes('[c0][sf]overlay='), true);
+  check('...and no sidecar input', build({ extractedPath: '/c/k.mks', overlayPath: '/c/ov.ass' }).includes('/c/k.mks'), false);
   check('...ungated: a sidecar beats a few times a second, and a gate would delay every cue change',
     g.includes('select=isnan(prev_selected_t)'), false);
   check('...not from the media file', g.includes('[0:s:2]'), false);

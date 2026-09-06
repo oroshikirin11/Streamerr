@@ -6952,16 +6952,27 @@ export function buildSourceArgs({
     const directSub = Boolean(sub.canvasInput) && !sub.canvasOverlay && !layer
       && !canvasList.length && !band && !rect.bars;
     const inputBase = directSub ? 1 : 2;
+    /**
+     * The sidecar feeds the DIRECT path only. Onto a canvas, the subtitle
+     * frames come from the media file with the gate, exactly as before:
+     * measured on the N100 (6 Sep, deploy 2), Ghost in the Shell's PGS with
+     * four bouncing pictures on the canvas and the sidecar's sparse frames
+     * stalled the source for six seconds at a time (0.25x, respawns) where
+     * the media-fed canvas ran 0.52x — a frame sync behind a frame sync,
+     * each waiting on frames a quarter second apart. The direct path has
+     * one frame sync and measured 1.07x from the same sidecar.
+     */
+    const useSidecar = directSub && Boolean(sub.sidecar);
     const sidecarIdx = inputBase + (bgInput.length ? 1 : 0) + canvasList.length
       + (gpuImgs.filters.length ? stillImgs.length : 0) + moverImgs.length;
-    const subSrc = sub.sidecar ? `${sidecarIdx}:s:0` : sub.canvasInput;
+    const subSrc = useSidecar ? `${sidecarIdx}:s:0` : sub.canvasInput;
     // The gate exists for the media file's thousands of heartbeats a
     // second. A sidecar beats a few times a second, and the gate would
     // do harm there: a cue change lands at the same pts as the beat that
     // re-sent the old frame, loses the toss, and only shows at the next
     // beat. Ungated, the change is the last frame at its pts and lands
     // on the frame it belongs to.
-    const subGate = sub.sidecar ? ''
+    const subGate = useSidecar ? ''
       : `select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${canvasInterval}),`;
     const canvasHead = sub.canvasInput
       ? `${layerSrc}${sub.canvasOverlay ? `setpts=PTS+${shift}/TB,${sub.canvasOverlay},` : ''}`
@@ -7065,7 +7076,7 @@ export function buildSourceArgs({
       ...movers.inputs,
       // The sidecar seeks with the clip, so its frames line up with the
       // main input's rebased timestamps.
-      ...(sub.sidecar ? [...(offset > 0 ? ['-ss', shift] : []), '-i', sub.sidecar] : []),
+      ...(useSidecar ? [...(offset > 0 ? ['-ss', shift] : []), '-i', sub.sidecar] : []),
       '-filter_complex', graph,
       '-map', '[v]', '-map', `0:a:${audioIdx}?`, '-shortest',
       ...be.encoderArgs({ ...profile, fps: eff.fps }),
