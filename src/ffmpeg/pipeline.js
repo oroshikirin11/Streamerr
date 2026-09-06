@@ -4582,7 +4582,12 @@ export class PipelinePlayout extends EventEmitter {
     const p0 = this.profile ?? {};
     const v = this.selection?.video ?? null;
     if (v) {
-      const hw = !p0.swDecode && gpuDecodable(v);
+      // What the last spawn actually asked for, not what the profile
+      // believes: the CPU-drawing graphs decode in software on a GPU
+      // backend whatever gpuDecodable says, and this report once claimed
+      // "hardware decode" over a spawn that had no -hwaccel at all.
+      const last = this._lastArgs ?? '';
+      const hw = last ? /-hwaccel vaapi/.test(last) : (!p0.swDecode && gpuDecodable(v));
       const dims = v.width && v.height ? ` ${v.width}x${v.height}` : '';
       let fps = '';
       try {
@@ -4604,12 +4609,17 @@ export class PipelinePlayout extends EventEmitter {
         // Which of these is running is a measured property of the driver,
         // and the CPU one is a real cost worth naming when someone is
         // reading this because the stream is struggling.
-        out.push(this.profile?.tonemap === 'cpu'
-          ? 'HDR source — tonemapped on the CPU every frame (this driver '
-            + 'cannot do it on the GPU)'
-          : this.profile?.tonemap === 'none'
-            ? 'HDR source — NOT tonemapped; this machine cannot, so colours '
-              + 'are wrong'
+        // The spawn decides, not the profile: a CPU-drawing graph tone
+        // maps with zscale even on a driver whose tonemap_vaapi works.
+        const where = /tonemap_vaapi/.test(last) ? 'gpu'
+          : /zscale=/.test(last) ? 'cpu'
+            : last ? 'none' : (this.profile?.tonemap ?? 'gpu');
+        out.push(where === 'cpu'
+          ? 'HDR source — tonemapped on the CPU every frame'
+            + (this.profile?.tonemap === 'cpu' ? ' (this driver cannot do it on the GPU)'
+              : ' (this graph draws on the CPU, so the GPU tone mapper is not in play)')
+          : where === 'none'
+            ? 'HDR source — NOT tonemapped in this graph (kept HDR, or this machine cannot)'
             : 'HDR source — tonemapped on the GPU every frame');
       }
     }
@@ -4751,8 +4761,17 @@ export class PipelinePlayout extends EventEmitter {
     // CPU anyway — libass burning subtitles on one core with no workers,
     // which is the unstreamable case the GPU graph exists to avoid. One
     // enabled logo was enough to trigger it on every subtitled clip.
+    //
+    // Bitmap subtitles (PGS, DVD) never take the GPU composite: the
+    // builder draws them with `overlay` on the CPU (needsComplex). Read
+    // gpuSubs alone and this returned 1 for exactly those clips — one
+    // CPU process, no buffer — the moment a live switch re-tuned the
+    // profile (1 Sep). Measured on the N100 with a PGS-subtitled 1080p
+    // HEVC: one process 0.99x and a cache that never grows, four workers
+    // 1.40x with 65s banked in a minute.
     const video = this.selection?.video;
     const gpuComposite = Boolean(this.profile?.gpuSubs)
+      && !sub.bitmap
       && !this.profile?.swDecode
       && gpuDecodable(video)
       && !(this.profile?.barsFailed && contentRect(video, this.profile).bars);
