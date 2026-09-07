@@ -78,6 +78,38 @@ function shortUa() {
   return os ? `${b} on ${os}` : b;
 }
 
+const raw = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+
+/**
+ * A microphone track — or, with `monitor`, the device that carries what
+ * the speakers play. On Linux (PipeWire/Pulse) every output has a
+ * "Monitor of …" input; capturing it sends what you hear without opening a
+ * real microphone, which is the one route measured to work on the A50
+ * without cutting local playback. Device labels are only readable once
+ * some audio permission exists, so a first open may be needed to find it.
+ */
+async function openMic(monitor) {
+  if (!monitor) {
+    const m = await navigator.mediaDevices.getUserMedia({ audio: raw });
+    return m.getAudioTracks()[0] ?? null;
+  }
+  const find = async () => (await navigator.mediaDevices.enumerateDevices())
+    .find((d) => d.kind === 'audioinput' && /monitor/i.test(d.label));
+  let dev = await find();
+  let first = null;
+  if (!dev) {
+    first = await navigator.mediaDevices.getUserMedia({ audio: raw });
+    dev = await find();
+  }
+  if (!dev) {
+    first?.getTracks().forEach((t) => t.stop());
+    throw new Error('no "Monitor of …" device is offered by this browser — on Windows and macOS choose Microphone and share a tab for its sound; on Linux check that PipeWire exposes the output\'s monitor');
+  }
+  const m = await navigator.mediaDevices.getUserMedia({ audio: { ...raw, deviceId: { exact: dev.deviceId } } });
+  first?.getTracks().forEach((t) => t.stop());
+  return m.getAudioTracks()[0] ?? null;
+}
+
 /**
  * Ask the browser for a screen, wire the recorder and the socket, and
  * hold the stream (armed). Nothing goes on air yet.
@@ -159,20 +191,19 @@ export async function pick({ settings = {}, encoder = {} } = {}) {
   let displayAudio = display.getAudioTracks()[0] ?? null;
   const want = settings.audio ?? 'auto';
   let mic = null;
-  if (want === 'mic' || want === 'both') {
+  if (want === 'mic' || want === 'both' || want === 'monitor') {
     try {
-      const m = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false } });
-      mic = m.getAudioTracks()[0] ?? null;
+      mic = await openMic(want === 'monitor');
     } catch (err) {
-      cap.error = `Microphone: ${err?.message ?? err}`;
+      cap.error = `${want === 'monitor' ? 'What I hear' : 'Microphone'}: ${err?.message ?? err}`;
     }
   }
-  if (want === 'mic') displayAudio = null;
+  if (want === 'mic' || want === 'monitor') displayAudio = null;
   if (want === 'none') displayAudio = null;
   const sources = [displayAudio, mic].filter(Boolean);
   if (sources.length === 1) {
     tracks.push(sources[0]);
-    cap.audioFrom = sources[0] === mic ? 'microphone' : 'system';
+    cap.audioFrom = sources[0] === mic ? (want === 'monitor' ? 'what you hear' : 'microphone') : 'system';
   } else if (sources.length === 2) {
     // Mixed to one track; the recorder takes exactly one audio track.
     try {

@@ -210,12 +210,14 @@
     <div class="field">
       <label for="c-audio">Audio</label>
       <select id="c-audio" value={settings.audio ?? 'auto'} onchange={(e) => saveSetting({ audio: e.currentTarget.value })}>
+        <option value="monitor">What I hear (the output's monitor)</option>
         <option value="auto">What the picker gives</option>
         <option value="mic">Microphone</option>
-        <option value="both">Both</option>
+        <option value="both">System + microphone</option>
         <option value="none">None</option>
       </select>
-      {#if platform !== 'windows'}<span class="hint">{platform === 'mac' ? 'macOS' : 'Linux'} shares audio for a tab, not for a window or monitor. Pick <em>Microphone</em>{platform === 'linux' ? ' and choose the “Monitor of …” device' : ''} to send what you hear.</span>{/if}
+      {#if platform === 'linux'}<span class="hint"><em>What I hear</em> captures the “Monitor of …” device PipeWire offers for your output — no microphone opens, nothing local is muted. The tested route on Linux.</span>
+      {:else if platform === 'mac'}<span class="hint">macOS shares audio for a tab, not for a window or monitor. <em>What I hear</em> needs a virtual output device (BlackHole or similar) to exist.</span>{/if}
     </div>
     <div class="field">
       <label for="c-quality">Quality</label>
@@ -277,7 +279,7 @@
         {#if cap.mime}<span>{codecName(cap.mime)}</span>{/if}
       </div>
       {#if !cap.audio && (settings.audio ?? 'auto') === 'auto' && platform !== 'windows'}
-        <p class="hint">{platform === 'mac' ? 'macOS' : 'Linux'} doesn't share system audio for a {surfaceName(cap.surface).toLowerCase()}. Choose <strong>Microphone</strong> in the audio setting{platform === 'linux' ? ' and pick the “Monitor of …” device' : ''} to send what you hear.</p>
+        <p class="hint">{platform === 'mac' ? 'macOS' : 'Linux'} doesn't share system audio for a {surfaceName(cap.surface).toLowerCase()}. Choose <strong>What I hear</strong> in the audio setting to send it.</p>
       {/if}
       {#if liveHere}
         <p class="hint">This is your screen as the browser sends it. The floating preview shows what viewers get, overlays included{#if delay > 0}, about {delay} s later{/if}.</p>

@@ -39,7 +39,7 @@ export const CAPTURE_DEFAULTS = {
   // Sender-side recorder settings, handed to the panel as defaults.
   quality: 'balanced',   // sharp | balanced | light
   fps: 30,               // 30 | 60
-  audio: 'auto',         // auto | mic | both | none
+  audio: 'auto',         // auto | monitor | mic | both | none
   // What the engine does when the share ends: 'end' the broadcast, or
   // 'hold' the stream on a card for up to holdMinutes and end then.
   onEnd: 'end',
@@ -192,7 +192,7 @@ export function sanitizeCapture(raw = {}, base = CAPTURE_DEFAULTS, { bufferSecon
   if (raw.passthrough !== undefined) out.passthrough = raw.passthrough !== false;
   if (['sharp', 'balanced', 'light'].includes(raw.quality)) out.quality = raw.quality;
   if ([30, 60].includes(Number(raw.fps))) out.fps = Number(raw.fps);
-  if (['auto', 'mic', 'both', 'none'].includes(raw.audio)) out.audio = raw.audio;
+  if (['auto', 'monitor', 'mic', 'both', 'none'].includes(raw.audio)) out.audio = raw.audio;
   if (['end', 'hold'].includes(raw.onEnd)) out.onEnd = raw.onEnd;
   if (raw.holdMinutes !== undefined) out.holdMinutes = Math.max(1, Math.min(60, Math.round(Number(raw.holdMinutes) || 5)));
   return out;
