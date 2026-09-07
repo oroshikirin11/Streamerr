@@ -71,7 +71,7 @@ getDisplayMedia ─► MediaRecorder ─► ws /ws/capture ─► CaptureFeed �
 - **`buildLiveArgs`** (pipeline.js): `-c:v copy` when `livePassthroughEligible`
   — H.264 in, H.264 out, nothing drawn, keyframes ≤ `copyMaxGopSeconds` as
   measured by the feed — otherwise `buildSourceArgs` with `srcPath: 'pipe:0'`
-  and `LIVE_INPUT_ARGS` (2 s probe window, `+genpts+nobuffer`). The Studio
+  and `LIVE_INPUT_ARGS` (a 0.5 s probe window, `+genpts`; never `+nobuffer`, which discards the probe window's packets). The Studio
   canvas, GPU decode and the demotion ladder are the same code paths.
 - **`src/capture.js`** — `CaptureSession`: one at a time, `armed → live →
   ended`; builds the item and a synthetic track selection (geometry from
@@ -117,8 +117,8 @@ bar.
 `web/src/lib/capture.svelte.js` — a module store, so the picked stream,
 recorder and socket survive navigation (the operator walks to the Studio
 and back). Picker: monitors first, the Streamerr tab excluded, surface
-switching on, downscaled to the encoder's frame (so a copied share fits the
-output size). Two fallbacks learned from the end-to-end test: when the
+switching on, at the screen's own size by default (`resolution: 'match'`
+shrinks it to the broadcast frame in the browser instead). Two fallbacks learned from the end-to-end test: when the
 browser cannot start the audio side, the share is retried without audio and
 says so; when it cannot start a monitor capture at all, the surface hint is
 dropped. Audio: what the picker gives · microphone · both (mixed in an
