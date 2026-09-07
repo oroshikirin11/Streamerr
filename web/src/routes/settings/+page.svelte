@@ -2204,7 +2204,8 @@
     {#if tls?.listening}
       <p class="small">
         On: {#each tls.urls as u, i}{#if i}, {/if}<a href={u}>{u}</a>{/each}
-        · <a href="/api/tls/cert">download the certificate</a> to trust it for good
+        · <a href="/api/tls/cert">download the certificate</a> to trust it for good.
+        Under Docker, publish the port like the panel's own (<code>"{tls.port}:{tls.port}"</code> in docker-compose.yml).
         {#if tls.fingerprint}<br /><span class="muted">SHA-256 {tls.fingerprint}</span>{/if}
       </p>
     {:else if tls?.enabled && tls?.error}

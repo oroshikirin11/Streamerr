@@ -7,6 +7,10 @@ services:
 
     ports:
       - "8099:8099"
+      # The secure address (Settings › Secure address, or the Capture page):
+      # screen sharing needs https, and the panel serves it itself on this
+      # port. Keep it published, or the browser cannot reach it.
+      - "8443:8443"
 
     shm_size: "2gb"
 

@@ -146,6 +146,7 @@
       {#if tls?.listening}
         <p>The secure address is on: <a class="primary-link" href={tlsUrl}>{tlsUrl}</a></p>
         <p class="muted small">Accept the certificate when the browser asks. To skip that warning for good, <a href="/api/tls/cert">download the certificate</a> and add it to your browser's trusted authorities.</p>
+        <p class="muted small">Can't connect? Under Docker the port must be published like the panel's own — <code>"{tls.port}:{tls.port}"</code> under <code>ports</code> in docker-compose.yml, then <code>docker compose up -d</code>.</p>
       {:else}
         <div class="row">
           <button class="primary" onclick={enableTls} disabled={tlsBusy}>{tlsBusy ? 'Starting…' : 'Turn on secure address'}</button>
