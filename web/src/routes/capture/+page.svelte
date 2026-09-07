@@ -222,10 +222,20 @@
     <div class="field">
       <label for="c-quality">Quality</label>
       <select id="c-quality" value={settings.quality ?? 'balanced'} onchange={(e) => saveSetting({ quality: e.currentTarget.value })}>
-        <option value="balanced">Balanced · 8 Mb/s</option>
-        <option value="sharp">Sharp · 12 Mb/s (text, code)</option>
+        <option value="max">Max · 30 Mb/s at 1080p, more for bigger screens</option>
+        <option value="sharp">Sharp · 16 Mb/s at 1080p</option>
+        <option value="balanced">Balanced · 8 Mb/s at 1080p</option>
         <option value="light">Light · 4 Mb/s (remote)</option>
       </select>
+      <span class="hint">The browser's encoder budget, scaled to the screen's size. With a browser that records H.264 (Chrome, Edge) and nothing drawn, these bytes go out untouched.</span>
+    </div>
+    <div class="field">
+      <label for="c-res">Resolution</label>
+      <select id="c-res" value={settings.resolution ?? 'native'} onchange={(e) => saveSetting({ resolution: e.currentTarget.value })}>
+        <option value="native">The screen's own (1:1)</option>
+        <option value="match">Shrunk to the broadcast frame</option>
+      </select>
+      <span class="hint">1:1 needs the browser's H.264 to be copied; a transcode on the box still lands in the broadcast frame (Settings › Output › frame size).</span>
     </div>
     <div class="field">
       <label for="c-fps">Frame rate</label>
@@ -276,8 +286,11 @@
         {#if cap.width}<span>{cap.width}×{cap.height}{#if serverSession?.width && (serverSession.width !== cap.width)} → {serverSession.width}×{serverSession.height}{/if}</span>{/if}
         {#if cap.fps}<span>{cap.fps} fps</span>{/if}
         <span>{cap.audio ? cap.audioFrom || 'audio' : 'no audio'}</span>
-        {#if cap.mime}<span>{codecName(cap.mime)}</span>{/if}
+        {#if cap.mime}<span>{codecName(cap.mime)}{#if cap.bps} · {(cap.bps / 1e6).toFixed(0)} Mb/s{/if}</span>{/if}
       </div>
+      {#if cap.mime && !/h264|avc1/i.test(cap.mime)}
+        <p class="hint">This browser records {codecName(cap.mime)}, which the box must re-encode into the broadcast frame. For a 1:1 picture use Chrome or Edge: they record H.264, which goes out untouched.</p>
+      {/if}
       {#if !cap.audio && (settings.audio ?? 'auto') === 'auto' && platform !== 'windows'}
         <p class="hint">{platform === 'mac' ? 'macOS' : 'Linux'} doesn't share system audio for a {surfaceName(cap.surface).toLowerCase()}. Choose <strong>What I hear</strong> in the audio setting to send it.</p>
       {/if}

@@ -30,7 +30,7 @@
 
 import { spawn, spawnSync } from 'child_process';
 import { createHash } from 'crypto';
-import { existsSync, readFileSync, renameSync, statSync, statfsSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, renameSync, statSync, statfsSync, writeFileSync, createWriteStream } from 'fs';
 import { Writable } from 'stream';
 import { availableParallelism, cpus , totalmem } from 'os';
 import { EventEmitter } from 'events';
@@ -1978,18 +1978,17 @@ export class PipelinePlayout extends EventEmitter {
       /**
        * A live broadcast (a screen share) feeds this at 1x, so the input
        * probe is paid in wall-clock seconds before the first byte reaches
-       * the receiver: mpegts' default is five of them. The video's
-       * parameters arrive with its first keyframe, which a copied browser
-       * stream places every two seconds — probing for less than that
-       * (measured: one second) let the publisher map audio only and the
-       * broadcast went out without a picture. Three seconds covers one
-       * keyframe interval with margin; measured end to end, the first
-       * bytes reach the ingest ~5 s after Go live in no-delay mode. File
-       * broadcasts fill the bank faster than realtime and never notice
-       * the default; they keep it.
+       * the receiver: mpegts' default is five of them. The source hands
+       * over a keyframe first (the feed guarantees it, and the source no
+       * longer discards its probe window — see LIVE_INPUT_ARGS), so one
+       * second is enough to map both streams; measured end to end the
+       * first bytes reach the ingest ~1.2 s after Go live in no-delay
+       * mode, against 4.3 s before. File broadcasts fill the bank faster
+       * than realtime and never notice the default; they keep it.
+       * JSR_LIVE_PUB_PROBE_US is a measurement knob only.
        */
       ...((this.current?.item?.live || this.queue[0]?.live)
-        ? ['-probesize', '4M', '-analyzeduration', '3000000'] : []),
+        ? ['-probesize', '4M', '-analyzeduration', String(Number(process.env.JSR_LIVE_PUB_PROBE_US) > 0 ? Number(process.env.JSR_LIVE_PUB_PROBE_US) : 1000000)] : []),
       '-f', this._fmt === 'nut' ? 'nut' : 'mpegts', '-i', 'pipe:0',
       /**
        * Muxer, flags and target all come from the destination set now — see
@@ -2006,6 +2005,7 @@ export class PipelinePlayout extends EventEmitter {
     const startedAt = Date.now();
     const p = spawn('ffmpeg', args, { stdio: ['pipe', 'ignore', 'pipe'] });
     this.publisher = p;
+    this.emit('log', `[publisher] spawned (pid ${p.pid})\n`);
 
     // A source dying mid-write must not take the publisher down with it.
     p.stdin.on('error', () => { /* EPIPE while swapping sources */ });
@@ -5644,7 +5644,11 @@ export class PipelinePlayout extends EventEmitter {
     // _applyRunway — clip sources only, since cards and holds are not
     // what a cushion-kept apply respawns.
     let sawFirstByte = false;
+    // Measurement tap (env only): the source's raw output, for inspecting
+    // packet order and timing with ffprobe. Never set in production.
+    const tap = process.env.JSR_TAP_SOURCE ? createWriteStream(process.env.JSR_TAP_SOURCE, { flags: 'a' }) : null;
     s.stdout.on('data', (d) => {
+      if (tap) tap.write(d);
       if (!sawFirstByte) {
         sawFirstByte = true;
         if (kind === 'clip') {
@@ -7938,13 +7942,17 @@ export function scaleAndTonemap(video, profile, rect, smode) {
  * and no input buffering beyond what the demuxer needs.
  */
 export const LIVE_INPUT_ARGS = [
-  '-fflags', '+genpts+nobuffer',
+  // NOT +nobuffer: it discards the packets read while probing, which on a
+  // copied stream is the entire first GOP — the video then began two
+  // seconds after the audio and the publisher had to probe past a second
+  // keyframe to find it at all (measured 7 Sep 2026). genpts only.
+  '-fflags', '+genpts',
   // Bounded: on a realtime input every second of analyzeduration is a
   // wall-clock second viewers wait for the first picture. The browser's
-  // Matroska carries the codec parameters up front, and the feed always
-  // starts a reader on a keyframe, so two seconds is ample and five (the
-  // default) is pure delay.
-  '-probesize', '2M', '-analyzeduration', '2000000',
+  // Matroska carries the codec parameters up front and the feed starts a
+  // reader on a keyframe, so half a second suffices (measured end to end,
+  // 7 Sep 2026). JSR_LIVE_SRC_PROBE_US is a measurement knob only.
+  '-probesize', '2M', '-analyzeduration', String(Number(process.env.JSR_LIVE_SRC_PROBE_US) > 0 ? Number(process.env.JSR_LIVE_SRC_PROBE_US) : 500000),
   '-thread_queue_size', '1024',
 ];
 

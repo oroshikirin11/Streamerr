@@ -48,6 +48,7 @@ const DEFAULTS = {
     delaySeconds: 0,
     passthrough: true,
     quality: 'balanced',
+    resolution: 'native',
     fps: 30,
     audio: 'auto',
     onEnd: 'end',

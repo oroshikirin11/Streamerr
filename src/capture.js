@@ -37,7 +37,8 @@ export const CAPTURE_DEFAULTS = {
   // forces a transcode to the configured picture for every share.
   passthrough: true,
   // Sender-side recorder settings, handed to the panel as defaults.
-  quality: 'balanced',   // sharp | balanced | light
+  quality: 'balanced',   // max | sharp | balanced | light
+  resolution: 'native',  // native | match
   fps: 30,               // 30 | 60
   audio: 'auto',         // auto | monitor | mic | both | none
   // What the engine does when the share ends: 'end' the broadcast, or
@@ -190,7 +191,8 @@ export function sanitizeCapture(raw = {}, base = CAPTURE_DEFAULTS, { bufferSecon
   const out = { ...base };
   if (raw.delaySeconds !== undefined) out.delaySeconds = clampSeconds(raw.delaySeconds, Math.max(0, bufferSeconds));
   if (raw.passthrough !== undefined) out.passthrough = raw.passthrough !== false;
-  if (['sharp', 'balanced', 'light'].includes(raw.quality)) out.quality = raw.quality;
+  if (['max', 'sharp', 'balanced', 'light'].includes(raw.quality)) out.quality = raw.quality;
+  if (['native', 'match'].includes(raw.resolution)) out.resolution = raw.resolution;
   if ([30, 60].includes(Number(raw.fps))) out.fps = Number(raw.fps);
   if (['auto', 'monitor', 'mic', 'both', 'none'].includes(raw.audio)) out.audio = raw.audio;
   if (['end', 'hold'].includes(raw.onEnd)) out.onEnd = raw.onEnd;

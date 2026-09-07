@@ -236,8 +236,16 @@ async function main() {
   const running = await until(() => api('GET', '/api/stream/status').then((r) => (r.data?.status === 'running' ? r.data : null)), 30000, 'running');
   check(running.playing?.live === true, 'the broadcast item is the live share');
   check(running.playing?.duration == null, 'a share has no duration');
-  await until(() => Promise.resolve(rxBytes > 0 ? rxBytes : null), 30000, 'ingest receiving');
-  const toFirst = (Date.now() - tGo) / 1000;
+  const tFirstByte = await until(() => Promise.resolve(rxBytes > 0 ? Date.now() : null), 30000, 'ingest receiving');
+  const toFirst = (tFirstByte - tGo) / 1000;
+  {
+    // Where the seconds go: spawn, first source byte, publisher connect.
+    const { data } = await api('GET', '/api/debug/log?after=0');
+    const ev = (data?.entries ?? []).filter((e) => e.t >= tGo - 500);
+    const at = (re) => ev.find((e) => re.test(e.line ?? ''))?.t;
+    const d = (t) => (t ? `${((t - tGo) / 1000).toFixed(2)}s` : '-');
+    note(`timeline after Go: source spawn ${d(at(/\[spawn:live\]/))}, first source byte ${d(at(/first byte in/))}, publisher up ${d(at(/\[spawn:publisher\]|publisher.*connect|\[publisher\]/i))}, first ingest byte ${d(tFirstByte)}`);
+  }
   note(`first bytes reached the ingest ${toFirst.toFixed(1)}s after Go live (no-delay mode)`);
   check(toFirst < 5, 'no-delay mode reaches the ingest within 5s of Go live');
   await sleep(3000);

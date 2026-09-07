@@ -157,23 +157,37 @@ chip visible from every page, and Settings › System › *Secure address* and
 
 ## 7. Measured, and what it means
 
-- **No-delay latency**: ~5 s from Go live to the first bytes at the ingest.
-  Three of those are the publisher's input probe (`-analyzeduration 3s` for
-  live broadcasts — one second was measured to map audio only, because the
-  video's parameters arrive with its first keyframe and the browser places
-  one every two seconds). Shortening that further means making the source
-  emit its stream info faster, not a flag.
+- **No-delay latency, Streamerr's share: 1.1 s** from Go live to the first
+  bytes at the ingest (was 4.3–4.8 s). The difference was `-fflags
+  +nobuffer` on the live source: it discards the packets read while
+  probing, which on a copied stream is the whole first GOP, so video began
+  two seconds after audio and the publisher had to probe past a second
+  keyframe. With the flag gone the source probes 0.5 s and the publisher
+  1 s (`JSR_LIVE_SRC_PROBE_US` / `JSR_LIVE_PUB_PROBE_US` exist for
+  measuring, never for production). Everything past the ingest — the
+  receiver's segmenting and the viewer's player buffer — is the receiver's
+  to shorten.
+- **Resolution**: the screen is sent at its own size by default
+  (`capture.resolution: 'native'`); 'match' shrinks it to the broadcast
+  frame in the browser. 1:1 on air needs the copy path (Chrome/Edge H.264,
+  nothing drawn); a transcode still lands in the broadcast frame.
+- **Bitrate**: presets are per 1080p30 and scaled by the surface's area
+  (a 5120×1440 monitor gets ~3.5× the budget), capped at 80 Mb/s; `max`
+  is 30 Mb/s at 1080p. Chrome honours `videoBitsPerSecond`; Firefox
+  records VP8/VP9 and is transcoded regardless.
 - **Passthrough**: Chrome sends `video/webm;codecs=h264,opus`; the box
   copies the video and conforms the audio to AAC. Encode cost zero.
 - **Apply cost**: the feed continues from the oldest unsent keyframe; with
   the recorder's 2 s keyframes an Apply loses up to 2 s of screen and
   nothing is torn. Phase-3 WebCodecs (keyframe on demand) would make it
   zero — not built.
+- **Audio on Linux**: a real microphone opened by the browser cut local
+  playback on the operator's A50 (cause not found; PipeWire alone did
+  not); the output's "Monitor of …" device works and carries the sound.
+  The *What I hear* mode picks it automatically.
 - **Frame pacing**: tab capture in Chrome delivered a steady 30 fps in the
   test. A static monitor share may deliver fewer frames; the transcode path
-  duplicates to CFR, the copy path ships what arrives. To measure on a real
-  desktop with a static screen before deciding whether a browser-side
-  frame pacer is needed.
+  duplicates to CFR, the copy path ships what arrives.
 - **N100**: not yet measured. With Studio movers the canvas graph runs
   ~0.8× there on 4K titles; a 1080p30 share is lighter, but under 1.0× a
   live source drains its delay and stalls. The passthrough path costs

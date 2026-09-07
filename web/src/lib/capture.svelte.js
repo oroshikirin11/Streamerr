@@ -27,6 +27,7 @@ export const cap = $state({
   audio: false,
   audioFrom: '',
   mime: '',
+  bps: 0,
   title: 'Screen',
   error: '',
   /** Our session id on the server, once it has acknowledged the hello. */
@@ -38,7 +39,19 @@ export const cap = $state({
   busy: '',
 });
 
-const QUALITY_BPS = { sharp: 12_000_000, balanced: 8_000_000, light: 4_000_000 };
+/**
+ * Recorder bitrate per preset, for a 1080p30 picture; scaled by the
+ * picked surface's area so a 5120x1440 monitor is not starved with a
+ * 1080p budget. `max` is as close to 1:1 as a browser encoder gets.
+ */
+const QUALITY_BPS = { max: 30_000_000, sharp: 16_000_000, balanced: 8_000_000, light: 4_000_000 };
+const BPS_CAP = 80_000_000;
+function bitrateFor(quality, width, height, fps) {
+  const base = QUALITY_BPS[quality] ?? QUALITY_BPS.balanced;
+  const area = (Number(width) || 1920) * (Number(height) || 1080);
+  const scale = Math.max(0.5, area / (1920 * 1080)) * (Number(fps) === 60 ? 1.5 : 1);
+  return Math.min(BPS_CAP, Math.round(base * scale));
+}
 
 /** The recorder types worth asking for, best first. H.264 lets the box copy. */
 const MIME_CANDIDATES = [
@@ -124,8 +137,11 @@ export async function pick({ settings = {}, encoder = {} } = {}) {
   cap.phase = 'picking';
   ended = false;
   const fps = Number(settings.fps) === 60 ? 60 : 30;
-  const maxW = Number(encoder.width) > 0 ? Number(encoder.width) : 1920;
-  const maxH = Number(encoder.height) > 0 ? Number(encoder.height) : 1080;
+  // 'native' sends the screen at its own size — 1:1 when the box copies
+  // it; 'match' lets the browser shrink it to the broadcast frame first.
+  const native = (settings.resolution ?? 'native') !== 'match';
+  const maxW = native ? 7680 : Number(encoder.width) > 0 ? Number(encoder.width) : 1920;
+  const maxH = native ? 4320 : Number(encoder.height) > 0 ? Number(encoder.height) : 1080;
   let display;
   const constraints = (withAudio, monitorFirst = true) => ({
     video: {
@@ -226,7 +242,8 @@ export async function pick({ settings = {}, encoder = {} } = {}) {
 
   const mime = pickMime();
   cap.mime = mime;
-  const bps = QUALITY_BPS[settings.quality] ?? QUALITY_BPS.balanced;
+  const bps = bitrateFor(settings.quality, cap.width, cap.height, cap.fps);
+  cap.bps = bps;
   try {
     rec = new MediaRecorder(stream, {
       ...(mime ? { mimeType: mime } : {}),
