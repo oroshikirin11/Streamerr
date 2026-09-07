@@ -49,7 +49,9 @@ const BPS_CAP = 80_000_000;
 function bitrateFor(quality, width, height, fps) {
   const base = QUALITY_BPS[quality] ?? QUALITY_BPS.balanced;
   const area = (Number(width) || 1920) * (Number(height) || 1080);
-  const scale = Math.max(0.5, area / (1920 * 1080)) * (Number(fps) === 60 ? 1.5 : 1);
+  // Bounded above: a browser that reports the constraint ceiling rather
+  // than the real size must not talk the budget up to the cap.
+  const scale = Math.min(4, Math.max(0.5, area / (1920 * 1080))) * (Number(fps) === 60 ? 1.5 : 1);
   return Math.min(BPS_CAP, Math.round(base * scale));
 }
 

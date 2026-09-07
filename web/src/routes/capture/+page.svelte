@@ -121,7 +121,9 @@
 
 <div class="head">
   <h1>Capture</h1>
-  {#if liveHere}
+  {#if liveHere && paused}
+    <span class="pill">Paused · {fmtTime(position)}</span>
+  {:else if liveHere}
     <span class="pill live"><span class="dot"></span>LIVE · {fmtTime(position)}</span>
   {:else if cap.phase === 'armed'}
     <span class="pill">Screen picked — not on air yet</span>
@@ -191,86 +193,107 @@
 
 {:else if cap.phase === 'idle' || cap.phase === 'picking'}
   <!-- 2 · idle -->
-  <p class="lede">Put a screen or window on the broadcast. It is its own broadcast: nothing else plays while it is on, and Pause puts up a card. Overlays from the Studio are drawn on it.</p>
-  <section class="card idle">
-    <button class="primary big" onclick={share} disabled={cap.phase === 'picking' || Boolean(blocked)}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
-      {cap.phase === 'picking' ? 'Waiting for the picker…' : 'Share screen'}
-    </button>
-    {#if blocked}
-      <p class="muted small">{blocked} <button class="inline" onclick={stopBroadcast}>Stop the broadcast</button></p>
-    {:else}
-      <p class="muted small">
-        Your browser will ask which screen or window.
-        {#if delay > 0}Viewers see it about <strong>{delay} seconds</strong> after you do — that delay is what keeps the stream smooth.{:else}Viewers see it as soon as it reaches them — there is <strong>no delay</strong> and no slack for a hiccup; add a few seconds under Timing below if the stream stutters.{/if}
-      </p>
-    {/if}
+  <section class="card hero">
+    <div class="glyph" aria-hidden="true">
+      <svg viewBox="0 0 64 48" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="58" height="36" rx="4"/><path d="M22 45h20M32 39v6" stroke-linecap="round"/><path class="beam" d="M12 30l9-9 8 6 10-12 13 11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="52" cy="10" r="3" fill="var(--success)" stroke="none"/></svg>
+    </div>
+    <div class="herobody">
+      <h2>Share a screen</h2>
+      <p class="muted">Your browser asks which screen or window. It becomes the broadcast on its own — nothing else plays while it is on — and overlays from the Studio are drawn on it.</p>
+      <div class="row">
+        <button class="primary big" onclick={share} disabled={cap.phase === 'picking' || Boolean(blocked)}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+          {cap.phase === 'picking' ? 'Waiting for the picker…' : 'Share screen'}
+        </button>
+        {#if blocked}
+          <span class="small muted">{blocked}</span>
+          <button onclick={stopBroadcast}>Stop the broadcast</button>
+        {:else}
+          <span class="small muted">{delay > 0 ? `Viewers see it about ${delay} s after you do.` : 'No delay: viewers see it as soon as it reaches them.'}</span>
+        {/if}
+      </div>
+    </div>
   </section>
-  <div class="settings">
-    <div class="field">
-      <label for="c-audio">Audio</label>
-      <select id="c-audio" value={settings.audio ?? 'auto'} onchange={(e) => saveSetting({ audio: e.currentTarget.value })}>
-        <option value="monitor">What I hear (the output's monitor)</option>
-        <option value="auto">What the picker gives</option>
-        <option value="mic">Microphone</option>
-        <option value="both">System + microphone</option>
-        <option value="none">None</option>
-      </select>
-      {#if platform === 'linux'}<span class="hint"><em>What I hear</em> captures the “Monitor of …” device PipeWire offers for your output — no microphone opens, nothing local is muted. The tested route on Linux.</span>
-      {:else if platform === 'mac'}<span class="hint">macOS shares audio for a tab, not for a window or monitor. <em>What I hear</em> needs a virtual output device (BlackHole or similar) to exist.</span>{/if}
-    </div>
-    <div class="field">
-      <label for="c-quality">Quality</label>
-      <select id="c-quality" value={settings.quality ?? 'balanced'} onchange={(e) => saveSetting({ quality: e.currentTarget.value })}>
-        <option value="max">Max · 30 Mb/s at 1080p, more for bigger screens</option>
-        <option value="sharp">Sharp · 16 Mb/s at 1080p</option>
-        <option value="balanced">Balanced · 8 Mb/s at 1080p</option>
-        <option value="light">Light · 4 Mb/s (remote)</option>
-      </select>
-      <span class="hint">The browser's encoder budget, scaled to the screen's size. With a browser that records H.264 (Chrome, Edge) and nothing drawn, these bytes go out untouched.</span>
-    </div>
-    <div class="field">
-      <label for="c-res">Resolution</label>
-      <select id="c-res" value={settings.resolution ?? 'native'} onchange={(e) => saveSetting({ resolution: e.currentTarget.value })}>
-        <option value="native">The screen's own (1:1)</option>
-        <option value="match">Shrunk to the broadcast frame</option>
-      </select>
-      <span class="hint">1:1 needs the browser's H.264 to be copied; a transcode on the box still lands in the broadcast frame (Settings › Output › frame size).</span>
-    </div>
-    <div class="field">
-      <label for="c-fps">Frame rate</label>
-      <select id="c-fps" value={String(settings.fps ?? 30)} onchange={(e) => saveSetting({ fps: Number(e.currentTarget.value) })}>
-        <option value="30">30</option>
-        <option value="60">60 · costs the box more</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="c-delay">Timing</label>
-      <select id="c-delay" value={String(delay)} onchange={(e) => saveSetting({ delaySeconds: Number(e.currentTarget.value) })}>
-        <option value="0">No delay</option>
-        <option value="2">2 s of slack</option>
-        <option value="5">5 s of slack</option>
-        <option value="15">15 s — smoothest</option>
-      </select>
-      <span class="hint">How much is banked before viewers get it. Zero means nothing absorbs a hiccup.</span>
-    </div>
-    <div class="field">
-      <label for="c-end">When sharing ends</label>
-      <select id="c-end" value={settings.onEnd ?? 'end'} onchange={(e) => saveSetting({ onEnd: e.currentTarget.value })}>
-        <option value="end">End the broadcast</option>
-        <option value="hold">Hold with a card for {settings.holdMinutes ?? 5} min, then end</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="c-pass">Encoding</label>
-      <select id="c-pass" value={settings.passthrough === false ? 'encode' : 'copy'} onchange={(e) => saveSetting({ passthrough: e.currentTarget.value === 'copy' })}>
-        <option value="copy">Send the browser's H.264 as is</option>
-        <option value="encode">Always re-encode on the box</option>
-      </select>
-      <span class="hint">As-is costs the box nothing; anything drawn in the Studio re-encodes anyway.</span>
-    </div>
+
+  <div class="groups">
+    <section class="card group">
+      <h3>Picture</h3>
+      <div class="field">
+        <label for="c-quality">Quality</label>
+        <select id="c-quality" value={settings.quality ?? 'balanced'} onchange={(e) => saveSetting({ quality: e.currentTarget.value })}>
+          <option value="max">Max · 30 Mb/s at 1080p</option>
+          <option value="sharp">Sharp · 16 Mb/s at 1080p</option>
+          <option value="balanced">Balanced · 8 Mb/s at 1080p</option>
+          <option value="light">Light · 4 Mb/s, for remote</option>
+        </select>
+        <span class="hint">Scaled up for bigger screens. Goes out untouched from Chrome or Edge.</span>
+      </div>
+      <div class="pair">
+        <div class="field">
+          <label for="c-res">Resolution</label>
+          <select id="c-res" value={settings.resolution ?? 'native'} onchange={(e) => saveSetting({ resolution: e.currentTarget.value })}>
+            <option value="native">Screen's own</option>
+            <option value="match">Broadcast frame</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="c-fps">Frame rate</label>
+          <select id="c-fps" value={String(settings.fps ?? 30)} onchange={(e) => saveSetting({ fps: Number(e.currentTarget.value) })}>
+            <option value="30">30 fps</option>
+            <option value="60">60 fps</option>
+          </select>
+        </div>
+      </div>
+      <span class="hint">1:1 needs the browser's H.264 copied as is; a re-encode lands in the broadcast frame. 60 fps costs the box more.</span>
+    </section>
+
+    <section class="card group">
+      <h3>Sound</h3>
+      <div class="field">
+        <label for="c-audio">Audio</label>
+        <select id="c-audio" value={settings.audio ?? 'auto'} onchange={(e) => saveSetting({ audio: e.currentTarget.value })}>
+          <option value="monitor">What I hear</option>
+          <option value="auto">What the picker gives</option>
+          <option value="mic">Microphone</option>
+          <option value="both">System + microphone</option>
+          <option value="none">None</option>
+        </select>
+        {#if platform === 'linux'}<span class="hint"><em>What I hear</em> captures the output's “Monitor of …” device: no microphone opens, nothing local is muted.</span>
+        {:else if platform === 'mac'}<span class="hint">macOS shares audio for a tab only. <em>What I hear</em> needs a virtual output device such as BlackHole.</span>
+        {:else}<span class="hint">Windows shares system audio with a monitor or window.</span>{/if}
+      </div>
+    </section>
+
+    <section class="card group">
+      <h3>Broadcast</h3>
+      <div class="field">
+        <label for="c-delay">Timing</label>
+        <select id="c-delay" value={String(delay)} onchange={(e) => saveSetting({ delaySeconds: Number(e.currentTarget.value) })}>
+          <option value="0">No delay</option>
+          <option value="2">2 s of slack</option>
+          <option value="5">5 s of slack</option>
+          <option value="15">15 s, smoothest</option>
+        </select>
+        <span class="hint">Banked before viewers get it. Zero leaves nothing to absorb a hiccup.</span>
+      </div>
+      <div class="field">
+        <label for="c-end">When sharing ends</label>
+        <select id="c-end" value={settings.onEnd ?? 'end'} onchange={(e) => saveSetting({ onEnd: e.currentTarget.value })}>
+          <option value="end">End the broadcast</option>
+          <option value="hold">Hold a card {settings.holdMinutes ?? 5} min, then end</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="c-pass">Encoding</label>
+        <select id="c-pass" value={settings.passthrough === false ? 'encode' : 'copy'} onchange={(e) => saveSetting({ passthrough: e.currentTarget.value === 'copy' })}>
+          <option value="copy">Browser's H.264 as is</option>
+          <option value="encode">Always re-encode on the box</option>
+        </select>
+        <span class="hint">As-is costs the box nothing. Anything drawn in the Studio re-encodes anyway.</span>
+      </div>
+    </section>
   </div>
-  {#if saving}<p class="muted small">Saved.</p>{/if}
+  {#if saving}<p class="muted small saved">Saved.</p>{/if}
 
 {:else}
   <!-- 3 · armed, 4 · live -->
@@ -279,14 +302,17 @@
       <div class="preview">
         <!-- svelte-ignore a11y_media_has_caption -->
         <video bind:this={video} autoplay muted playsinline></video>
-        {#if liveHere}<span class="pill live float"><span class="dot"></span>LIVE</span>{/if}
+        {#if liveHere && paused}<span class="pill float">Paused</span>
+        {:else if liveHere}<span class="pill live float"><span class="dot"></span>LIVE</span>{/if}
       </div>
       <div class="cap">
-        <strong>{surfaceName(cap.surface)}</strong>
-        {#if cap.width}<span>{cap.width}×{cap.height}{#if serverSession?.width && (serverSession.width !== cap.width)} → {serverSession.width}×{serverSession.height}{/if}</span>{/if}
-        {#if cap.fps}<span>{cap.fps} fps</span>{/if}
-        <span>{cap.audio ? cap.audioFrom || 'audio' : 'no audio'}</span>
-        {#if cap.mime}<span>{codecName(cap.mime)}{#if cap.bps} · {(cap.bps / 1e6).toFixed(0)} Mb/s{/if}</span>{/if}
+        <span class="chip strong">{surfaceName(cap.surface)}</span>
+        {#if serverSession?.width}<span class="chip">{serverSession.width}×{serverSession.height}</span>
+        {:else if cap.width}<span class="chip">{cap.width}×{cap.height}</span>{/if}
+        {#if cap.fps}<span class="chip">{cap.fps} fps</span>{/if}
+        <span class="chip" class:off={!cap.audio}>{cap.audio ? cap.audioFrom || 'audio' : 'no audio'}</span>
+        {#if cap.mime}<span class="chip">{codecName(cap.mime)}{#if cap.bps}&nbsp;· {(cap.bps / 1e6).toFixed(0)} Mb/s{/if}</span>{/if}
+        {#if liveHere}<span class="chip" class:off={delay === 0}>{delay > 0 ? `${delay} s delay` : 'no delay'}</span>{/if}
       </div>
       {#if cap.mime && !/h264|avc1/i.test(cap.mime)}
         <p class="hint">This browser records {codecName(cap.mime)}, which the box must re-encode into the broadcast frame. For a 1:1 picture use Chrome or Edge: they record H.264, which goes out untouched.</p>
@@ -316,15 +342,16 @@
         <span class="hint">Shown in the transport bar, to viewers, and as <code>{'{title}'}</code> in Studio captions.</span>
       </div>
       {#if liveHere}
-        <div class="row">
-          <button onclick={togglePause}>{paused ? 'Resume' : 'Pause'}</button>
-          <span class="muted small">{paused ? 'Viewers see “Paused”. Resume picks up live — what happened meanwhile is not shown.' : 'Puts a card up. Use it when you need a moment off screen.'}</span>
+        <div class="actions">
+          <button onclick={togglePause}>
+            {#if paused}<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>Resume
+            {:else}<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>Pause{/if}
+          </button>
+          <button class="danger" onclick={stop}>
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stop sharing
+          </button>
         </div>
-        <div class="row">
-          <button class="danger" onclick={stop}>Stop sharing</button>
-          <span class="muted small">{settings.onEnd === 'hold' ? `Holds the stream on a card for ${settings.holdMinutes ?? 5} min, then ends it.` : 'Ends the broadcast.'}</span>
-        </div>
-        <p class="muted small">Stopping from your browser's own “Stop sharing” bar does the same thing.</p>
+        <p class="muted small">{paused ? 'Viewers see a “Paused” card. Resume picks up live; what happened meanwhile is not shown.' : 'Pause puts a card up for a moment off screen.'} {settings.onEnd === 'hold' ? `Stopping holds a card for ${settings.holdMinutes ?? 5} min, then ends the broadcast.` : 'Stopping ends the broadcast.'} Your browser's own “Stop sharing” bar does the same.</p>
       {:else}
         <div class="go">
           <button class="primary" onclick={goLive} disabled={Boolean(blocked) || cap.busy === 'go'}>
@@ -362,21 +389,36 @@
   .lock p { margin: 0; }
   .primary-link { color: var(--accent); font-weight: 600; }
   code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-2); padding: 1px 6px; border-radius: 5px; }
-  .idle { max-width: 560px; display: grid; gap: 12px; justify-items: start; }
-  .idle p { margin: 0; }
+  .hero { display: grid; grid-template-columns: auto 1fr; gap: 22px; align-items: center; max-width: 760px; padding: 22px 24px; }
+  .glyph { width: 96px; color: var(--accent); opacity: .9; }
+  .glyph svg { width: 100%; height: auto; display: block; }
+  .glyph .beam { opacity: .55; }
+  .herobody { display: grid; gap: 10px; }
+  .herobody h2 { margin: 0; font-size: 20px; font-weight: 650; }
+  .herobody p { margin: 0; max-width: 58ch; }
+  .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 16px; max-width: 980px; }
+  .group { display: grid; gap: 12px; align-content: start; padding: 16px 18px; }
+  .group h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .saved { margin: 8px 0 0; }
+  .chip { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; background: var(--surface-2); color: var(--text); font-size: 12px; white-space: nowrap; }
+  .chip.strong { font-weight: 600; }
+  .chip.off { color: var(--muted); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions button { display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; }
+  .actions svg { width: 14px; height: 14px; }
   .big { padding: 12px 22px; font-size: 16px; font-weight: 600; display: inline-flex; align-items: center; gap: 10px; }
   .big svg { width: 20px; height: 20px; }
   .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-top: 18px; max-width: 980px; }
   .field { display: grid; gap: 5px; align-content: start; }
   .field label { font-size: 12px; color: var(--muted); letter-spacing: .02em; }
   .field select, .field input { font: inherit; font-size: 14px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; width: 100%; }
-  .hint { font-size: 13px; color: var(--muted); max-width: 60ch; margin: 6px 0 0; display: block; }
+  .hint { font-size: 12.5px; line-height: 1.45; color: var(--muted); max-width: 60ch; margin: 4px 0 0; display: block; }
   .two { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr); gap: 18px; align-items: start; }
   .preview { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: #000; }
   .preview video { width: 100%; height: 100%; object-fit: contain; display: block; }
   .pill.float { position: absolute; top: 10px; left: 10px; }
-  .cap { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; margin-top: 8px; font-size: 13px; color: var(--muted); }
-  .cap strong { color: var(--text); font-weight: 500; }
+  .cap { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
   .stat { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
   .stat div { background: var(--surface-2); border-radius: var(--radius); padding: 8px 10px; }
   .stat b { display: block; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -388,6 +430,8 @@
   .go button.primary small { color: rgb(255 255 255 / .8); }
   @media (max-width: 860px) {
     .two { grid-template-columns: 1fr; }
+    .hero { grid-template-columns: 1fr; }
+    .glyph { width: 64px; }
     .stat { grid-template-columns: repeat(2, 1fr); }
   }
 </style>
