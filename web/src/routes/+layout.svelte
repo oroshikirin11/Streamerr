@@ -141,7 +141,7 @@
     const k = s.health?.kbps;
     const rate = k == null ? '' : k >= 1000 ? `${(k / 1000).toFixed(1)} Mb/s` : `${Math.round(k)} kb/s`;
     const d = stream.capture?.settings?.delaySeconds ?? 0;
-    return [rate, d > 0 ? `viewers ${d} s back` : 'no delay'].filter(Boolean).join(' · ');
+    return [rate, d > 0 ? `${d} s held back` : 'nothing held back'].filter(Boolean).join(' · ');
   });
   const capWarn = $derived(Boolean(capSession?.health?.bufferedAmount > 4_000_000)
     || (speed != null && isLive && parseFloat(speed) < 0.9));

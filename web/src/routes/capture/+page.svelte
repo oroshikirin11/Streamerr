@@ -209,7 +209,7 @@
           <span class="small muted">{blocked}</span>
           <button onclick={stopBroadcast}>Stop the broadcast</button>
         {:else}
-          <span class="small muted">{delay > 0 ? `Viewers see it about ${delay} s after you do.` : 'No delay: viewers see it as soon as it reaches them.'}</span>
+          <span class="small muted">{delay > 0 ? `${delay} s held back at the box, then the receiver's own delay.` : 'Nothing held back: about a second to the receiver, then its own delay.'}</span>
         {/if}
       </div>
     </div>
@@ -267,14 +267,14 @@
     <section class="card group">
       <h3>Broadcast</h3>
       <div class="field">
-        <label for="c-delay">Timing</label>
+        <label for="c-delay">Held back at the box</label>
         <select id="c-delay" value={String(delay)} onchange={(e) => saveSetting({ delaySeconds: Number(e.currentTarget.value) })}>
-          <option value="0">No delay</option>
-          <option value="2">2 s of slack</option>
-          <option value="5">5 s of slack</option>
-          <option value="15">15 s, smoothest</option>
+          <option value="0">Nothing · fastest, no slack</option>
+          <option value="2">2 s · a little slack</option>
+          <option value="5">5 s · steadier</option>
+          <option value="15">15 s · smoothest</option>
         </select>
-        <span class="hint">Banked before viewers get it. Zero leaves nothing to absorb a hiccup.</span>
+        <span class="hint">What the box banks before it sends. Viewers wait this plus about a second on the box plus the receiver's own segments, so never zero.</span>
       </div>
       <div class="field">
         <label for="c-end">When sharing ends</label>
@@ -312,7 +312,7 @@
         {#if cap.fps}<span class="chip">{cap.fps} fps</span>{/if}
         <span class="chip" class:off={!cap.audio}>{cap.audio ? cap.audioFrom || 'audio' : 'no audio'}</span>
         {#if cap.mime}<span class="chip">{codecName(cap.mime)}{#if cap.bps}&nbsp;· {(cap.bps / 1e6).toFixed(0)} Mb/s{/if}</span>{/if}
-        {#if liveHere}<span class="chip" class:off={delay === 0}>{delay > 0 ? `${delay} s delay` : 'no delay'}</span>{/if}
+        {#if liveHere}<span class="chip" class:off={delay === 0}>{delay > 0 ? `${delay} s held back` : 'nothing held back'}</span>{/if}
       </div>
       {#if cap.mime && !/h264|avc1/i.test(cap.mime)}
         <p class="hint">This browser records {codecName(cap.mime)}, which the box must re-encode into the broadcast frame. For a 1:1 picture use Chrome or Edge: they record H.264, which goes out untouched.</p>
@@ -321,7 +321,7 @@
         <p class="hint">{platform === 'mac' ? 'macOS' : 'Linux'} doesn't share system audio for a {surfaceName(cap.surface).toLowerCase()}. Choose <strong>What I hear</strong> in the audio setting to send it.</p>
       {/if}
       {#if liveHere}
-        <p class="hint">This is your screen as the browser sends it. The floating preview shows what viewers get, overlays included{#if delay > 0}, about {delay} s later{/if}.</p>
+        <p class="hint">This is your screen as the browser sends it. The floating preview shows what viewers get, overlays included.</p>
         <div class="stat">
           <div><b>{fmtKbps(cap.sending.kbps)}</b><span>sending</span></div>
           <div><b>{(cap.sending.backlog / 1_000_000).toFixed(1)} MB</b><span>waiting to send</span></div>
@@ -356,7 +356,7 @@
         <div class="go">
           <button class="primary" onclick={goLive} disabled={Boolean(blocked) || cap.busy === 'go'}>
             {cap.busy === 'go' ? 'Going live…' : 'Go live'}
-            <small>{blocked ? blocked : delay > 0 ? `Viewers see it in about ${delay} s` : 'Viewers see it right away'}</small>
+            <small>{blocked ? blocked : delay > 0 ? `${delay} s held back, then the receiver's delay` : 'About a second to the receiver, then its delay'}</small>
           </button>
           {#if blocked}<button onclick={stopBroadcast}>Stop the broadcast</button>{/if}
         </div>

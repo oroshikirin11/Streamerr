@@ -12,9 +12,11 @@ Two rules set by Alex during the build, and they shape everything:
   a broadcast whose only item is the screen; the broadcast ends when the
   share does. While media is on air, the Capture page says so and offers
   Stop.
-- **No delay is the default.** The publisher connects on the first bytes.
-  A delay (2/5/15 s, never deeper than the bank) is a setting for anyone who
-  wants slack against hiccups.
+- **Nothing held back is the default.** The publisher connects on the
+  first bytes. Holding 2/5/15 s at the box (never deeper than the bank) is a
+  setting for anyone who wants slack against hiccups. The UI never says "no
+  delay": viewers always wait about a second on the box plus the receiver's
+  segments.
 
 ---
 

@@ -2223,14 +2223,14 @@
     </p>
     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
       <div>
-        <label for="s-cdelay">Delay before viewers get it</label>
+        <label for="s-cdelay">Held back at the box</label>
         <select id="s-cdelay" bind:value={cfg.capture.delaySeconds}>
-          <option value={0}>No delay</option>
-          <option value={2}>2 seconds</option>
-          <option value={5}>5 seconds</option>
-          <option value={15}>15 seconds</option>
+          <option value={0}>Nothing · fastest, no slack</option>
+          <option value={2}>2 seconds · a little slack</option>
+          <option value={5}>5 seconds · steadier</option>
+          <option value={15}>15 seconds · smoothest</option>
         </select>
-        <p class="muted small">Banked before the broadcast connects. A live source cannot refill this once it drains, so zero leaves nothing to absorb a hiccup.</p>
+        <p class="muted small">Banked before the broadcast connects; a live source cannot refill it once it drains. Viewers wait this, plus about a second on the box, plus the receiver's own segments — nothing here is ever zero delay.</p>
       </div>
       <div>
         <label for="s-cend">When sharing ends</label>
