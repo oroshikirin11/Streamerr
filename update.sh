@@ -11,7 +11,9 @@
 # (overlays/), the cache, and the run directory. They are ignored by git and
 # mounted as volumes under Docker, so neither a pull nor a rebuild touches
 # them. This script never runs `git clean` or `git reset`; local changes to
-# tracked files stop it instead of being thrown away.
+# tracked files stop it instead of being thrown away — except
+# docker-compose.yml, which every install edits (the media volume, the
+# render group, the ports): that one is set aside for the pull and put back.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -49,9 +51,19 @@ command -v git >/dev/null || die "git is not installed."
 [ -d .git ] || die "This is not a git checkout, so there is nothing to pull. Re-download the project instead."
 git remote get-url origin >/dev/null 2>&1 || die "No 'origin' remote — add one: git remote add origin https://github.com/oroshikirin11/Streamerr"
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  git status --short --untracked-files=no | sed 's/^/  /'
-  die "Tracked files were changed locally (listed above). Keep them with 'git stash', or drop them with 'git checkout -- .', then run this again."
+# docker-compose.yml is yours to edit — the media volume, the render group,
+# the ports — so a changed one never blocks an update: it is set aside for
+# the pull and put back after. Any OTHER tracked file changed locally is
+# still a stop, since the pull would have to merge it.
+OTHER_CHANGES="$(git status --short --untracked-files=no | grep -v ' docker-compose.yml$' || true)"
+if [ -n "$OTHER_CHANGES" ]; then
+  printf '%s\n' "$OTHER_CHANGES" | sed 's/^/  /'
+  die "Tracked files besides docker-compose.yml were changed locally (listed above). Keep them with 'git stash', or drop them with 'git checkout -- .', then run this again."
+fi
+COMPOSE_EDITED=0
+if ! git diff --quiet -- docker-compose.yml || ! git diff --cached --quiet -- docker-compose.yml; then
+  COMPOSE_EDITED=1
+  note "keeping your edited docker-compose.yml"
 fi
 
 MODE=standalone
@@ -109,7 +121,32 @@ if [ "${#KEEP[@]}" -gt 0 ]; then
 fi
 
 # ── pull ─────────────────────────────────────────────────────────────────
+if [ "$COMPOSE_EDITED" = 1 ]; then
+  run git stash push --quiet -m "streamerr-update: docker-compose.yml" -- docker-compose.yml
+fi
 run git pull --ff-only --quiet origin "$BRANCH"
+if [ "$COMPOSE_EDITED" = 1 ] && [ "$DRY" = 0 ]; then
+  # Your file comes back as it was. If upstream changed the same file, its
+  # new port lines are listed so you can add what matters — the secure
+  # address on 8443, say — and the rest of its diff is one command away.
+  UPSTREAM_COMPOSE="$(git show HEAD:docker-compose.yml)"
+  git checkout --quiet stash@{0} -- docker-compose.yml
+  git stash drop --quiet
+  git reset --quiet -- docker-compose.yml
+  # Compared by the CONTAINER side of each mapping: a host port you remapped
+  # is still the same service, not a missing one.
+  MINE="$(grep -oE '"[0-9]+:[0-9]+(/[a-z]+)?"' docker-compose.yml | sed -E 's/"[0-9]+:([0-9]+(\/[a-z]+)?)"/\1/' || true)"
+  NEW_LINES="$(printf '%s\n' "$UPSTREAM_COMPOSE" | grep -E '^\s*-\s*"[0-9]+:[0-9]+' | while IFS= read -r line; do
+    cport="$(printf '%s' "$line" | grep -oE '"[0-9]+:[0-9]+(/[a-z]+)?"' | sed -E 's/"[0-9]+:([0-9]+(\/[a-z]+)?)"/\1/')"
+    printf '%s\n' "$MINE" | grep -qxF "$cport" || printf '%s\n' "$line"
+  done)"
+  if [ -n "$NEW_LINES" ]; then
+    bold "Upstream docker-compose.yml has port lines yours does not:"
+    printf '%s\n' "$NEW_LINES" | sed 's/^/  /'
+    note "add the ones you need to your docker-compose.yml (8443 is the secure address for screen sharing), then: docker compose up -d"
+  fi
+  note "everything upstream changed in docker-compose.yml: git diff HEAD -- docker-compose.yml"
+fi
 
 # ── rebuild and restart ──────────────────────────────────────────────────
 wait_up() {
