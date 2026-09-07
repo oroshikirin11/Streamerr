@@ -1,5 +1,7 @@
 # Screen capture — viability note
 
+**Superseded 2026-09-07 by `screen-capture-design.md`** — the decisions live there; this note is kept for the history.
+
 Can Streamerr capture part of the operator's desktop (or a single
 application window) in the browser and put it on the broadcast?
 

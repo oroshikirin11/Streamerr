@@ -879,8 +879,10 @@ export class PipelinePlayout extends EventEmitter {
     this._startAborted = false;
     // Preparing from the first wait, not just when subtitles must be
     // extracted: a Stop that lands during the warm-up needs a status that
-    // says something is under way, or it has nothing to end.
-    this.status = 'preparing';
+    // says something is under way, or it has nothing to end. A screen
+    // share has nothing to prepare (and the panel's "preparing" means
+    // subtitles), so it goes straight to starting.
+    this.status = items[0]?.live ? 'starting' : 'preparing';
     this.emit('status', this.status);
     this._clipNos = new WeakMap();
     this._clipCount = 0;
@@ -1170,7 +1172,9 @@ export class PipelinePlayout extends EventEmitter {
     // stalled — huge files over SMB need many seconds to open, and the
     // subtitles filter opens the same file a second time. Killing it early
     // just restarts the wait from zero, forever.
-    const limit = this._sawBlock ? 5000 : 30_000;
+    // A live source pauses whenever the sender does (a browser tab put to
+    // sleep for a moment); give it twice the grace before a respawn.
+    const limit = this._sawBlock ? (this.current?.item?.live ? 10_000 : 5000) : 30_000;
     // Health beacon: one line every ~14s into docker logs, so a wedged
     // broadcast leaves evidence of its exact state instead of a mystery.
     this._beat = (this._beat ?? 0) + 1;
@@ -1223,6 +1227,7 @@ export class PipelinePlayout extends EventEmitter {
 
   stop({ graceful = false } = {}) {
     this._stopping = true;
+    clearTimeout(this._liveHoldTimer);
     this._abort.abort();     // take background extractions down too
     this._tcpBridges?.forEach((b) => { try { b.close(); } catch { /* down */ } });
     this._tcpBridges = null;
@@ -1419,6 +1424,8 @@ export class PipelinePlayout extends EventEmitter {
     if (!this.current) throw new Error('Nothing playing');
     // The countdown counts wall-clock time; there is nothing to seek in.
     if (this.current.item?.countdown) return this.position;
+    // A screen share is live: the only position is now.
+    if (this.current.item?.live) return this.position;
 
     // A fresh seek earns a fresh reconnect (see the copy-seam reshape).
     this._reshapedFor = null;
@@ -1561,6 +1568,9 @@ export class PipelinePlayout extends EventEmitter {
     // Captured for resume: the card's own bank stamps freeze `pos` while
     // `tl` advances, so nothing at resume time can reconstruct this.
     this._pauseResume = this.position;
+    // A live share resumes FRESH: whatever the screen showed behind the
+    // card is dropped, not aired late. That is what a pause means here.
+    if (this.current.item?.live) this._liveFresh = true;
     // The scheduler SURVIVES a pause: delivery suspends, the workers keep
     // encoding ahead, and the retained window keeps the position we are
     // pausing at. Killing it here was why resuming took a minute of card —
@@ -1965,6 +1975,21 @@ export class PipelinePlayout extends EventEmitter {
       // on, A/V input offsets diverged, audio was discarded as late, and
       // the server dropped the starved stream minutes later.
       '-fflags', '+discardcorrupt',
+      /**
+       * A live broadcast (a screen share) feeds this at 1x, so the input
+       * probe is paid in wall-clock seconds before the first byte reaches
+       * the receiver: mpegts' default is five of them. The video's
+       * parameters arrive with its first keyframe, which a copied browser
+       * stream places every two seconds — probing for less than that
+       * (measured: one second) let the publisher map audio only and the
+       * broadcast went out without a picture. Three seconds covers one
+       * keyframe interval with margin; measured end to end, the first
+       * bytes reach the ingest ~5 s after Go live in no-delay mode. File
+       * broadcasts fill the bank faster than realtime and never notice
+       * the default; they keep it.
+       */
+      ...((this.current?.item?.live || this.queue[0]?.live)
+        ? ['-probesize', '4M', '-analyzeduration', '3000000'] : []),
       '-f', this._fmt === 'nut' ? 'nut' : 'mpegts', '-i', 'pipe:0',
       /**
        * Muxer, flags and target all come from the destination set now — see
@@ -2287,6 +2312,22 @@ export class PipelinePlayout extends EventEmitter {
     if (this._bankFull() && !this._srcPaused) {
       this._srcPaused = true;
       try { src.stdout.pause(); } catch { /* dying */ }
+    }
+    /**
+     * The delay line of a live source that starts a broadcast: the
+     * publisher was held back at spawn (see _playLive) and connects once
+     * the bank holds the delay — or is about to be full, whichever first,
+     * so a byte budget sized for a lighter stream can never leave the
+     * source paused against a gate it can no longer reach.
+     */
+    if (!this.publisher && this._pubGate > 0 && !this._stopping) {
+      const secs = this._bankSeconds() ?? 0;
+      if (secs >= this._pubGate || this._bankFull(0.9)) {
+        this.emit('log', `[live] ${secs.toFixed(1)}s banked — connecting the publisher\n`);
+        this._pubGate = null;
+        this._spawnPublisher();
+        this._lastAiredAt = Date.now();
+      }
     }
     this._bankDrain();
   }
@@ -4174,6 +4215,137 @@ export class PipelinePlayout extends EventEmitter {
     this._play(next.item, next.offset, { duration: next.duration });
   }
 
+  /**
+   * A screen share on air.
+   *
+   * The item carries a CaptureFeed (see capture-feed.js) that holds the
+   * browser's WebM. The source ffmpeg reads it on stdin through the same
+   * graph builder a file gets — GPU decode, scale, Studio canvas, encode —
+   * or, when nothing is drawn and the browser already sends H.264, copies
+   * the video untouched. Three things differ from a clip:
+   *
+   *  - there is no duration and nothing to seek in; `offset` is the time
+   *    already elapsed on air, carried across respawns;
+   *  - a respawn re-attaches the feed rather than re-reading a file. It
+   *    continues from the oldest unsent keyframe (an Apply loses nothing
+   *    but the frames up to the next keyframe) — except after a pause,
+   *    where it starts fresh: what happened behind the hold card must not
+   *    air;
+   *  - a share that starts a broadcast can hold the publisher until the
+   *    bank holds `delaySeconds` — the delay line — because a live source
+   *    can never refill a cushion the way a file does. Zero means the
+   *    publisher connects on the first bytes: no delay, no slack.
+   */
+  _playLive(item, offset = 0) {
+    const feed = item?.feed;
+    if (!feed) {
+      this.emit('warn', `${item?.title ?? 'The screen share'} has no feed — moving on`);
+      this._advance();
+      return;
+    }
+    if (feed.ended && !feed.ring.length) {
+      this.emit('log', '[live] the screen share ended before it went on air\n');
+      this._advance();
+      return;
+    }
+    this._clipNos ??= new WeakMap();
+    if (!this._clipNos.has(item)) {
+      this._clipNos.set(item, (this._clipCount = (this._clipCount ?? 0) + 1));
+    }
+    const shape = this._shapeFor(this.selection?.video);
+    if (this.profile?.swDecode) this._box.swDecode = true;
+    const shapeChanged = shape.width !== this.profile.width
+      || shape.height !== this.profile.height;
+    if (shapeChanged && this.publisher && !this._reshaping) {
+      this.profile = { ...this._box, ...shape };
+      this._reshape(item, offset, null, shape);
+      return;
+    }
+    this.profile = { ...this._box, ...shape };
+    // What a copied share hands the receiver to cut segments on: the
+    // browser's keyframe spacing as measured so far (null until two).
+    this.profile.srcGopSeconds = feed.keyGapSeconds();
+
+    this._killSource();
+    this.holding = false;
+    this.current = { item, offset, duration: null };
+    this._bandInfo = null;
+    this._subInfo = null;
+    this.position = offset;
+
+    const v = this.selection?.video;
+    if (v) {
+      const rect = contentRect(v, this.profile);
+      this.emit('log', `[geometry] share ${v.width}x${v.height} ${v.codec ?? '?'} fps=${v.frameRate ?? '?'} `
+        + `-> rect ${rect.w}x${rect.h} @${rect.x},${rect.y}${rect.bars ? ' (pillarboxed)' : ''}\n`);
+    }
+    const overlayImages = this._overlayImages(item, 0);
+    const overlayFile = this._overlayFile(item, 0);
+    const args = buildLiveArgs({
+      profile: this.profile,
+      selection: this.selection,
+      tsOffset: this._spawnTimeline(),
+      statsPeriodMs: this.statsPeriodMs,
+      overlayPath: overlayFile,
+      overlayImages,
+      overlayAnimated: (this.profile?.overlay ?? []).some(
+        (i) => i?.type === 'text' && i?.enabled !== false && i?.motion === 'bounce',
+      ),
+      overlayLayer: () => this._overlayLayer(overlayImages),
+      feed,
+    });
+    const ci = args.indexOf('-c:v');
+    const isCopy = ci !== -1 && args[ci + 1] === 'copy';
+    this.hdrOnAir = false;
+    // A copied share flows at the BROWSER's rate; size the bank for it.
+    const kbps = isCopy ? Math.max(this._kbpsBase, Math.round(item.kbps ?? 0)) : this._kbpsBase;
+    if (kbps !== this._kbps) {
+      this._kbps = kbps;
+      this._bankMax = Math.min(bankCeiling(this.bufferSeconds),
+        Math.max(BANK_MIN_BYTES, kbps * 125 * this.bufferSeconds));
+    }
+    this.emit('log', isCopy
+      ? `[live] the browser's H.264 ships untouched (nothing drawn${item.kbps ? `, ~${Math.round(item.kbps)} kbps` : ''}); encode cost zero\n`
+      : `[live] transcoding the share (${v?.codec ?? 'unknown codec'}${(this.profile?.overlay ?? []).length ? ', studio on' : ''})\n`);
+
+    // The delay line: only when this share is starting the broadcast.
+    const delay = Math.min(Number(item.delaySeconds) || 0, this.bufferSeconds);
+    this._pubGate = !this.publisher && delay > 0 ? delay : null;
+    if (this._pubGate) {
+      this.emit('log', `[live] holding the publisher until ${delay}s of the share is banked\n`);
+    }
+
+    this._spawnSource(args, { kind: 'live', stdin: true });
+    const s = this.source;
+    const fresh = this._liveFresh === true;
+    this._liveFresh = false;
+    feed.attach(s.stdin, {
+      fresh,
+      // Continue over a backlog up to the delay (it refills the delay line);
+      // anything longer is stale and skipped to the newest keyframe.
+      maxBacklogSeconds: Math.max(2, delay),
+    });
+    /**
+     * The end of the share is EOF on stdin, and most graphs exit on it.
+     * One does not: a graph with a generated canvas input (Studio text,
+     * a moving picture) has an endless second input and would encode a
+     * frozen last frame forever. Three seconds after the feed has handed
+     * over its last byte, a source still alive is killed and its close
+     * is treated as the natural end it is.
+     */
+    const onEof = () => {
+      setTimeout(() => {
+        if (this.source === s && !s.killed) {
+          s._liveEof = true;
+          try { s.kill('SIGKILL'); } catch { /* gone */ }
+        }
+      }, 3000).unref?.();
+    };
+    feed.once('eof', onEof);
+    s.once('close', () => feed.off('eof', onEof));
+    this.emit('nowplaying', this.snapshot());
+  }
+
   /** Start (or restart) the source at a given offset within a clip. */
   _play(item, offset = 0, { duration = null } = {}) {
     // Restarting the countdown (watchdog respawn, resume after pause) must
@@ -4181,6 +4353,8 @@ export class PipelinePlayout extends EventEmitter {
     if (item?.countdown) {
       return this._playCountdown(item.until, { heading: item.heading });
     }
+    // A screen share: fed from a socket, not a file. Its own path.
+    if (item?.live) return this._playLive(item, offset);
     // Clip numbering for the {count} caption: one number per queue entry,
     // given the first time it plays, so seeks and respawns keep it. Reset
     // with the broadcast (start()).
@@ -5250,6 +5424,7 @@ export class PipelinePlayout extends EventEmitter {
    * file costs a second full demux of a multi-gigabyte episode.
    */
   async prepare(item) {
+    if (item?.live) return;   // a socket has nothing to extract
     // Never blocks: extraction runs in the background and the clip simply
     // uses whatever is cached by the time it spawns.
     this._detached(this._extract(item), 'extracting subtitles');
@@ -5399,12 +5574,19 @@ export class PipelinePlayout extends EventEmitter {
     }), { kind: 'hold' });
   }
 
-  _spawnSource(args, { kind }) {
+  _spawnSource(args, { kind, stdin = false }) {
     // Every source transition is a seam the audio close has to measure and
     // fill — a splice armed it already; a natural end, a card going up or
     // coming down, and anything after a flush arm it here, from wherever
     // the audio currently ends.
     if (!this._audioClose) this._armAudioClose();
+    /**
+     * A live source that STARTS a broadcast may hold the publisher back
+     * until the bank holds its delay (see _playLive): the cushion cannot
+     * refill from a camera, so what it holds at connect time is all the
+     * slack the broadcast will ever have. The gate opens in _bankPush.
+     */
+    const gated = kind === 'live' && Number(this._pubGate) > 0 && !this.publisher;
     // A source process implies a publisher, always. Deciding that earlier —
     // from _chunkWorkers, before _play has resolved the geometry — was a
     // prediction, and it could disagree with the branch actually taken: a
@@ -5414,7 +5596,7 @@ export class PipelinePlayout extends EventEmitter {
     // drain that bails on a missing stdin, so nothing was ever published
     // and the only symptom was the 20s liveness guard. Tie it to the fact
     // instead of the forecast.
-    if (!this.publisher && !this._stopping) this._spawnPublisher();
+    if (!this.publisher && !this._stopping && !gated) this._spawnPublisher();
     this.emit('log', `[spawn:${kind}] ffmpeg ${args.join(' ')}\n`);
     // The splice this process causes is announced when its bytes actually
     // reach the publisher (the generation change in _bankDrain), not here:
@@ -5448,8 +5630,13 @@ export class PipelinePlayout extends EventEmitter {
     const startedAt = Date.now();
     // fd 3 carries -progress so it doesn't fight stderr for the log stream.
     const s = spawn('ffmpeg', args, {
-      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+      // stdin is a pipe only for a live source, which is fed by the
+      // capture feed; every other source reads its own file.
+      stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe', 'pipe'],
     });
+    // A source killed mid-write (respawn, stop) raises EPIPE on the feeder
+    // side; the feed detaches on 'close', the error itself is noise.
+    if (stdin) s.stdin.on('error', () => { /* dying source */ });
     this.source = s;
 
     // Through the bank, not a direct pipe — see BANK_MAX_BYTES.
@@ -5472,7 +5659,10 @@ export class PipelinePlayout extends EventEmitter {
     });
 
     const parser = new ProgressParser();
-    const startOffset = kind === 'clip' ? (this.current?.offset ?? 0) : 0;
+    // Content kinds carry a position; cards do not. A live source's
+    // "position" is time elapsed on air, continued across respawns.
+    const content = kind === 'clip' || kind === 'live';
+    const startOffset = content ? (this.current?.offset ?? 0) : 0;
     /**
      * The generation this parser belongs to.
      *
@@ -5528,7 +5718,7 @@ export class PipelinePlayout extends EventEmitter {
       // progress is about bytes that were just trimmed away.
       if (!this._tlLocked) this.timeline += Math.max(0, out - lastOut);
       lastOut = out;
-      if (kind === 'clip') {
+      if (content) {
         this.position = startOffset + out;
         if (this.current?.duration) {
           this.position = Math.min(this.position, this.current.duration);
@@ -5552,8 +5742,16 @@ export class PipelinePlayout extends EventEmitter {
       // notice the stream dying, which is most of Owncast's patience.
       const recent = rateOver(SLOW_WINDOW_MS, wall, out) ?? speed;
 
-      if (kind === 'clip' && recent != null) {
-        if (recent < 0.95) {
+      /**
+       * A live source cannot read above 1.0 — its frames arrive at 1x —
+       * and ordinary jitter dips it under for a second at a time, so it
+       * is judged against a lower bar. Under that bar it is not "a bit
+       * slow": the delay line drains and cannot refill, so the same
+       * sustained rule fires with `live` set for the panel's wording.
+       */
+      const slowBar = kind === 'live' ? 0.9 : 0.95;
+      if (content && recent != null) {
+        if (recent < slowBar) {
           slowSince ??= Date.now();
           /**
            * Repeats while it stays bad, rather than once per process.
@@ -5572,7 +5770,7 @@ export class PipelinePlayout extends EventEmitter {
           if (due && Date.now() - slowSince > SLOW_SUSTAIN_MS) {
             lastSlowReport = Date.now();
             const x = Math.round(recent * 100) / 100;
-            this.emit('tooslow', { speed: x });
+            this.emit('tooslow', { speed: x, live: kind === 'live' });
             this.emit('log', this._slowReport(x));
             /**
              * The breakdown goes to the console; the popup only says to look
@@ -5634,6 +5832,60 @@ export class PipelinePlayout extends EventEmitter {
       if (kind === 'hold') return;     // only ends when we replace it
 
       const ranMs = Date.now() - startedAt;
+      if (kind === 'live') {
+        const feed = this.current?.item?.feed ?? null;
+        // EOF from the feed — or our own kill three seconds after it, for
+        // a graph whose endless canvas input would never let ffmpeg exit —
+        // is the share ending. A natural end, like a clip's.
+        if (code === 0 || s._liveEof || feed?.ended) {
+          this.emit('log', `[live] the screen share ended after ${(ranMs / 1000).toFixed(0)}s\n`);
+          this._deadClips = 0;
+          /**
+           * "Hold with a card": the share went away — a mis-click on the
+           * browser's own Stop sharing bar, a tab closed by accident — and
+           * the operator would rather keep the stream up for a few minutes
+           * than have it end. The hold card goes up as a pause; a new share
+           * cannot join this broadcast (a share is its own), so the hold
+           * expires into the ordinary end unless the operator stops first.
+           */
+          const item = this.current?.item;
+          if (item?.onEnd === 'hold' && !this._stopping) {
+            const mins = Math.max(1, Number(item.holdMinutes) || 5);
+            this.emit('log', `[live] holding the stream on a card for up to ${mins} min\n`);
+            this.status = 'paused';
+            this.pausedBy = 'host';
+            this._pausedAt = Math.floor(Date.now() / 1000);
+            this._pauseResume = this.position;
+            this._spawnHold('Back in a moment');
+            this.emit('status', this.status);
+            clearTimeout(this._liveHoldTimer);
+            this._liveHoldTimer = setTimeout(() => {
+              if (this._stopping || !this.holding) return;
+              this.emit('log', '[live] the hold ran out — ending the broadcast\n');
+              this.stop({ graceful: true });
+            }, mins * 60_000);
+            this._liveHoldTimer.unref?.();
+            return;
+          }
+          this._advance();
+          return;
+        }
+        // Died mid-share with the sender still sending: re-attach, a few
+        // times. The demotion ladder below handles a spawn that never
+        // produced anything (a decoder the driver refused, and so on).
+        if (this._sawBlock && this.current?.item) {
+          this._liveRetries = (this._liveRetries ?? []).filter((t) => Date.now() - t < 60_000);
+          if (this._liveRetries.length < 3) {
+            this._liveRetries.push(Date.now());
+            this.emit('warn', `The screen share's encoder stopped (exit ${code}) — reconnecting to the share. ${lastLines(stderr, 2)}`);
+            this._playLive(this.current.item, this.position);
+            return;
+          }
+          this.emit('fatal', new Error(`The screen share's encoder died three times in a minute (exit ${code}): ${lastLines(stderr, 3)}`));
+          this.stop();
+          return;
+        }
+      }
       if (code !== 0) {
         const tail = lastLines(stderr, 3);
         // The GPU subtitle composite failing outright (h264_vaapi rejecting
@@ -7676,3 +7928,90 @@ export function scaleAndTonemap(video, profile, rect, smode) {
   return `${scale}:format=nv12${smode}`;
 }
 
+
+// ── live sources ────────────────────────────────────────────────────────
+
+/**
+ * Input-side flags for a source read from a socket-fed pipe: no file to
+ * probe at leisure (a small probe window, or the first picture waits on a
+ * megabyte of head), timestamps generated where the container has none,
+ * and no input buffering beyond what the demuxer needs.
+ */
+export const LIVE_INPUT_ARGS = [
+  '-fflags', '+genpts+nobuffer',
+  // Bounded: on a realtime input every second of analyzeduration is a
+  // wall-clock second viewers wait for the first picture. The browser's
+  // Matroska carries the codec parameters up front, and the feed always
+  // starts a reader on a keyframe, so two seconds is ample and five (the
+  // default) is pure delay.
+  '-probesize', '2M', '-analyzeduration', '2000000',
+  '-thread_queue_size', '1024',
+];
+
+/**
+ * May the browser's own H.264 ship untouched?
+ *
+ * Only H.264 into an H.264 broadcast, only with nothing drawn on it — a
+ * Studio item or censor box means a transcode exactly as it does for a
+ * file — and only while the browser's keyframes are close enough for live
+ * segmenting (the recorder is asked for one every two seconds; a browser
+ * that ignores that is measured by the feed and refused here).
+ */
+export function livePassthroughEligible({ profile, video, feed = null }) {
+  if (!profile || profile.livePassthrough === false) return false;
+  if ((profile.codec ?? 'h264') !== 'h264' || video?.codec !== 'h264') return false;
+  const drawn = (profile.overlay ?? []).some((i) => i && i.enabled !== false);
+  if (drawn) return false;
+  const gap = feed?.keyGapSeconds?.() ?? profile.srcGopSeconds ?? null;
+  const cap = Number(profile.copyMaxGopSeconds) > 0 ? Number(profile.copyMaxGopSeconds) : 4;
+  if (Number.isFinite(gap) && gap > cap + 0.25) return false;
+  return true;
+}
+
+/**
+ * The source command for a screen share.
+ *
+ * Copy when livePassthroughEligible says so; otherwise exactly the graph
+ * a file of this geometry would get, with the pipe as its input — the
+ * Studio canvas, the GPU decode, the demotion ladder are all the same code.
+ */
+export function buildLiveArgs({
+  profile, selection = null, tsOffset = 0, statsPeriodMs = 500,
+  overlayPath = null, overlayImages = [], overlayLayer = null,
+  overlayAnimated = false, feed = null,
+}) {
+  const video = selection?.video ?? null;
+  if (livePassthroughEligible({ profile, video, feed })) {
+    return [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      ...LIVE_INPUT_ARGS,
+      '-i', 'pipe:0',
+      '-map', '0:v:0', '-c:v', 'copy',
+      '-map', '0:a:0?',
+      ...audioArgs(profile),
+      '-output_ts_offset', Number(tsOffset).toFixed(3),
+      '-muxdelay', '0', '-muxpreload', '0', '-mpegts_flags', '+resend_headers',
+      '-progress', 'pipe:3', '-stats_period', String(statsPeriodMs / 1000),
+      '-f', 'mpegts', 'pipe:1',
+    ];
+  }
+  const args = buildSourceArgs({
+    srcPath: 'pipe:0',
+    offset: 0,
+    // Never the file passthrough branch: that one is HEVC-only and seeks.
+    profile: { ...profile, srcGopSeconds: null },
+    selection,
+    tsOffset,
+    statsPeriodMs,
+    duration: null,
+    overlayPath,
+    overlayImages,
+    overlayLayer,
+    overlayAnimated,
+    srcKbps: null,
+    copyAlign: null,
+  });
+  const at = args.indexOf('pipe:0');
+  if (at > 0 && args[at - 1] === '-i') args.splice(at - 1, 0, ...LIVE_INPUT_ARGS);
+  return args;
+}

@@ -8,6 +8,22 @@
   let cfg = $state(null);
   let error = $state('');
   let saved = $state('');
+  // The panel's own https listener (Settings › Secure address).
+  let tls = $state(null);
+  let tlsBusy = $state(false);
+  let tlsPort = $state(8443);
+  let tlsErr = $state('');
+  async function setTls(enabled) {
+    tlsBusy = true; tlsErr = '';
+    try {
+      tls = await api.post('/api/tls', { enabled, port: Number(tlsPort) || 8443 });
+    } catch (err) {
+      tlsErr = err.message;
+      try { tls = await api.get('/api/tls'); } catch { /* keep */ }
+    } finally {
+      tlsBusy = false;
+    }
+  }
   let testing = $state('');
 
   const PROTOCOL_INFO = [
@@ -638,6 +654,8 @@
         })];
       }
       cfg.preview ??= { enabled: true };
+      cfg.capture = { delaySeconds: 0, passthrough: true, onEnd: 'end', holdMinutes: 5, ...(cfg.capture ?? {}) };
+      api.get('/api/tls').then((t) => { tls = t; tlsPort = t.port ?? 8443; }).catch(() => {});
       cfg.ui ??= { lazyImages: false };
       cfg.library.autoRefresh ??= { enabled: true, hours: 12 };
       cfg.runAhead ??= { enabled: true, ramMB: 'auto' };
@@ -833,6 +851,14 @@
         patch.runAhead = { enabled: cfg.runAhead.enabled, ramMB: cfg.runAhead.ramMB };
       }
       if (section === 'preview') patch.preview = { enabled: cfg.preview.enabled };
+      if (section === 'capture') {
+        patch.capture = {
+          delaySeconds: Number(cfg.capture?.delaySeconds) || 0,
+          onEnd: cfg.capture?.onEnd === 'hold' ? 'hold' : 'end',
+          holdMinutes: Number(cfg.capture?.holdMinutes) || 5,
+          passthrough: cfg.capture?.passthrough !== false,
+        };
+      }
       if (section === 'autoscan') {
         const ar = cfg.library?.autoRefresh ?? {};
         patch.library = { autoRefresh: { enabled: ar.enabled, hours: ar.hours } };
@@ -2161,6 +2187,71 @@
   <section class="card group">
     <h3>System</h3>
     <p class="lead muted small">Panel access and diagnostics.</p>
+  <!-- Secure address -->
+  <section class="subcard">
+    <h3>Secure address</h3>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+      <input type="checkbox" checked={tls?.enabled === true} disabled={tlsBusy} style="width:auto"
+             onchange={(e) => setTls(e.currentTarget.checked)} />
+      Serve the panel over https as well, on port
+      <input type="number" min="1" max="65535" bind:value={tlsPort} disabled={tlsBusy || tls?.enabled === true} style="width:90px" />
+    </label>
+    <p class="muted small">
+      Screen sharing only works from a secure page, and a plain LAN address is not one. With this on,
+      Streamerr generates its own certificate and answers on https too — your browser asks once whether
+      to trust it. Nothing else changes; the http address keeps working.
+    </p>
+    {#if tls?.listening}
+      <p class="small">
+        On: {#each tls.urls as u, i}{#if i}, {/if}<a href={u}>{u}</a>{/each}
+        · <a href="/api/tls/cert">download the certificate</a> to trust it for good
+        {#if tls.fingerprint}<br /><span class="muted">SHA-256 {tls.fingerprint}</span>{/if}
+      </p>
+    {:else if tls?.enabled && tls?.error}
+      <div class="result bad">{tls.error}</div>
+    {/if}
+    {#if tlsErr}<div class="result bad">{tlsErr}</div>{/if}
+  </section>
+
+  <!-- Screen sharing -->
+  <section class="subcard">
+    <h3>Screen sharing</h3>
+    <p class="muted small">
+      A share is its own broadcast: it never queues behind media and never runs beside it.
+      Picker-side settings (audio, quality, frame rate) live on the Capture page.
+    </p>
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
+      <div>
+        <label for="s-cdelay">Delay before viewers get it</label>
+        <select id="s-cdelay" bind:value={cfg.capture.delaySeconds}>
+          <option value={0}>No delay</option>
+          <option value={2}>2 seconds</option>
+          <option value={5}>5 seconds</option>
+          <option value={15}>15 seconds</option>
+        </select>
+        <p class="muted small">Banked before the broadcast connects. A live source cannot refill this once it drains, so zero leaves nothing to absorb a hiccup.</p>
+      </div>
+      <div>
+        <label for="s-cend">When sharing ends</label>
+        <select id="s-cend" bind:value={cfg.capture.onEnd}>
+          <option value="end">End the broadcast</option>
+          <option value="hold">Hold with a card, then end</option>
+        </select>
+        <label for="s-chold" style="margin-top:8px">Hold for (minutes)</label>
+        <input id="s-chold" type="number" min="1" max="60" bind:value={cfg.capture.holdMinutes} disabled={cfg.capture.onEnd !== 'hold'} />
+      </div>
+    </div>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+      <input type="checkbox" bind:checked={cfg.capture.passthrough} style="width:auto" />
+      Send the browser's H.264 as is when nothing is drawn on it
+    </label>
+    <p class="muted small">Costs the box nothing. Anything from the Studio, or a broadcast set to HEVC or AV1, re-encodes anyway.</p>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick={() => save('capture')}>Save</button>
+      {#if saved === 'capture'}<span class="ok small">Saved</span>{/if}
+    </div>
+  </section>
+
   <!-- Live preview -->
   <section class="subcard">
     <h3>Live preview</h3>

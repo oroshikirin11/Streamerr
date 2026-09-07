@@ -7,7 +7,10 @@
 
 import express from 'express';
 import http from 'http';
+import https from 'https';
 import { WebSocketServer } from 'ws';
+import { ensureCert, loadTls, localAddresses, TLS_DEFAULT_PORT } from './tls.js';
+import { CaptureSession, parseHello, sanitizeCapture, CAPTURE_DEFAULTS } from './capture.js';
 import {
   existsSync, createReadStream, readdirSync, mkdirSync, statSync, writeFileSync, unlinkSync,
   readFileSync, rmSync,
@@ -376,6 +379,15 @@ function trackPrefs(item = null) {
 
 /** Re-pick tracks against a specific file's own streams. */
 async function selectionFor(item, profile = null) {
+  // A screen share has no file: its selection is what the browser sends.
+  if (item?.live && item.session) {
+    const selection = item.session.selection();
+    if (profile) {
+      await tuneProfile(profile, selection, null);
+      engine?.retune?.(tunedFields(profile));
+    }
+    return selection;
+  }
   const tracks = await probeTracks(item.srcPath);
   const subs = await listSubtitles(item.srcPath, tracks);
   const selection = selectTracks(tracks, subs, trackPrefs(item));
@@ -891,11 +903,15 @@ const controlsStatus = () => {
 
 function streamStatus() {
   if (!engine) {
-    return { status: 'stopped', playing: null, queue: [], preview: previewEnabled(), controls: controlsStatus() };
+    return {
+      status: 'stopped', playing: null, queue: [], preview: previewEnabled(), controls: controlsStatus(),
+      capture: captureStatus(),
+    };
   }
   const s = engine.snapshot();
   return {
     status: s.status,
+    capture: captureStatus(),
     pausedBy: s.pausedBy ?? '',
     pausedAt: s.pausedAt ?? 0,
     controls: controlsStatus(),
@@ -917,6 +933,7 @@ function streamStatus() {
         duration: s.playing.duration,
         image: s.playing.image ?? null,
         ...(s.playing.countdown ? { countdown: true } : {}),
+        ...(s.playing.live ? { live: true } : {}),
       }
       : null,
     breakUntil: s.breakUntil ?? null,
@@ -1172,9 +1189,23 @@ function buildEngine({ profile, selection }) {
   });
   // Distinct from a generic warning: this one predicts the stream failing.
   e.on('tooslow', (d) => broadcast('error', {
-    message: `Cannot encode fast enough (${d.speed}x). The stream will stall — `
-      + 'try turning subtitles off or lowering the resolution.',
+    message: d.live
+      ? `This box cannot keep up with the screen share (${d.speed}x) and the stream `
+        + 'will stall — hide moving overlays in the Studio, or lower the frame rate '
+        + 'or quality on the Capture page.'
+      : `Cannot encode fast enough (${d.speed}x). The stream will stall — `
+        + 'try turning subtitles off or lowering the resolution.',
   }));
+  // A screen share ends with its broadcast: the sender's socket is closed
+  // so the browser stops capturing, and the page returns to idle.
+  const endCapture = () => {
+    if (engine === e || engine === null) {
+      if (captureSession?.state === 'live') captureSession.end('broadcast');
+    }
+  };
+  e.on('fatal', endCapture);
+  e.on('ended', endCapture);
+  e.on('crashed', endCapture);
   // The pause vote is per broadcast: the lock and the last tally go with it.
   const releaseVote = () => {
     if (engine === e || engine === null) {
@@ -1647,6 +1678,12 @@ app.put('/api/config', (req, res) => {
    * engine — a hand-edited config should not be able to ask for a 10-hour
    * cushion, and applySeconds above the depth would silently do nothing.
    */
+  // Screen-share settings: bounded, and the delay never deeper than the bank.
+  if (patch.capture) {
+    patch.capture = sanitizeCapture(patch.capture, captureSettings(), {
+      bufferSeconds: Number(patch.buffer?.seconds) || config.buffer?.seconds || 15,
+    });
+  }
   if (patch.buffer) {
     /**
      * Only the keys the patch actually carries.
@@ -2749,6 +2786,25 @@ const startStreamInner = async (req, res) => {
   const items = [];
   for (const entry of entries) {
     const id = entry.id;
+    /**
+     * A screen share. Its own broadcast, by rule: one item, never beside
+     * media. The session holds the feed; the item it builds is what the
+     * engine plays (src/capture.js).
+     */
+    if (String(id).startsWith('capture:')) {
+      const s = captureSession;
+      if (!s || `capture:${s.id}` !== id || s.state === 'ended') {
+        return res.status(409).json({ error: 'That screen share is no longer available — pick a screen again' });
+      }
+      if (entries.length > 1) {
+        return res.status(400).json({ error: 'A screen share is its own broadcast — it cannot be queued with media' });
+      }
+      items.push(s.liveItem({
+        delaySeconds: captureSettings().delaySeconds,
+        bufferSeconds: config.buffer?.seconds ?? 15,
+      }));
+      continue;
+    }
     const item = await library.item(id);
     items.push({
       ...queueExtras(entry),
@@ -2767,16 +2823,23 @@ const startStreamInner = async (req, res) => {
     });
   }
 
-  const tracks = await probeTracks(items[0].srcPath);
-  const subs = await listSubtitles(items[0].srcPath, tracks);
-  const selection = selectTracks(tracks, subs, {
-    ...(config.tracks ?? {}),
-    ...(req.body?.trackOverride ?? {}),
-  });
-  // Source geometry: subtitles must be rendered at the video's content
-  // rectangle, not the padded output frame, or 4:3 content gets its
-  // positioned subs smeared toward the 16:9 edges.
-  selection.video = tracks.video[0] ?? null;
+  let selection;
+  if (items[0].live) {
+    selection = items[0].session.selection();
+    // The copy switch rides on the profile like every other output rule.
+    profile.livePassthrough = captureSettings().passthrough !== false;
+  } else {
+    const tracks = await probeTracks(items[0].srcPath);
+    const subs = await listSubtitles(items[0].srcPath, tracks);
+    selection = selectTracks(tracks, subs, {
+      ...(config.tracks ?? {}),
+      ...(req.body?.trackOverride ?? {}),
+    });
+    // Source geometry: subtitles must be rendered at the video's content
+    // rectangle, not the padded output frame, or 4:3 content gets its
+    // positioned subs smeared toward the 16:9 edges.
+    selection.video = tracks.video[0] ?? null;
+  }
 
   // The full-GPU chain is the default whenever VAAPI is the backend —
   // subtitle-free 4K films were software-decoding at 0.6x while the GPU
@@ -2972,6 +3035,182 @@ app.post('/api/stream/tracks', wrap(async (req, res) => {
   broadcast('stream', streamStatus());
   res.json({ ok: true, tracks: selection.reason, position: engine.position });
 }));
+
+// ── screen share ───────────────────────────────────────────────────────
+//
+// One session at a time: the browser that picked a screen holds it
+// (`armed`) until the operator goes live with it, at which point it is the
+// broadcast (`live`). A share is never queued with media and never runs
+// beside it — going live is refused while anything else is on air.
+
+let captureSession = null;
+const captureSettings = () => sanitizeCapture(config.capture ?? {}, CAPTURE_DEFAULTS, {
+  bufferSeconds: config.buffer?.seconds ?? 15,
+});
+const captureStatus = () => ({
+  settings: captureSettings(),
+  session: captureSession && captureSession.state !== 'ended' ? captureSession.status() : null,
+  tls: tlsStatus(),
+  // Why "Go live" would be refused right now, in words, or null.
+  blocked: engine || startPending
+    ? (engine?.current?.item?.live ? null : 'A broadcast is on air — stop it first. A screen share never runs alongside media.')
+    : null,
+});
+/** Every panel repaints, and the sender learns its state. */
+function captureChanged() {
+  broadcast('stream', streamStatus());
+  captureSession?.send({ type: 'state', ...captureStatus() });
+}
+/** Health ticks are frequent and small: a light message of their own. */
+function captureTick() {
+  broadcast('capture', captureStatus());
+}
+
+/** "Chrome 128 on Linux" from a user-agent string, best effort. */
+function uaLabel(ua = '') {
+  const s = String(ua);
+  const os = /Windows/.test(s) ? 'Windows' : /Mac OS/.test(s) ? 'macOS' : /Android/.test(s) ? 'Android'
+    : /iPhone|iPad/.test(s) ? 'iOS' : /Linux/.test(s) ? 'Linux' : '';
+  const b = /Edg\/(\d+)/.exec(s) ? `Edge ${RegExp.$1}`
+    : /OPR\/(\d+)/.exec(s) ? `Opera ${RegExp.$1}`
+      : /Firefox\/(\d+)/.exec(s) ? `Firefox ${RegExp.$1}`
+        : /Chrome\/(\d+)/.exec(s) ? `Chrome ${RegExp.$1}`
+          : /Safari\/\d+/.test(s) && /Version\/(\d+)/.exec(s) ? `Safari ${RegExp.$1}` : 'a browser';
+  return os ? `${b} on ${os}` : b;
+}
+
+app.get('/api/capture', (req, res) => res.json(captureStatus()));
+
+// The title, while armed or on air.
+app.put('/api/capture', (req, res) => {
+  const s = captureSession;
+  if (!s || s.state === 'ended') return res.status(404).json({ error: 'No screen is picked' });
+  if (typeof req.body?.title === 'string') {
+    s.title = req.body.title.trim().slice(0, 80) || 'Screen';
+    if (s.item) {
+      s.item.title = s.title;
+      if (engine?.current?.item === s.item) engine.emit('nowplaying', engine.snapshot());
+    }
+  }
+  captureChanged();
+  res.json(captureStatus());
+});
+
+app.post('/api/capture/go', wrap(async (req, res) => {
+  const s = captureSession;
+  if (!s || s.state === 'ended') return res.status(409).json({ error: 'No screen is picked — share a screen first' });
+  if (s.state === 'live') return res.status(409).json({ error: 'The screen is already on air' });
+  if (engine || startPending) {
+    return res.status(409).json({ error: 'A broadcast is on air — stop it first. A screen share never runs alongside media.' });
+  }
+  if (!s.feed.init) {
+    return res.status(409).json({ error: 'The browser has not sent any video yet — give it a second and try again' });
+  }
+  const r = innerRes();
+  await startStream({ body: { itemIds: [`capture:${s.id}`] } }, r);
+  if (r.code < 300) {
+    s.state = 'live';
+    s.liveAt = Date.now();
+    dpush('info', `[capture] on air: "${s.title}" from ${s.sender.ua}`);
+  }
+  captureChanged();
+  res.status(r.code).json(r.code < 300 ? { ...r.body, capture: captureStatus() } : r.body);
+}));
+
+app.post('/api/capture/stop', (req, res) => {
+  const s = captureSession;
+  if (!s || s.state === 'ended') return res.status(404).json({ error: 'No screen is picked' });
+  s.end('operator');
+  captureChanged();
+  res.json(captureStatus());
+});
+
+// ── the secure address ─────────────────────────────────────────────────
+
+let tlsServer = null;
+let tlsError = null;
+let tlsFingerprint = null;
+const TLS_DIR = join(CONFIG_DIR, 'tls');
+
+function tlsStatus() {
+  const t = config.server?.tls ?? {};
+  const port = Number(t.port) || TLS_DEFAULT_PORT;
+  const listening = Boolean(tlsServer?.listening);
+  return {
+    enabled: t.enabled === true,
+    port,
+    listening,
+    error: tlsError,
+    urls: listening ? localAddresses().map((ip) => `https://${ip}:${port}`) : [],
+    fingerprint: tlsFingerprint,
+  };
+}
+
+function stopTls() {
+  const s = tlsServer;
+  tlsServer = null;
+  if (!s) return Promise.resolve();
+  return new Promise((resolve) => {
+    try { s.closeAllConnections?.(); } catch { /* none */ }
+    s.close(() => resolve());
+  });
+}
+
+/** Bring the https listener up (or down) to match the config. */
+async function startTls() {
+  const t = config.server?.tls ?? {};
+  if (t.enabled !== true) { await stopTls(); return; }
+  const port = Number(t.port) || TLS_DEFAULT_PORT;
+  try {
+    const c = ensureCert(TLS_DIR, { log: (m) => dpush('info', m) });
+    tlsFingerprint = c.fingerprint;
+    const creds = loadTls(TLS_DIR);
+    await stopTls();
+    const srv = https.createServer(creds, app);
+    srv.on('upgrade', onUpgrade);
+    await new Promise((resolve, reject) => {
+      srv.once('error', reject);
+      srv.listen(port, config.server?.host ?? '0.0.0.0', () => { srv.off('error', reject); resolve(); });
+    });
+    srv.on('error', (err) => { tlsError = err.message; dpush('error', `[tls] ${err.message}`); });
+    tlsServer = srv;
+    tlsError = null;
+    dpush('info', `[tls] secure address up on port ${port} (${c.created ? 'new' : 'existing'} certificate, `
+      + `${c.names.ips.length} address${c.names.ips.length === 1 ? '' : 'es'} named)`);
+  } catch (err) {
+    tlsError = err.message;
+    tlsServer = null;
+    dpush('error', `[tls] ${err.message}`);
+  }
+}
+
+app.get('/api/tls', (req, res) => res.json(tlsStatus()));
+
+app.post('/api/tls', wrap(async (req, res) => {
+  const enabled = req.body?.enabled !== false;
+  const port = Math.min(65535, Math.max(1,
+    Math.round(Number(req.body?.port) || config.server?.tls?.port || TLS_DEFAULT_PORT)));
+  if (enabled && port === Number(config.server?.port)) {
+    return res.status(400).json({ error: 'The secure address needs its own port' });
+  }
+  saveConfig({ server: { tls: { enabled, port } } });
+  await startTls();
+  const st = tlsStatus();
+  if (enabled && !st.listening) {
+    return res.status(500).json({ error: st.error ?? 'The secure address could not start', ...st });
+  }
+  captureChanged();
+  res.json(st);
+}));
+
+// The certificate, for anyone who would rather trust it than click through.
+app.get('/api/tls/cert', (req, res) => {
+  const c = loadTls(TLS_DIR);
+  if (!c) return res.status(404).json({ error: 'No certificate has been generated yet' });
+  res.type('application/x-pem-file');
+  res.setHeader('Content-Disposition', 'attachment; filename="streamerr.pem"');
+  res.send(c.cert);
+});
 
 app.post('/api/stream/stop', (req, res) => {
   if (!engine) {
@@ -3383,6 +3622,8 @@ app.use((err, req, res, next) => {
 // be explicit.
 const wss = new WebSocketServer({ noServer: true });
 const previewWss = new WebSocketServer({ noServer: true });
+// /ws/capture (binary WebM in, JSON state out) — see src/capture.js.
+const captureWss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 });
 
 /**
  * A WebSocket handshake is not protected by SameSite the way fetch is — some
@@ -3407,9 +3648,12 @@ function originAllowed(req) {
   } catch { return false; }
 }
 
-server.on('upgrade', (req, socket, head) => {
+// Shared by the http listener and the https one (startTls).
+function onUpgrade(req, socket, head) {
   const path = (req.url ?? '').split('?')[0];
-  const target = path === '/ws' ? wss : path === '/ws/preview' ? previewWss : null;
+  const target = path === '/ws' ? wss
+    : path === '/ws/preview' ? previewWss
+      : path === '/ws/capture' ? captureWss : null;
   if (!target) { socket.destroy(); return; }
   if (!originAllowed(req)) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -3417,6 +3661,78 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
+}
+server.on('upgrade', onUpgrade);
+
+captureWss.on('connection', (ws, req) => {
+  if (!authDisabled() && !validSession(tokenFromRequest(req))) {
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+  let session = null;
+  ws.on('message', (data, isBinary) => {
+    if (!session) {
+      // The first frame introduces the share; bytes before it are a bug.
+      if (isBinary) { ws.close(4400, 'hello first'); return; }
+      const hello = parseHello(data);
+      if (!hello) { ws.close(4400, 'bad hello'); return; }
+      if (captureSession && captureSession.state !== 'ended') {
+        try {
+          ws.send(JSON.stringify({
+            type: 'error', busy: true,
+            message: `Another browser is already sharing a screen (${captureSession.sender.ua}). Stop it first.`,
+          }));
+        } catch { /* closing */ }
+        ws.close(4409, 'busy');
+        return;
+      }
+      session = new CaptureSession({
+        ws, hello,
+        sender: { ip: clientIp(req), ua: uaLabel(req.headers['user-agent']), label: hello.sender },
+        settings: captureSettings(),
+      });
+      captureSession = session;
+      session.feed.on('init', () => captureChanged());
+      session.feed.on('warn', (m) => dpush('warn', `[capture] ${m}`));
+      session.on('ended', (by) => {
+        dpush('info', `[capture] the share ended (${by})`);
+        captureChanged();
+      });
+      dpush('info', `[capture] ${session.sender.ua} picked ${hello.surface ?? 'a screen'}: `
+        + `${hello.width ?? '?'}x${hello.height ?? '?'} @${hello.fps ?? '?'} fps, ${hello.mime || 'unknown type'}`
+        + `${hello.audio ? ', with audio' : ', no audio'}`);
+      captureChanged();
+      return;
+    }
+    if (isBinary) {
+      session.push(Buffer.isBuffer(data) ? data : Buffer.from(data));
+      return;
+    }
+    let m;
+    try { m = JSON.parse(String(data)); } catch { return; }
+    if (m?.type === 'health') {
+      const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      session.health = {
+        at: Date.now(),
+        bufferedAmount: n(m.bufferedAmount),
+        kbps: n(m.kbps),
+        fps: n(m.fps),
+        muted: Boolean(m.muted),
+        width: n(m.width),
+        height: n(m.height),
+      };
+      captureTick();
+    } else if (m?.type === 'end') {
+      session.end('sender');
+    } else if (m?.type === 'title' && typeof m.title === 'string') {
+      session.title = m.title.trim().slice(0, 80) || 'Screen';
+      if (session.item) session.item.title = session.title;
+      captureChanged();
+    }
+  });
+  const gone = () => { if (session && session.state !== 'ended') session.end('sender'); };
+  ws.on('close', gone);
+  ws.on('error', gone);
 });
 
 wss.on('connection', (ws, req) => {
@@ -3544,6 +3860,11 @@ scheduleAutoScan();
 const { port, host } = config.server;
 server.listen(port, host, () => {
   console.log(`streamerr listening on http://${host}:${port}`);
+  startTls().then(() => {
+    const t = tlsStatus();
+    if (t.listening) console.log(`  secure : https://${host}:${t.port}`);
+    else if (t.enabled) console.warn(`  secure address failed: ${t.error}`);
+  });
   if (authDisabled()) {
     console.warn('  AUTH IS DISABLED ("auth": {"disabled": true} in config.json).');
     console.warn('  Anyone who can reach this port controls broadcasts and can read');

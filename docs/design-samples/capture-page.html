@@ -1,0 +1,407 @@
+<title>Streamerr Capture</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --surface-2: #f0efec; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #dededa; --accent: #2f6fd0; --danger: #c0392b; --success: #2b8a5f; --radius: 8px;
+    --sidebar: 190px; --note: #fbfaf7; --shot-a: #24262b; --shot-b: #2f3238; --shot-win: #f3f3f0;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17171a; --surface: #202024; --surface-2: #2a2a2f; --text: #ececeb; --muted: #9a9a95;
+      --border: #34343a; --accent: #6ba3f0; --danger: #e8705f; --success: #5fc493; --note: #1c1c20;
+      --shot-a: #1b1c21; --shot-b: #26272d; --shot-win: #e9e9e6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17171a; --surface: #202024; --surface-2: #2a2a2f; --text: #ececeb; --muted: #9a9a95;
+    --border: #34343a; --accent: #6ba3f0; --danger: #e8705f; --success: #5fc493; --note: #1c1c20;
+    --shot-a: #1b1c21; --shot-b: #26272d; --shot-win: #e9e9e6;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 400 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  button { cursor: pointer; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 14px; font: inherit; font-size: 14px; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+  button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  h1, h2, h3 { margin: 0; text-wrap: balance; }
+  p { margin: 0; }
+
+  /* ── page around the mockup ─────────────────────────────── */
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 20px 60px; }
+  .intro { max-width: 66ch; display: grid; gap: 8px; margin-bottom: 22px; }
+  .intro h1 { font-size: 22px; font-weight: 650; }
+  .states { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .states button { border-radius: 99px; padding: 5px 13px; }
+  .states button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--accent); color: var(--accent); }
+  .states .sep { width: 1px; background: var(--border); margin: 4px 6px; }
+
+  /* ── the panel frame ────────────────────────────────────── */
+  .frame { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--bg); display: grid; grid-template-columns: var(--sidebar) 1fr; grid-template-rows: 560px auto; box-shadow: 0 20px 60px -30px rgb(0 0 0 / .5); }
+  aside { grid-row: 1 / 3; border-right: 1px solid var(--border); padding: 18px 14px; display: flex; flex-direction: column; gap: 14px; background: var(--bg); }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; }
+  .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: #fff; display: grid; place-items: center; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .onair { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 99px; background: var(--surface-2); }
+  .onair.live { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+  .dot.live { background: var(--success); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .dot.live { animation: none; } }
+  .speed { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bufrow { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+  .bufrow svg { width: 100%; height: 18px; }
+  .bufrow polyline { fill: none; stroke: var(--success); stroke-width: 1.4; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; padding: 4px 9px; border-radius: 99px; border: 1px solid var(--border); background: var(--surface); }
+  .chip svg { width: 13px; height: 13px; }
+  nav { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+  nav a { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius); color: var(--text); text-decoration: none; font-size: 14px; }
+  nav a svg { width: 16px; height: 16px; flex: none; }
+  nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  nav .badge { margin-left: auto; font-size: 11px; background: var(--surface-2); padding: 1px 7px; border-radius: 99px; color: var(--text); }
+  main { padding: 26px 30px; overflow: auto; }
+  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .head h1 { font-size: 26px; font-weight: 650; }
+
+  footer { grid-column: 2; border-top: 1px solid var(--border); background: var(--surface); }
+  .seek { height: 3px; background: var(--surface-2); position: relative; }
+  .seek .fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+  .seek .cached { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--accent) 28%, var(--surface-2)); }
+  .frow { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 12px 22px 14px; }
+  .np .title { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .np .small { font-size: 13px; }
+  .ctl { display: flex; align-items: center; gap: 6px; }
+  .ic { width: 36px; height: 36px; border-radius: 50%; border-color: transparent; background: transparent; padding: 0; display: grid; place-items: center; color: var(--text); }
+  .ic.play { width: 44px; height: 44px; background: var(--accent); color: #fff; }
+  .ic svg { width: 17px; height: 17px; }
+  .fright { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-width: 0; }
+  .fright button { white-space: nowrap; }
+  .pill { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--surface-2); color: var(--muted); font-weight: 500; }
+  .pill.live { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); display: inline-flex; align-items: center; gap: 5px; letter-spacing: .04em; }
+  .health { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); padding: 5px 10px; border: 1px solid var(--border); border-radius: 99px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .health .dot { width: 6px; height: 6px; }
+  .health.warn .dot { background: #d9a13a; }
+
+  /* ── capture page pieces ─────────────────────────────────── */
+  .page { display: none; }
+  .page.on { display: block; }
+  .lede { max-width: 62ch; color: var(--muted); margin: -8px 0 18px; }
+  .center-card { max-width: 560px; display: grid; gap: 14px; justify-items: start; }
+  .big { padding: 12px 22px; font-size: 16px; font-weight: 600; display: inline-flex; align-items: center; gap: 10px; }
+  .big svg { width: 20px; height: 20px; }
+  .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-top: 18px; max-width: 860px; }
+  .field { display: grid; gap: 5px; }
+  .field label { font-size: 12px; color: var(--muted); letter-spacing: .02em; }
+  .field select, .field input { font: inherit; font-size: 14px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; width: 100%; }
+  .two { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr); gap: 18px; align-items: start; }
+  .preview { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: linear-gradient(135deg, var(--shot-a), var(--shot-b)); }
+  .win { position: absolute; border-radius: 6px; background: var(--shot-win); box-shadow: 0 8px 30px rgb(0 0 0 / .35); overflow: hidden; }
+  .win .bar { height: 9%; background: #d7d7d3; display: flex; align-items: center; gap: 4px; padding: 0 8px; }
+  .win .bar i { width: 7px; height: 7px; border-radius: 50%; background: #b9b9b4; }
+  .win .lines { padding: 8px 10px; display: grid; gap: 5px; }
+  .win .lines b { display: block; height: 5px; border-radius: 3px; background: #8f8f8a; opacity: .55; }
+  .win.code { background: #1e2127; }
+  .win.code .bar { background: #2b2f36; }
+  .win.code .lines b { background: #6ba3f0; }
+  .win.code .lines b:nth-child(3n) { background: #c58bd6; }
+  .win.code .lines b:nth-child(4n) { background: #7fcf9b; }
+  .taskbar { position: absolute; inset: auto 0 0 0; height: 5%; background: rgb(0 0 0 / .45); }
+  .badge-live { position: absolute; top: 10px; left: 10px; }
+  .cap { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .cap strong { color: var(--text); font-weight: 500; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 6px; max-width: 60ch; }
+  .go { display: grid; gap: 8px; margin-top: 12px; }
+  .go button { text-align: left; padding: 10px 14px; }
+  .go button small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+  .go button.primary small { color: rgb(255 255 255 / .8); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .stat { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  .stat div { background: var(--surface-2); border-radius: var(--radius); padding: 8px 10px; }
+  .stat b { display: block; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .lockcard { display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: start; max-width: 620px; }
+  .lockcard .ico { width: 44px; height: 44px; border-radius: 12px; background: var(--surface-2); display: grid; place-items: center; color: var(--muted); }
+  .lockcard .ico svg { width: 22px; height: 22px; }
+  code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-2); padding: 1px 6px; border-radius: 5px; }
+
+  /* ── annotations + extras ─────────────────────────────────── */
+  .notes { margin-top: 16px; display: none; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .notes.on { display: grid; }
+  .note { background: var(--note); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 13px; }
+  .note b { display: block; font-weight: 600; margin-bottom: 3px; }
+  .extras { margin-top: 34px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .extras h3 { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+  .qrow { display: grid; grid-template-columns: 26px 1fr auto auto; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .qrow:last-child { border-bottom: none; }
+  .qrow .t { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .qrow .k { color: var(--muted); }
+  .qrow svg { width: 16px; height: 16px; color: var(--muted); }
+  .qrow.live-row { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .qrow.live-row svg { color: var(--accent); }
+  .poster { width: 26px; height: 26px; border-radius: 4px; background: linear-gradient(160deg, #4b7bd6, #d66aa3); }
+  .poster.b { background: linear-gradient(160deg, #2e8a6d, #cbe07a); }
+  .qrow .rm { color: var(--muted); }
+  .qrow .rm:hover { color: var(--danger); }
+
+  @media (max-width: 860px) {
+    .frame { grid-template-columns: 1fr; grid-template-rows: auto auto; }
+    aside { display: none; }
+    footer { grid-column: 1; }
+    .two { grid-template-columns: 1fr; }
+    .frow { grid-template-columns: 1fr; }
+    .fright { justify-content: flex-start; }
+  }
+</style>
+
+<div class="wrap">
+  <div class="intro">
+    <h1>Capture — the screen-sharing page, in every state</h1>
+    <p class="muted">A new sidebar item next to Studio. One card, always in the same place; only its state changes. A share is its own broadcast — never queued behind media, never beside it. Built 7 Sep 2026; this page is the design it was built to. Switch states below.</p>
+  </div>
+
+  <div class="states" role="tablist" aria-label="Page state">
+    <button data-state="insecure" role="tab">1 · Insecure address</button>
+    <button data-state="idle" role="tab">2 · Idle</button>
+    <button data-state="armed" role="tab">3 · Screen picked</button>
+    <button data-state="live" role="tab">4 · On air</button>
+    <button data-state="other" role="tab">5 · Shared from another panel</button>
+  </div>
+
+  <div class="frame">
+    <aside>
+      <div class="brand"><span class="mark"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>Streamerr</div>
+      <div class="status"><span class="onair live"><span class="dot live"></span>On air</span><span class="speed">0.99×</span></div>
+      <div class="bufrow"><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,12 10,10 20,13 30,11 40,12 50,9 60,12 70,11 80,13 90,10 100,12"/></svg><span>15s</span></div>
+      <div id="sidechip" class="chip" hidden><svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg>Sharing screen</div>
+      <nav>
+        <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H4zM2 19h20"/></svg>Library</a>
+        <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Schedule<span class="badge">4</span></a>
+        <a href="#" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/><circle cx="17" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>Capture</a>
+        <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v12H4zM9 20h6M12 16v4"/></svg>Studio</a>
+        <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19 12l2-1-2-4-2 1-3-2V3h-4v3L7 8 5 7 3 11l2 1-2 1 2 4 2-1 3 2v3h4v-3l3-2 2 1 2-4z"/></svg>Settings</a>
+      </nav>
+    </aside>
+
+    <main>
+      <!-- 1 · insecure -->
+      <section class="page" data-page="insecure">
+        <div class="head"><h1>Capture</h1></div>
+        <div class="card lockcard">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+          <div style="display:grid; gap:10px;">
+            <h2 style="font-size:18px; font-weight:600;">Screen sharing needs a secure address</h2>
+            <p class="muted">Browsers only allow screen sharing on an <strong>https</strong> page. You are on <code>http://192.168.178.186:8099</code>. Streamerr can serve a secure address itself — no proxy, no certificate to buy.</p>
+            <div class="row">
+              <button class="primary">Turn on secure address</button>
+              <span class="small muted">Then open <code>https://192.168.178.186:8443</code> and accept the certificate once.</span>
+            </div>
+            <p class="small muted">Already behind a proxy with a certificate? Open the panel through it and this page works as is.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2 · idle -->
+      <section class="page" data-page="idle">
+        <div class="head"><h1>Capture</h1></div>
+        <p class="lede">Put a screen or window on the broadcast. It is its own broadcast: nothing else plays while it is on, Pause puts up a card, and overlays from the Studio are drawn on it.</p>
+        <div class="card center-card">
+          <button class="primary big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>Share screen</button>
+          <p class="muted small">Your browser will ask which screen or window. Viewers see it as soon as it reaches them — there is <strong>no delay</strong> by default; add a few seconds of slack under Timing if the stream stutters.</p>
+        </div>
+        <div class="settings">
+          <div class="field"><label for="a1">Audio</label><select id="a1"><option>What the picker gives</option><option>Microphone</option><option>Both</option><option>None</option></select></div>
+          <div class="field"><label for="a2">Quality</label><select id="a2"><option>Balanced · 8 Mb/s</option><option>Sharp · 12 Mb/s (text, code)</option><option>Light · 4 Mb/s (remote)</option></select></div>
+          <div class="field"><label for="a3">Frame rate</label><select id="a3"><option>30</option><option>60 · costs the box more</option></select></div>
+          <div class="field"><label for="a5">Timing</label><select id="a5"><option>No delay</option><option>2 s of slack</option><option>5 s of slack</option><option>15 s — smoothest</option></select></div>
+          <div class="field"><label for="a4">When sharing ends</label><select id="a4"><option>End the broadcast</option><option>Hold with a card for 5 min, then end</option></select></div>
+        </div>
+      </section>
+
+      <!-- 3 · armed -->
+      <section class="page" data-page="armed">
+        <div class="head"><h1>Capture</h1><span class="pill">Screen picked — not on air yet</span></div>
+        <div class="two">
+          <div>
+            <div class="preview">
+              <div class="win" style="left:6%; top:8%; width:58%; height:70%;"><div class="bar"><i></i><i></i><i></i></div><div class="lines"><b style="width:60%"></b><b style="width:80%"></b><b style="width:45%"></b><b style="width:72%"></b><b style="width:30%"></b><b style="width:66%"></b></div></div>
+              <div class="win code" style="left:48%; top:22%; width:46%; height:62%;"><div class="bar"><i></i><i></i><i></i></div><div class="lines"><b style="width:40%"></b><b style="width:70%"></b><b style="width:55%"></b><b style="width:82%"></b><b style="width:35%"></b><b style="width:64%"></b><b style="width:48%"></b></div></div>
+              <div class="taskbar"></div>
+            </div>
+            <div class="cap"><strong>Monitor 2</strong><span>2560×1440</span><span>30 fps</span><span>no audio</span></div>
+            <p class="hint">Linux doesn't share system audio for a monitor. Choose <strong>Microphone</strong> and pick the “Monitor of …” device to send what you hear.</p>
+          </div>
+          <div class="card">
+            <div class="field"><label for="ttl">What are you showing?</label><input id="ttl" value="Alex's screen"></div>
+            <p class="small muted" style="margin-top:6px;">Shown in the transport bar, to viewers, and as <code>{title}</code> in Studio captions.</p>
+            <div class="go">
+              <button class="primary" disabled>Go live<small>A broadcast is on air — stop it first. A screen share never runs alongside media.</small></button>
+              <button>Stop the broadcast</button>
+            </div>
+            <div class="row" style="margin-top:12px; justify-content:space-between;">
+              <button>Cancel</button>
+              <span class="small muted">Releases the screen.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4 · live -->
+      <section class="page" data-page="live">
+        <div class="head"><h1>Capture</h1><span class="pill live"><span class="dot live"></span>LIVE · 12:34</span></div>
+        <div class="two">
+          <div>
+            <div class="preview">
+              <div class="win" style="left:6%; top:8%; width:58%; height:70%;"><div class="bar"><i></i><i></i><i></i></div><div class="lines"><b style="width:60%"></b><b style="width:80%"></b><b style="width:45%"></b><b style="width:72%"></b><b style="width:30%"></b><b style="width:66%"></b></div></div>
+              <div class="win code" style="left:48%; top:22%; width:46%; height:62%;"><div class="bar"><i></i><i></i><i></i></div><div class="lines"><b style="width:40%"></b><b style="width:70%"></b><b style="width:55%"></b><b style="width:82%"></b><b style="width:35%"></b><b style="width:64%"></b><b style="width:48%"></b></div></div>
+              <div class="taskbar"></div>
+              <span class="pill live badge-live"><span class="dot live"></span>LIVE</span>
+            </div>
+            <div class="cap"><strong>Monitor 2</strong><span>2560×1440 → 1920×1080</span><span>30 fps</span><span>microphone</span></div>
+            <p class="hint">This is your screen as the browser sends it. The floating preview shows what viewers get, overlays included.</p>
+            <div class="stat">
+              <div><b>7.9 Mb/s</b><span>sending</span></div>
+              <div><b>0.2 s</b><span>backlog</span></div>
+              <div><b>1.00×</b><span>box keeps up</span></div>
+              <div><b>0.0 s</b><span>held at the box</span></div>
+            </div>
+          </div>
+          <div class="card" style="display:grid; gap:10px;">
+            <div class="field"><label for="ttl2">Title</label><input id="ttl2" value="Alex's screen"></div>
+            <div class="row" style="margin-top:4px;">
+              <button><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px; margin-right:6px;"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>Pause</button>
+              <span class="small muted">Viewers see “Back in a moment” — use it when you need a moment off screen.</span>
+            </div>
+            <div class="row">
+              <button class="danger">Stop sharing</button>
+              <span class="small muted">Ends the broadcast.</span>
+            </div>
+            <p class="small muted">Stopping from your browser's own “Stop sharing” bar does the same thing.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5 · other panel -->
+      <section class="page" data-page="other">
+        <div class="head"><h1>Capture</h1><span class="pill live"><span class="dot live"></span>LIVE · 12:34</span></div>
+        <div class="card lockcard">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></div>
+          <div style="display:grid; gap:10px;">
+            <h2 style="font-size:18px; font-weight:600;">Alex's screen is on air from another browser</h2>
+            <p class="muted">Chrome on <strong>alex-desktop</strong> is sharing Monitor 2 at 30 fps. The picture itself is only available there; this panel can pause or stop it.</p>
+            <div class="row"><button>Pause</button><button class="danger">Stop sharing</button></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="seek" id="seek"><div class="cached" style="width:40%"></div><div class="fill" style="width:32%"></div></div>
+      <div class="frow">
+        <div class="np">
+          <p class="title" id="ft">Neon Harbor — S1E1</p>
+          <p class="small muted" id="fs">6:40 / 20:50 · next: Neon Harbor — S1E2</p>
+        </div>
+        <div class="ctl">
+          <button class="ic" id="b1" title="Back 30 seconds"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg></button>
+          <button class="ic play" title="Pause"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></button>
+          <button class="ic" id="b2" title="Forward 30 seconds"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg></button>
+          <button class="ic" title="Skip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5v14l9-7zM16 5h3v14h-3z"/></svg></button>
+        </div>
+        <div class="fright">
+          <span class="health" id="fh" hidden title="Sending 7.9 Mb/s · 0.2 s backlog · 30 fps · the box keeps up at 1.00×"><span class="dot live"></span>7.9 Mb/s · no delay</span>
+          <button>Audio &amp; subs</button>
+          <button class="danger">Stop</button>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- annotations per state -->
+  <div class="notes" data-notes="insecure">
+    <div class="note"><b>Never a dead button</b>The browser hides screen sharing on plain http. Instead of a button that does nothing, the page explains and offers the fix.</div>
+    <div class="note"><b>Self-served https</b>Streamerr generates a certificate and listens on 8443. No proxy needed; the public VPS route would hairpin the capture through the home upload.</div>
+    <div class="note"><b>Decided by <code>isSecureContext</code></b>One check picks this state. Behind a proper proxy the page never shows it.</div>
+  </div>
+  <div class="notes" data-notes="idle">
+    <div class="note"><b>One action</b>Share screen. The browser's own picker chooses the surface; we open it on monitors first and hide the Streamerr tab from the list.</div>
+    <div class="note"><b>The delay is said up front</b>No delay by default, and the page says what that costs. Slack is a Timing choice, never a surprise.</div>
+    <div class="note"><b>Settings in a plain row</b>Audio, quality, frame rate, and what happens when sharing ends. Defaults work; nothing has to be touched.</div>
+  </div>
+  <div class="notes" data-notes="armed">
+    <div class="note"><b>See it before viewers do</b>The picked stream plays locally at zero cost. Wrong monitor? Cancel and pick again.</div>
+    <div class="note"><b>Armed, not live</b>One way in: Go live. It is refused, with the reason, while anything else is on air — a share is its own broadcast. The screen stays picked meanwhile.</div>
+    <div class="note"><b>The audio truth</b>The caption says “no audio” and why, with the fix, rather than letting the operator find out from a viewer.</div>
+  </div>
+  <div class="notes" data-notes="live">
+    <div class="note"><b>Transport bar</b>Red-free: LIVE uses the panel's on-air green. Elapsed time instead of a duration; ±30 s disabled because there is nothing to seek in. Pause and Skip work as always.</div>
+    <div class="note"><b>Health in one line</b>Sending rate, backlog, whether the box keeps up, and how far behind viewers are. Amber when the backlog grows, red when the box falls under 1×.</div>
+    <div class="note"><b>Pause is the shield</b>The existing hold card, relabelled “Back in a moment”. Resume re-attaches to the live feed. No new control to learn.</div>
+    <div class="note"><b>Sidebar chip</b>“Sharing screen” under the on-air badge, visible from every page — the operator will be in the Studio dragging overlays.</div>
+  </div>
+  <div class="notes" data-notes="other">
+    <div class="note"><b>Phone or second panel</b>The picture lives in the sharing browser; every other panel sees status and can pause or stop. Stop closes the socket; the sharing tab tears down on its own.</div>
+    <div class="note"><b>Named, not numbered</b>Which browser, which machine, which monitor — enough to know it is yours.</div>
+  </div>
+
+  <div class="extras">
+    <div>
+      <h3>Schedule row — a screen between two episodes</h3>
+      <div class="card" style="padding:4px 0;">
+        <div class="qrow"><span class="poster"></span><span>Neon Harbor — S1E1 <span class="k">· Arrival</span></span><span class="t">20:50</span><span class="rm">✕</span></div>
+        <div class="qrow live-row"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>Alex's screen <span class="k">· from Chrome on alex-desktop</span></span><span class="t">live</span><span class="rm">✕</span></div>
+        <div class="qrow"><span class="poster b"></span><span>Neon Harbor — S1E2 <span class="k">· Undertow</span></span><span class="t">21:04</span><span class="rm">✕</span></div>
+      </div>
+      <p class="small muted" style="margin-top:8px;">Reorder and remove like any item. It cannot be pinned to a clock time before a browser is holding the stream.</p>
+    </div>
+    <div>
+      <h3>Hold card while paused</h3>
+      <div class="preview" style="background:#000; display:grid; place-items:center;">
+        <span style="color:#fff; font-size:clamp(14px, 2.2vw, 24px); letter-spacing:.02em;">Back in a moment</span>
+      </div>
+      <p class="small muted" style="margin-top:8px;">The engine's existing hold card with a different label. While it is up the feed keeps buffering and drops the backlog on resume, so viewers never see what happened off screen.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  const buttons = document.querySelectorAll('.states button');
+  const pages = document.querySelectorAll('.page');
+  const notes = document.querySelectorAll('.notes');
+  const ft = document.getElementById('ft'), fs = document.getElementById('fs'), fh = document.getElementById('fh');
+  const seek = document.getElementById('seek'), chip = document.getElementById('sidechip');
+  const b1 = document.getElementById('b1'), b2 = document.getElementById('b2');
+  function show(state) {
+    buttons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.state === state)));
+    pages.forEach((p) => p.classList.toggle('on', p.dataset.page === state));
+    notes.forEach((n) => n.classList.toggle('on', n.dataset.notes === state));
+    const live = state === 'live' || state === 'other';
+    chip.hidden = !live;
+    fh.hidden = !live;
+    b1.disabled = live; b2.disabled = live;
+    seek.style.visibility = live ? 'hidden' : 'visible';
+    if (live) {
+      ft.innerHTML = 'Alex’s screen <span class="pill live"><span class="dot live"></span>LIVE</span>';
+      fs.textContent = '12:34 elapsed · 7.9 Mb/s · no delay';
+    } else {
+      ft.textContent = 'Neon Harbor — S1E1';
+      fs.textContent = '6:40 / 20:50 · next: Neon Harbor — S1E2';
+    }
+    try { localStorage.setItem('capture-mock-state', state); } catch {}
+  }
+  buttons.forEach((b) => b.addEventListener('click', () => show(b.dataset.state)));
+  let initial = 'armed';
+  try { initial = localStorage.getItem('capture-mock-state') || initial; } catch {}
+  const fromHash = location.hash.replace('#', '');
+  if (fromHash) initial = fromHash;
+  // ?theme=light|dark previews the other theme without touching the viewer's setting.
+  const theme = new URLSearchParams(location.search).get('theme');
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  if (![...buttons].some((b) => b.dataset.state === initial)) initial = 'armed';
+  show(initial);
+</script>

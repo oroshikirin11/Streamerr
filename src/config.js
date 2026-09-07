@@ -28,7 +28,31 @@ const CONFIG_PATH = configEnv
 export const CONFIG_DIR = dirname(CONFIG_PATH);
 
 const DEFAULTS = {
-  server: { port: 8099, host: '0.0.0.0' },
+  server: {
+    port: 8099,
+    host: '0.0.0.0',
+    /**
+     * The panel's own https listener (src/tls.js). Screen sharing needs a
+     * secure context, and a plain LAN address is not one; with this on the
+     * service serves https itself on `port` with a certificate it
+     * generates and keeps beside the config.
+     */
+    tls: { enabled: false, port: 8443 },
+  },
+  /**
+   * Screen sharing from the panel — see src/capture.js for what each key
+   * means. A share is its own broadcast: never queued with media, never
+   * mixed with it.
+   */
+  capture: {
+    delaySeconds: 0,
+    passthrough: true,
+    quality: 'balanced',
+    fps: 30,
+    audio: 'auto',
+    onEnd: 'end',
+    holdMinutes: 5,
+  },
   /**
    * Where the broadcast goes. Credentials sit in a slot PER PROTOCOL so
    * switching between them never discards the other set — see publish.js.

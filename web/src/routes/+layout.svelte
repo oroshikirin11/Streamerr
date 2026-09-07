@@ -132,6 +132,19 @@
   const paused = $derived(stream.status === 'paused');
   /** Pre-show countdown card on air: wall-clock time, nothing to seek in. */
   const counting = $derived(Boolean(stream.playing?.countdown));
+  /** A screen share on air: no duration, nothing to seek in, no tracks to switch. */
+  const isLive = $derived(Boolean(stream.playing?.live));
+  const capSession = $derived(stream.capture?.session ?? null);
+  const capHealth = $derived.by(() => {
+    const s = capSession;
+    if (!s || s.state !== 'live') return '';
+    const k = s.health?.kbps;
+    const rate = k == null ? '' : k >= 1000 ? `${(k / 1000).toFixed(1)} Mb/s` : `${Math.round(k)} kb/s`;
+    const d = stream.capture?.settings?.delaySeconds ?? 0;
+    return [rate, d > 0 ? `viewers ${d} s back` : 'no delay'].filter(Boolean).join(' · ');
+  });
+  const capWarn = $derived(Boolean(capSession?.health?.bufferedAmount > 4_000_000)
+    || (speed != null && isLive && parseFloat(speed) < 0.9));
   /** Server-side switch (Settings) — hides the preview everywhere when off. */
   const previewAllowed = $derived(live && stream.preview !== false);
 
@@ -272,6 +285,9 @@
         if (msg.payload.status === 'stopped') bufPts = [];
       } else if (msg.type === 'schedule') {
         tonight = msg.payload.tonight ?? tonight;
+      } else if (msg.type === 'capture') {
+        // The share's health tick: small and frequent, so it travels alone.
+        stream.capture = msg.payload;
       } else if (msg.type === 'progress') {
         syncPosition(msg.payload.position);
         speed = msg.payload.speed;
@@ -436,6 +452,7 @@
   const nav = $derived([
     { href: '/', label: 'Library', icon: 'M4 5h16v11H4zM2 19h20' },
     { href: '/queue', label: 'Schedule', icon: 'M4 6h16M4 12h16M4 18h10' },
+    { href: '/capture', label: 'Capture', icon: 'M3 5h18v11H3zM8 20h8M12 16v4M17 8.5h.01' },
     { href: '/studio', label: 'Studio', icon: 'M4 4h16v12H4zM9 20h6M12 16v4' },
     ...(devMode ? [{ href: '/console', label: 'Console', icon: 'M4 5h16v14H4zM7 9l3 3-3 3M12 15h5' }] : []),
     { href: '/settings', label: 'Settings', icon: 'M12 15a3 3 0 100-6 3 3 0 000 6zM19 12l2-1-2-4-2 1-3-2V3h-4v3L7 8 5 7 3 11l2 1v0l-2 1 2 4 2-1 3 2v3h4v-3l3-2 2 1 2-4-2-1z' },
@@ -514,12 +531,23 @@
       <!-- A receiver room in relay mode holds this broadcast to H.264 SDR. -->
       <div class="relayline"><span class="relaytag" title={`${stream.relayRooms.join(', ')}: held to H.264 SDR for VRChat players`}>H.264 relay</span></div>
     {/if}
+    {#if capSession}
+      <!-- A screen picked or on air: visible from every page, since the
+           operator will be in the Studio while sharing. -->
+      <a class="capchip" class:on={capSession.state === 'live'} href="/capture" title={`${capSession.sender?.ua ?? 'A browser'} · ${capSession.title}`}>
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg>
+        {capSession.state === 'live' ? 'Sharing screen' : 'Screen picked'}
+      </a>
+    {/if}
   {/snippet}
   {#snippet bufBlock()}
     <!-- One sample is enough to show the figure; the line fills in behind
          it. Gating on two hid the row entirely whenever the axis had just
          changed, because that clears the history back to a single point. -->
-    {#if live && !counting && !paused && bufPts.length > 0}
+    <!-- A share with no delay holds nothing by design: a red "0s" there
+         would be an alarm about the setting the operator chose. -->
+    {#if live && !counting && !paused && bufPts.length > 0
+      && !(isLive && (stream.capture?.settings?.delaySeconds ?? 0) === 0)}
       <!-- Encoded-but-unaired reserve: the slack the broadcast can spend
            before a slow scene shows on air. -->
       <div class="bufrow"
@@ -642,12 +670,18 @@
               <p class="title">
                 {stream.playing.title}
                 {#if paused}<span class="pill" title={byViewers && stream.lastVote?.by?.length ? `Voted by ${stream.lastVote.by.join(', ')}` : undefined}>{byViewers ? `Paused by viewers${voteTally ? ` · ${voteTally}` : ''}` : 'Paused'}</span>
+                {:else if isLive}<span class="pill livepill"><span class="ldot"></span>LIVE</span>
                 {:else if preparing}<span class="pill">Preparing subtitles…</span>{/if}
               </p>
               <p class="muted small">
                 {#if counting}
                   live in {fmtTime(Math.max(0, (stream.playing.duration ?? 0) - position))}
                   {#if stream.queue?.length} · first up: {stream.queue[0].title}{/if}
+                {:else if isLive}
+                  {fmtTime(position)} elapsed{#if capHealth}&nbsp;· {capHealth}{/if}
+                  {#if pending}
+                    <span class="pend" class:flash={pendFlash} role="status"><i class="spin" aria-hidden="true"></i>{pendText}</span>
+                  {/if}
                 {:else}
                   {fmtTime(position)}
                   {#if stream.playing.duration} / {fmtTime(stream.playing.duration)}{/if}
@@ -660,7 +694,7 @@
           </div>
 
           <div class="ctl">
-            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl || preparing || counting} title="Back 30 seconds" aria-label="Back 30 seconds">
+            <button class="ic" onclick={() => skip(-30)} disabled={busyCtl || preparing || counting || isLive} title={isLive ? 'Live — nothing to seek in' : 'Back 30 seconds'} aria-label="Back 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M11 19a7 7 0 1 0-6.9-8.5M4 4v6h6"/></svg><span class="tiny">30</span>
             </button>
             <button class="ic play" onclick={togglePause} disabled={busyCtl || preparing} title={paused ? 'Resume' : 'Pause'} aria-label={paused ? 'Resume' : 'Pause'}>
@@ -670,7 +704,7 @@
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
               {/if}
             </button>
-            <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing || counting} title="Forward 30 seconds" aria-label="Forward 30 seconds">
+            <button class="ic" onclick={() => skip(30)} disabled={busyCtl || preparing || counting || isLive} title={isLive ? 'Live — nothing to seek in' : 'Forward 30 seconds'} aria-label="Forward 30 seconds">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M13 19a7 7 0 1 1 6.9-8.5M20 4v6h-6"/></svg><span class="tiny">30</span>
             </button>
             <button class="ic" onclick={nextClip} disabled={busyCtl || (!pending && !stream.queue?.length)} class:pending={Boolean(pending)}
@@ -706,7 +740,12 @@
             {/if}
             <!-- The icons only show on a phone, where the two buttons are
                  icon-over-label to fit beside the transport controls. -->
-            <button class="fb" onclick={openTracks} disabled={busyCtl || preparing} title="Audio &amp; subtitles">
+            {#if isLive && capHealth}
+              <span class="caphealth" class:warn={capWarn} title="What the sharing browser reports: its sending rate, and how far behind viewers are">
+                <span class="ldot" class:warn={capWarn}></span>{capHealth}
+              </span>
+            {/if}
+            <button class="fb" onclick={openTracks} disabled={busyCtl || preparing || isLive} title={isLive ? 'A screen share has no tracks to switch' : 'Audio &amp; subtitles'}>
               <svg class="bi" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h18v14H3zM7 15h4M14 15h3"/></svg>
               <span>Audio &amp; subs</span>
             </button>
@@ -965,6 +1004,23 @@
     color: #c98a2e;
   }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); flex-shrink: 0; }
+  /* The screen-share chip under the on-air badge, and the LIVE pill. */
+  .capchip {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+    font-size: 12px; padding: 4px 9px; border-radius: 99px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); text-decoration: none;
+  }
+  .capchip.on { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); color: var(--success); }
+  .capchip:hover { border-color: var(--muted); }
+  .livepill { background: color-mix(in srgb, var(--success) 18%, transparent) !important; color: var(--success) !important; display: inline-flex; align-items: center; gap: 5px; letter-spacing: .04em; }
+  .ldot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); animation: pulse 2s ease-in-out infinite; flex-shrink: 0; }
+  .ldot.warn { background: #d9a13a; animation: none; }
+  .caphealth {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted);
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 99px;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .caphealth.warn { border-color: #d9a13a; color: #d9a13a; }
   .dot.live { background: var(--success); animation: pulse 2s ease-in-out infinite; }
   .dot.prep { background: #c98a2e; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse {
