@@ -289,6 +289,7 @@
         </div>
       {:else}
         <p class="hint">Nothing is on air yet. The screen stays picked until you go live or cancel — you can place overlays in the Studio meanwhile.</p>
+        <p class="hint">Sending {fmtKbps(cap.sending.kbps)} · {Math.round(cap.sending.bytes / 1024)} KB so far · the box has {feedInfo ? `${Math.round((feedInfo.bytesIn ?? 0) / 1024)} KB${serverSession?.codec ? ` of ${serverSession.codec.toUpperCase()}` : ', no video header yet'}` : 'nothing yet'}.</p>
       {/if}
     </div>
 

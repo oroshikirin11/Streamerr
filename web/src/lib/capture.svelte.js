@@ -297,6 +297,20 @@ export async function goLive() {
   cap.busy = 'go';
   cap.error = '';
   try {
+    // The recording reaches the box a moment after the picker closes. Wait
+    // for its first video rather than refuse, and if nothing comes, say
+    // which side is silent: this browser, or the box.
+    const t0 = Date.now();
+    for (;;) {
+      const st = await api.get('/api/capture');
+      if (st?.session?.feed?.bytesIn > 0 && st.session.codec) break;
+      if (Date.now() - t0 > 10_000) {
+        throw new Error(cap.sending.bytes === 0
+          ? 'Your browser is not producing a recording of the picked screen — nothing has been sent in ten seconds. Cancel, make sure the shared screen or window is visible, and pick again.'
+          : `The box received ${Math.round(cap.sending.bytes / 1024)} KB but no video yet — the recording may be in a format it cannot read (${cap.mime || 'unknown'}). Cancel and try another browser.`);
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
     const r = await api.post('/api/capture/go');
     if (r?.capture) cap.server = r.capture;
     cap.phase = 'live';
