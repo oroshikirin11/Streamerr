@@ -53,8 +53,7 @@ const LONG = MODE === 'long';
 // only subtitle, so SUBS=1 takes the bitmap path and its sidecar.
 const PGS = MODE === 'pgs';
 const HEVC = MODE === 'hevc' || PASS || LONG || PGS;
-// FIXTURE=name.mkv overrides the file (dense.mkv: a cue every two seconds, for the partial-subtitle path).
-const srcPath = FX + (process.env.FIXTURE || (LONG ? 'longgop.mkv' : PASS ? 'hevcsub-e1.mkv' : PGS ? 'fixture-pgs.mkv' : 'fixture.mkv'));
+const srcPath = FX + (LONG ? 'longgop.mkv' : PASS ? 'hevcsub-e1.mkv' : PGS ? 'fixture-pgs.mkv' : 'fixture.mkv');
 const tracks = await probeTracks(srcPath);
 const subs = await listSubtitles(srcPath, tracks);
 const selection = selectTracks(tracks, subs, {});

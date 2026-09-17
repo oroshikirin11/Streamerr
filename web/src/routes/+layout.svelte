@@ -671,8 +671,7 @@
                 {stream.playing.title}
                 {#if paused}<span class="pill" title={byViewers && stream.lastVote?.by?.length ? `Voted by ${stream.lastVote.by.join(', ')}` : undefined}>{byViewers ? `Paused by viewers${voteTally ? ` · ${voteTally}` : ''}` : 'Paused'}</span>
                 {:else if isLive}<span class="pill livepill"><span class="ldot"></span>LIVE</span>
-                {:else if preparing}<span class="pill">Preparing subtitles…</span>
-                {:else if stream.subsLoading}<span class="pill" title="The first playback of a file reads its subtitle track once in full. Subtitles show from the part already read and refresh as the read goes on.">Subtitles extracting · {stream.subsLoading.percent}%</span>{/if}
+                {:else if preparing}<span class="pill">Preparing subtitles…</span>{/if}
               </p>
               <p class="muted small">
                 {#if counting}

@@ -47,7 +47,6 @@ import {
   gpuMovable, splitStaticImages, staticLayerArgs, isMoving, animBakeArgs, BAKE_MAX_WIDTH,
 } from './overlay-image.js';
 import { publishOutputArgs, targetUrl, SECRET_FIELDS } from '../publish.js';
-import { partialInfo, partialSnapshot, dropSnapshots } from './subcache.js';
 import { TcpBridge } from './tcp-bridge.js';
 
 /**
@@ -346,11 +345,6 @@ export const PREFETCH_DEPTH = Number(process.env.STREAMERR_PREFETCH_DEPTH) > 0
 /** How often the publisher's stats line reaches the console. */
 const PUBLISHER_STAT_MS = 20_000;
 const BANK_SECONDS = 15;
-/** A clip playing from a partial track refreshes when the playhead gets
- *  this close to what the snapshot covers. */
-const PARTIAL_LEAD = 20;
-/** And never more often than this: every refresh is a cushion-kept respawn. */
-const PARTIAL_MIN_INTERVAL_MS = 20_000;
 /** Widest the cushion may be configured, in seconds. */
 export const BANK_SECONDS_MAX = 60;
 
@@ -901,26 +895,28 @@ export class PipelinePlayout extends EventEmitter {
     this._fillDurations();
 
     const first = this.queue.shift();
-    /**
-     * A subtitle track that lives inside the container is EXTRACTED to a
-     * small file once (cached by size+mtime), never read by the subtitles
-     * filter from the media file: that filter demuxes the whole remux
-     * before its first frame, which on a big file is minutes, and which
-     * used to overrun the receiver's silence deadline into an endless
-     * respawn loop.
-     *
-     * The first clip of a broadcast used to BLOCK here until the extraction
-     * was done — eight minutes of "preparing" on a 4K remux before anything
-     * aired. It now goes live at once exactly the way a mid-broadcast track
-     * switch and every later queued clip already do: _play spawns the clip
-     * without the track, the extraction runs alongside, and a cushion-kept
-     * respawn takes the track on the moment it lands. The first minutes of
-     * a never-played file air unsubtitled; the panel says so and shows the
-     * extraction's progress. Every later broadcast of that file starts with
-     * the track from the cache.
-     */
-    await this.prepare(first);
-    if (this._stopping) return this._abortStart();
+    // If the chosen subtitle lives inside the container and no extracted copy
+    // exists, extract it BEFORE connecting. The subtitles filter reads the
+    // ENTIRE file during its init before producing one frame — minutes on a
+    // big remux — which overruns both Owncast's 10s silence deadline and the
+    // watchdog's grace, guaranteeing an endless respawn loop. Extraction
+    // costs the same single read but happens off-air, once ever: the result
+    // is cached on disk keyed by size+mtime.
+    if (this._needsExtraction(first)) {
+      this.status = 'preparing';
+      this.current = { item: first, offset: 0, duration: first.duration ?? null };
+      this.emit('status', this.status);
+      const t0 = Date.now();
+      this.emit('log', '[subs] extracting subtitles before going live — '
+        + 'first playback of a file reads it once in full\n');
+      await this._extract(first);
+      this.emit('log', `[subs] prepared in ${((Date.now() - t0) / 1000).toFixed(0)}s\n`);
+      // The user may have hit Stop while the extraction ran.
+      if (this._stopping) return this._abortStart();
+    } else {
+      await this.prepare(first);
+      if (this._stopping) return this._abortStart();
+    }
     // Warm before connecting: Owncast drops a session that is silent for its
     // first 10s, and a cold Bluray over SMB can take longer than that to
     // open. Reading the head first means the source starts hot.
@@ -1388,9 +1384,6 @@ export class PipelinePlayout extends EventEmitter {
       // after a seek outside the cache): the panel shows the same build
       // indicator it shows before going live, for as long as the card is.
       rebuilding: Boolean(this.holding && this.scheduler),
-      // The on-air clip's subtitle track is still being extracted: it is
-      // playing without it, and this is how far the read has got.
-      subsLoading: this._subsLoading ?? null,
       // True while the on-air clip ships HDR bits (copy of an HDR file or
       // the main10 encode) — matched against the spawned argv per clip.
       hdrOnAir: Boolean(this.hdrOnAir),
@@ -1484,17 +1477,9 @@ export class PipelinePlayout extends EventEmitter {
     // and the seek is re-issued when the copy is there. Cutting the bank
     // first and spawning with the media file in the subtitles filter was
     // a dead source and a bank of stale content (Backrooms, 6 Sep).
-    const wantSeek = Math.max(0, position != null ? Number(position) : (this.position ?? 0) + Number(delta));
-    // ...unless the track can be played from its partial read: then the
-    // seek spawns like any other spawn — on a snapshot when the read
-    // covers the target, without the track until it does — and nobody
-    // waits. Only a bitmap track, which has no partial form, still waits.
-    const seekSub = this._wantedSub(this.current.item);
-    const seekKey = this._subKey(this.current.item?.srcPath, seekSub);
-    const seekPartial = seekKey ? Boolean(this._extractState?.get(seekKey)?.info) : false;
-    if (seekSub && this._needsExtraction(this.current.item, seekSub) && !seekPartial) {
+    if (this._needsExtraction(this.current.item)) {
       const item = this.current.item;
-      const want = wantSeek;
+      const want = Math.max(0, position != null ? Number(position) : (this.position ?? 0) + Number(delta));
       this._setPending('seek', { from: this._onAir().item ?? item, to: want });
       this.emit('log', `[subs] seek to ${want.toFixed(0)}s waits for the subtitle extraction\n`);
       this._detached(this._extract(item).then(() => {
@@ -4423,59 +4408,18 @@ export class PipelinePlayout extends EventEmitter {
     // silent source respawned forever). A spawn that reaches here with an
     // embedded text track not yet extracted plays WITHOUT it, extracts in
     // the background, and takes it back behind the cushion when ready.
-    let partialSubs = null;
-    const wantedSub = this._wantedSub(item);
-    if (wantedSub && this._needsExtraction(item, wantedSub)) {
-      const full = { ...this.selection, subtitle: wantedSub };
-      this._pendingSub = { item, sub: wantedSub };
-      // Start the read now if nothing has: the snapshot below needs it.
-      const extraction = this._extract(item, wantedSub);
-      partialSubs = this._partialSubs(item, offset, wantedSub);
-      if (partialSubs) {
-        this.selection = full;
-        // Subtitles from the part read so far; _partialCheck refreshes.
-        if (this._partialOnAir?.item !== item || this._partialOnAir.coveredTo !== partialSubs.coveredTo) {
-          this.emit('log', `[subs] playing from the partial extraction — ${partialSubs.coveredTo.toFixed(0)}s of the track read so far\n`);
-        }
-        this._partialOnAir = { item, coveredTo: partialSubs.coveredTo, at: Date.now() };
-      } else {
-        // Nothing readable yet (bitmap track, or the read has not reached
-        // a cue). Without the track for now; the first refresh brings it.
-        this.selection = { ...full, subtitle: null };
-        this._partialOnAir = { item, coveredTo: 0, at: 0 };
-        if (!this._warnedNoSubs || this._warnedNoSubs !== item) {
-          this._warnedNoSubs = item;
-          this.emit('warn', `${item?.title ?? 'This clip'}: subtitles are being extracted — they switch on as soon as the read has them`);
-        }
-      }
-      /**
-       * The complete track, applied once the clip is RUNNING. A small file
-       * extracts in well under the second the source takes to produce its
-       * first block, and an apply that lands during 'starting' has nothing
-       * to splice yet — it waits for the status to turn rather than giving
-       * the track up.
-       */
-      const apply = () => {
-        if (this._stopping || this.current?.item !== item) return;
-        if (this.status === 'starting' || this.status === 'preparing') {
-          this.once('status', apply);
-          return;
-        }
-        if (this.status !== 'running') return;
-        // A partial on air is replaced by the whole; a track chosen by
-        // hand meanwhile is kept.
-        if (this._pendingSub?.item !== item) return;
-        this._partialOnAir = null;
-        this._pendingSub = null;
+    if (this._needsExtraction(item)) {
+      const full = this.selection;
+      this.selection = { ...full, subtitle: null };
+      this.emit('warn', `${item?.title ?? 'This clip'}: subtitles are not extracted yet — playing without them until they are`);
+      this._detached(this._extract(item, full.subtitle).then(() => {
+        if (this._stopping || this.current?.item !== item || this.status !== 'running') return;
+        if (this.selection?.subtitle) return;   // something else chose since
         this.setSelection(full);                 // cushion-kept respawn with the subtitle
-      };
-      this._detached(extraction.then(apply), 'extracting for a clip on air');
-    } else {
-      this._partialOnAir = null;
-      if (this._pendingSub?.item === item) this._pendingSub = null;
+      }), 'extracting for a clip on air');
     }
 
-    const cached = partialSubs ?? this._cachedSubs(item.srcPath);
+    const cached = this._cachedSubs(item.srcPath);
     const clipDuration = this.current.duration;
     const v = this.selection?.video;
     if (v) {
@@ -4572,9 +4516,7 @@ export class PipelinePlayout extends EventEmitter {
        */
       // A bitmap track's extracted copy is a Matroska sidecar, not a
       // script; the band analyser reads scripts.
-      // A partial script can only describe the cues read so far; a band
-      // fitted to them could crop a later cue. Full canvas until complete.
-      subBand: (this.selection?.subtitle?.bitmap || partialSubs) ? null : this._subtitleBand(
+      subBand: this.selection?.subtitle?.bitmap ? null : this._subtitleBand(
         this.selection?.subtitle?.external
           ? this.selection.subtitle.path ?? null
           : cached?.path ?? null,
@@ -5561,14 +5503,6 @@ export class PipelinePlayout extends EventEmitter {
     if (this._extracting.has(key)) return this._extracting.get(key);
 
     const t0 = Date.now();
-    // What the engine may play from while this runs: the half-written text
-    // track (partialInfo), how far the read has got, the fonts once they
-    // are out. Deleted with the extraction.
-    const st = {
-      key, item, sub, sec: 0, startedAt: t0, fontsDir: null, snaps: 0,
-      info: partialInfo(item.srcPath, sub, this.cacheDir),
-    };
-    (this._extractState ??= new Map()).set(key, st);
     // Extraction progress doubles as the "Preparing" progress bar: out_time
     // is the position in the movie's timeline the demux has reached, so the
     // familiar seek strip fills while the one-time read runs. Only wired to
@@ -5576,27 +5510,7 @@ export class PipelinePlayout extends EventEmitter {
     // extraction of the next episode stays silent.
     let lastBeat = 0;
     let lastLog = 0;
-    let lastTick = 0;
     const onProgress = (sec) => {
-      st.sec = sec;
-      /**
-       * The track being extracted for the clip ON AIR: the panel shows how
-       * far along it is, since the clip is playing without it meanwhile.
-       * A percentage of the file, not of the clip — the read sweeps the
-       * whole container whatever the playhead does.
-       */
-      if (this.current?.item === item && this.status !== 'preparing') {
-        const dur = this.current?.duration ?? item?.duration ?? null;
-        if (dur > 0) {
-          const pct = Math.min(99, Math.round((sec / dur) * 100));
-          if (pct !== this._subsLoading?.percent) {
-            this._subsLoading = { percent: pct };
-            const now = Date.now();
-            if (now - lastTick > 2000) { lastTick = now; this.emit('status', this.status); }
-          }
-        }
-        return;
-      }
       if (this.status !== 'preparing' || this.current?.item !== item) return;
       // Only before the broadcast exists. `position` is the live playhead
       // once anything is on air, and extraction sweeps the WHOLE file in
@@ -5619,8 +5533,7 @@ export class PipelinePlayout extends EventEmitter {
     };
     const p = Promise.all([
       extractSubtitle(item.srcPath, sub, this.cacheDir, onProgress, this._abort.signal),
-      extractFonts(item.srcPath, this.cacheDir, this._abort.signal)
-        .then((d) => { st.fontsDir = d; return d; }),
+      extractFonts(item.srcPath, this.cacheDir, this._abort.signal),
     ]).then(([path, fontsDir]) => {
       if (!path) return null;
       const entry = { path, fontsDir };
@@ -5629,14 +5542,7 @@ export class PipelinePlayout extends EventEmitter {
         + `in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
       return entry;
     }).catch(() => null)
-      .finally(() => {
-        this._extracting.delete(key);
-        this._extractState?.delete(key);
-        // Snapshots outlive the extraction by a moment: a source spawned
-        // on the last one may still be initialising when this resolves.
-        setTimeout(() => dropSnapshots(st.info), 30_000).unref?.();
-        if (this._subsLoading) { this._subsLoading = null; this.emit('status', this.status); }
-      });
+      .finally(() => this._extracting.delete(key));
     this._extracting.set(key, p);
     return p;
   }
@@ -5647,71 +5553,9 @@ export class PipelinePlayout extends EventEmitter {
    * subs are composited from the main input, so neither pays the in-band
    * second read that makes waiting necessary.
    */
-  /**
-   * The chosen track for `item`, as far as its extraction has got — or null.
-   *
-   * A text track extracts in time order, so the half-written file is a
-   * complete script for everything before the read position. A snapshot
-   * of it (cut at the last whole line, its own file) is what a source can
-   * spawn on while the read continues; the read runs many times faster
-   * than playback, so the coverage races ahead of the playhead, and one
-   * or two cushion-kept respawns later the complete file takes over.
-   *
-   * `offset` is where the spawn will start: a snapshot that does not reach
-   * a few seconds past it holds nothing to show yet.
-   */
-  _partialSubs(item, offset = 0, sub = this._wantedSub(item)) {
-    const key = this._subKey(item?.srcPath, sub);
-    const st = key ? this._extractState?.get(key) : null;
-    if (!st?.info || !(st.sec > offset + 3)) return null;
-    const path = partialSnapshot(st.info, st.snaps++ % 64);
-    if (!path) return null;
-    return { path, fontsDir: st.fontsDir, coveredTo: st.sec, partial: true };
-  }
-
-  /**
-   * On every progress tick of a clip playing from a partial track: when
-   * the playhead nears the end of what that snapshot covered, respawn on a
-   * fresh one. The read outruns playback, so each refresh covers many
-   * times more than the last and two or three cover a film; the final
-   * respawn on completion is the ordinary track apply.
-   */
-  /**
-   * The track a clip is MEANT to carry: the live selection's, or — while
-   * that has been blanked because the extraction is not there yet — the
-   * one remembered for it. Keying on the live selection alone made the
-   * engine forget the track the moment it first played without it.
-   */
-  _wantedSub(item) {
-    return this.selection?.subtitle
-      ?? (this._pendingSub?.item === item ? this._pendingSub.sub : null);
-  }
-
-  _partialCheck() {
-    const p = this._partialOnAir;
-    if (!p || this.status !== 'running') return;
-    if (this.current?.item !== p.item) { this._partialOnAir = null; return; }
-    if (this.position < p.coveredTo - PARTIAL_LEAD) return;
-    if (Date.now() - (p.at ?? 0) < PARTIAL_MIN_INTERVAL_MS) return;
-    const fresh = this._partialSubs(p.item, this.position + PARTIAL_LEAD);
-    if (process.env.JSR_TRACE) {
-      const k = this._subKey(p.item?.srcPath, this._wantedSub(p.item));
-      const st = k ? this._extractState?.get(k) : null;
-      this.emit('log', `[trace] partialCheck pos=${this.position.toFixed(1)} covered=${p.coveredTo} sec=${st?.sec ?? '-'} info=${Boolean(st?.info)} fresh=${fresh ? fresh.coveredTo : 'null'}\n`);
-    }
-    if (!fresh) return;
-    this.emit('log', `[subs] the read reached ${fresh.coveredTo.toFixed(0)}s — refreshing the track behind the cushion\n`);
-    // From NO subtitles to the first snapshot the change is worth landing
-    // fast: a short runway, at the cost of a few seconds re-encoded. Later
-    // refreshes only extend coverage and take the ordinary apply point.
-    const runway = p.coveredTo > 0 ? this._applyRunway() : Math.min(this._applyRunway(), 3);
-    const { rewound, gop, resume } = this._bankCutForApply(runway);
-    if (rewound + gop > 0.05) this.emit('log', `[subs] cushion cut to ${runway.toFixed(1)}s\n`);
-    this._play(p.item, resume, { duration: this.current?.duration });
-  }
-
-  _needsExtraction(item, sub = this.selection?.subtitle) {
-    const key = this._subKey(item?.srcPath, sub);
+  _needsExtraction(item) {
+    const sub = this.selection?.subtitle;
+    const key = this._subKey(item?.srcPath);
     return Boolean(key && this.cacheDir
       && isExtractable(sub)
       && !this._subCache.has(key));
@@ -5883,7 +5727,6 @@ export class PipelinePlayout extends EventEmitter {
         if (this.current?.duration) {
           this.position = Math.min(this.position, this.current.duration);
         }
-        if (kind === 'clip' && this._partialOnAir) this._partialCheck();
       }
 
       const wall = Date.now();
