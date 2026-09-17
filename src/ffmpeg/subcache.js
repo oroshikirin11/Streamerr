@@ -14,7 +14,7 @@
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import {
-  existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync,
+  existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync,
   unlinkSync, writeFileSync,
 } from 'fs';
 import { join } from 'path';
@@ -156,6 +156,8 @@ export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null,
   const hb = HEARTBEATS[sub.codec];
   const ok = await run([
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    ...(Number(process.env.JSR_EXTRACT_READRATE) > 0
+      ? ['-readrate', String(Number(process.env.JSR_EXTRACT_READRATE))] : []),
     '-i', srcPath,
     // The heartbeat: a 16x16 clip at a few frames a second, a few dozen
     // bytes a packet. Its packets are what make sub2video re-send the
@@ -173,6 +175,11 @@ export async function extractSubtitle(srcPath, sub, cacheDir, onProgress = null,
     // out_time here is how far into the movie's TIMELINE the demux has
     // reached — exactly the number a progress bar wants.
     '-progress', 'pipe:3', '-stats_period', '2',
+    // Every cue reaches the partial file as soon as it is demuxed. A text
+    // track is tiny, and without this ffmpeg's output buffer holds the
+    // whole thing until exit — the partial file the engine plays from
+    // meanwhile (partialSnapshot) would stay empty.
+    '-flush_packets', '1',
     tmp,
   ], undefined, timeout, onProgress, signal);
 
@@ -271,4 +278,60 @@ function run(args, cwd, timeoutMs = 120_000, onProgress = null, signal = null) {
     child.on('error', () => done(false));
     child.on('close', (code) => done(code === 0 && !signal?.aborted));
   });
+}
+
+/** Text formats a half-written file of which is still a valid script. */
+const PARTIAL_TEXT = new Set(['ass', 'srt', 'vtt']);
+
+/**
+ * Where an extraction in progress writes, and whether the engine may play
+ * from it meanwhile. Null for bitmap tracks (a Matroska sidecar is not
+ * readable mid-write) and for anything not extractable.
+ */
+export function partialInfo(srcPath, sub, cacheDir) {
+  if (!isExtractable(sub)) return null;
+  const ext = EXT_FOR[sub.codec];
+  if (!PARTIAL_TEXT.has(ext)) return null;
+  try {
+    const out = join(cacheDir, `${keyFor(srcPath, sub.typeIndex)}.${ext}`);
+    return { partial: `${out}.partial`, out, ext };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A playable copy of a partially written text track: everything up to the
+ * last complete line, in its own file so the writer never races the
+ * reader. Returns null until the file holds a complete header and at
+ * least one cue. `n` rotates the name: a source still initialising on the
+ * previous snapshot must not have its file rewritten under it.
+ */
+export function partialSnapshot(info, n = 0) {
+  if (!info) return null;
+  let text;
+  try { text = readFileSync(info.partial, 'latin1'); } catch { return null; }
+  const cut = text.lastIndexOf('\n');
+  if (cut < 0) return null;
+  const body = text.slice(0, cut + 1);
+  const ok = info.ext === 'ass'
+    ? /\[Events\][\s\S]*\nDialogue:/.test(body)
+    : info.ext === 'vtt'
+      ? /^WEBVTT[\s\S]*-->/.test(body)
+      : /-->/.test(body);
+  if (!ok) return null;
+  const snap = `${info.out}.snap${n}.${info.ext}`;
+  try {
+    writeFileSync(`${snap}.tmp`, body, 'latin1');
+    renameSync(`${snap}.tmp`, snap);
+  } catch {
+    return null;
+  }
+  return snap;
+}
+
+/** Remove the snapshots an extraction left behind. */
+export function dropSnapshots(info, upTo = 64) {
+  if (!info) return;
+  for (let i = 0; i <= upTo; i++) safeUnlink(`${info.out}.snap${i}.${info.ext}`);
 }

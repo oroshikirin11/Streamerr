@@ -68,3 +68,23 @@ python3 ../make-pgs.py synth.sup 1280 720 >/dev/null
 ffmpeg -hide_banner -loglevel error -y -i hevcsub-e1.mkv -itsoffset 1 -i synth.sup \
   -map 0:v -map 0:a -map 1:s -c copy -metadata:s:s:0 language=eng fixture-pgs.mkv
 echo "  fixture-pgs.mkv $(du -h fixture-pgs.mkv | cut -f1)"
+
+# dense: fixture.mkv remuxed with a cue every two seconds — the partial-
+# subtitle path (a clip playing from a half-extracted track) needs cues
+# close enough together that coverage advances while the read runs.
+if [ ! -s dense.mkv ]; then
+  {
+    sed '/^\[Events\]/,$d' subs.ass
+    echo '[Events]'
+    echo 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
+    for i in $(seq 0 2 96); do
+      printf 'Dialogue: 0,0:%02d:%02d.00,0:%02d:%02d.80,Default,,0,0,0,,Cue %d at %ds\n' \
+        $((i/60)) $((i%60)) $(((i+1)/60)) $(((i+1)%60)) $((i/2)) $i
+    done
+  } > dense.ass
+  ffmpeg -hide_banner -loglevel error -y -i fixture.mkv -i dense.ass \
+    -map 0:v -map 0:a -map 1:s -c copy -metadata:s:s:0 language=eng dense.mkv
+  echo "  dense.mkv built"
+else
+  echo "  dense.mkv exists"
+fi
