@@ -895,28 +895,26 @@ export class PipelinePlayout extends EventEmitter {
     this._fillDurations();
 
     const first = this.queue.shift();
-    // If the chosen subtitle lives inside the container and no extracted copy
-    // exists, extract it BEFORE connecting. The subtitles filter reads the
-    // ENTIRE file during its init before producing one frame — minutes on a
-    // big remux — which overruns both Owncast's 10s silence deadline and the
-    // watchdog's grace, guaranteeing an endless respawn loop. Extraction
-    // costs the same single read but happens off-air, once ever: the result
-    // is cached on disk keyed by size+mtime.
-    if (this._needsExtraction(first)) {
-      this.status = 'preparing';
-      this.current = { item: first, offset: 0, duration: first.duration ?? null };
-      this.emit('status', this.status);
-      const t0 = Date.now();
-      this.emit('log', '[subs] extracting subtitles before going live — '
-        + 'first playback of a file reads it once in full\n');
-      await this._extract(first);
-      this.emit('log', `[subs] prepared in ${((Date.now() - t0) / 1000).toFixed(0)}s\n`);
-      // The user may have hit Stop while the extraction ran.
-      if (this._stopping) return this._abortStart();
-    } else {
-      await this.prepare(first);
-      if (this._stopping) return this._abortStart();
-    }
+    /**
+     * A subtitle track that lives inside the container is EXTRACTED to a
+     * small file once (cached by size+mtime), never read by the subtitles
+     * filter from the media file: that filter demuxes the whole remux
+     * before its first frame, which on a big file is minutes, and which
+     * used to overrun the receiver's silence deadline into an endless
+     * respawn loop.
+     *
+     * The first clip of a broadcast used to BLOCK here until the extraction
+     * was done — eight minutes of "preparing" on a 4K remux before anything
+     * aired. It now goes live at once exactly the way a mid-broadcast track
+     * switch and every later queued clip already do: _play spawns the clip
+     * without the track, the extraction runs alongside, and a cushion-kept
+     * respawn takes the track on the moment it lands. The first minutes of
+     * a never-played file air unsubtitled; the panel says so and shows the
+     * extraction's progress. Every later broadcast of that file starts with
+     * the track from the cache.
+     */
+    await this.prepare(first);
+    if (this._stopping) return this._abortStart();
     // Warm before connecting: Owncast drops a session that is silent for its
     // first 10s, and a cold Bluray over SMB can take longer than that to
     // open. Reading the head first means the source starts hot.
@@ -1384,6 +1382,9 @@ export class PipelinePlayout extends EventEmitter {
       // after a seek outside the cache): the panel shows the same build
       // indicator it shows before going live, for as long as the card is.
       rebuilding: Boolean(this.holding && this.scheduler),
+      // The on-air clip's subtitle track is still being extracted: it is
+      // playing without it, and this is how far the read has got.
+      subsLoading: this._subsLoading ?? null,
       // True while the on-air clip ships HDR bits (copy of an HDR file or
       // the main10 encode) — matched against the spawned argv per clip.
       hdrOnAir: Boolean(this.hdrOnAir),
@@ -4412,11 +4413,23 @@ export class PipelinePlayout extends EventEmitter {
       const full = this.selection;
       this.selection = { ...full, subtitle: null };
       this.emit('warn', `${item?.title ?? 'This clip'}: subtitles are not extracted yet — playing without them until they are`);
-      this._detached(this._extract(item, full.subtitle).then(() => {
-        if (this._stopping || this.current?.item !== item || this.status !== 'running') return;
+      /**
+       * Applied once the clip is RUNNING. A small file extracts in well
+       * under the second the source takes to produce its first block, and
+       * an apply that lands during 'starting' has nothing to splice yet —
+       * it waits for the status to turn rather than giving the track up.
+       */
+      const apply = () => {
+        if (this._stopping || this.current?.item !== item) return;
         if (this.selection?.subtitle) return;   // something else chose since
+        if (this.status === 'starting' || this.status === 'preparing') {
+          this.once('status', apply);
+          return;
+        }
+        if (this.status !== 'running') return;
         this.setSelection(full);                 // cushion-kept respawn with the subtitle
-      }), 'extracting for a clip on air');
+      };
+      this._detached(this._extract(item, full.subtitle).then(apply), 'extracting for a clip on air');
     }
 
     const cached = this._cachedSubs(item.srcPath);
@@ -5510,7 +5523,26 @@ export class PipelinePlayout extends EventEmitter {
     // extraction of the next episode stays silent.
     let lastBeat = 0;
     let lastLog = 0;
+    let lastTick = 0;
     const onProgress = (sec) => {
+      /**
+       * The track being extracted for the clip ON AIR: the panel shows how
+       * far along it is, since the clip is playing without it meanwhile.
+       * A percentage of the file, not of the clip — the read sweeps the
+       * whole container whatever the playhead does.
+       */
+      if (this.current?.item === item && this.status !== 'preparing') {
+        const dur = this.current?.duration ?? item?.duration ?? null;
+        if (dur > 0) {
+          const pct = Math.min(99, Math.round((sec / dur) * 100));
+          if (pct !== this._subsLoading?.percent) {
+            this._subsLoading = { percent: pct };
+            const now = Date.now();
+            if (now - lastTick > 2000) { lastTick = now; this.emit('status', this.status); }
+          }
+        }
+        return;
+      }
       if (this.status !== 'preparing' || this.current?.item !== item) return;
       // Only before the broadcast exists. `position` is the live playhead
       // once anything is on air, and extraction sweeps the WHOLE file in
@@ -5542,7 +5574,10 @@ export class PipelinePlayout extends EventEmitter {
         + `in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
       return entry;
     }).catch(() => null)
-      .finally(() => this._extracting.delete(key));
+      .finally(() => {
+        this._extracting.delete(key);
+        if (this._subsLoading) { this._subsLoading = null; this.emit('status', this.status); }
+      });
     this._extracting.set(key, p);
     return p;
   }

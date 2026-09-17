@@ -954,6 +954,7 @@ function streamStatus() {
     cachedAhead: s.cachedAhead ?? 0,
     cachedBehind: s.cachedBehind ?? 0,
     rebuilding: s.rebuilding ?? false,
+    subsLoading: s.subsLoading ?? null,
     tracks: s.tracks ?? null,
     preview: previewEnabled(),
   };
